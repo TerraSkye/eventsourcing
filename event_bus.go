@@ -36,7 +36,7 @@ func (b *eventBus) Dispatch(ctx context.Context, event Event) error {
 	// Start a new tracing span, linking it to the incoming context
 	ctx, span := b.tracer.Start(ctx, "cqrs.event.bus.dispatch",
 		trace.WithAttributes(
-			attribute.String("event.aggregate_id", event.AggregateID().String()),
+			attribute.String("event.aggregate_id", event.AggregateID()),
 			attribute.String("event.type", TypeName(event)),
 		),
 	)
@@ -61,7 +61,7 @@ func (b *eventBus) Dispatch(ctx context.Context, event Event) error {
 				handlerCtx, handlerSpan := b.tracer.Start(ctx, "cqrs.event.handler.process",
 					trace.WithAttributes(
 						attribute.String("handler.name", h.HandlerName()),
-						attribute.String("event.aggregate_id", event.AggregateID().String()),
+						attribute.String("event.aggregate_id", event.AggregateID()),
 						attribute.String("event.type", TypeName(event)),
 					),
 					trace.WithLinks(trace.LinkFromContext(ctx)),
@@ -91,7 +91,7 @@ func (b *eventBus) Dispatch(ctx context.Context, event Event) error {
 					handlerCtx, handlerSpan := b.tracer.Start(ctx, "cqrs.event.handler.process",
 						trace.WithAttributes(
 							attribute.String("handler.name", handlerName),
-							attribute.String("event.aggregate_id", event.AggregateID().String()),
+							attribute.String("event.aggregate_id", event.AggregateID()),
 							attribute.String("event.type", TypeName(event)),
 						),
 						trace.WithLinks(trace.LinkFromContext(ctx)),

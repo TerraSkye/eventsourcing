@@ -3,7 +3,6 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -15,7 +14,7 @@ type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
 	bus    EventBus
-	events map[uuid.UUID][]*Envelope
+	events map[string][]*Envelope
 }
 
 func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersion uint64) error {
@@ -43,7 +42,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 		m.events[event.Event.AggregateID()] = append(m.events[event.Event.AggregateID()], &events[i])
 		span.AddEvent("Stored event",
 			trace.WithAttributes(
-				attribute.String("event.aggregate_id", event.Event.AggregateID().String()),
+				attribute.String("event.aggregate_id", event.Event.AggregateID()),
 				attribute.String("event.type", TypeName(event.Event)),
 				attribute.Int("version", int(originalVersion)),
 			),
@@ -56,7 +55,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 
 		eventCtx, eventSpan := m.tracer.Start(ctx, " cqrs.event.store.publish",
 			trace.WithAttributes(
-				attribute.String("event.aggregate_id", event.Event.AggregateID().String()),
+				attribute.String("event.aggregate_id", event.Event.AggregateID()),
 				attribute.String("event.type", TypeName(event.Event)),
 			),
 		)
@@ -76,9 +75,9 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 
 }
 
-func (m *MemoryStore) Load(ctx context.Context, u uuid.UUID) (<-chan *Envelope, error) {
+func (m *MemoryStore) Load(ctx context.Context, u string) (<-chan *Envelope, error) {
 	ctx, span := m.tracer.Start(ctx, "MemoryStore.Load",
-		trace.WithAttributes(attribute.String("aggregate_id", u.String())),
+		trace.WithAttributes(attribute.String("aggregate_id", u)),
 	)
 	defer span.End()
 
@@ -102,10 +101,10 @@ func (m *MemoryStore) Load(ctx context.Context, u uuid.UUID) (<-chan *Envelope, 
 	return out, nil
 }
 
-func (m *MemoryStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) (<-chan *Envelope, error) {
+func (m *MemoryStore) LoadFrom(ctx context.Context, id string, version int) (<-chan *Envelope, error) {
 	ctx, span := m.tracer.Start(ctx, "MemoryStore.LoadFrom",
 		trace.WithAttributes(
-			attribute.String("aggregate_id", id.String()),
+			attribute.String("aggregate_id", id),
 			attribute.Int("start_version", version),
 		),
 	)
@@ -136,13 +135,13 @@ func (m *MemoryStore) LoadFrom(ctx context.Context, id uuid.UUID, version int) (
 func (m *MemoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.events = make(map[uuid.UUID][]*Envelope)
+	m.events = make(map[string][]*Envelope)
 	return nil
 }
 
 func NewMemoryStore(bus EventBus) EventStore {
 	return &MemoryStore{
-		events: make(map[uuid.UUID][]*Envelope),
+		events: make(map[string][]*Envelope),
 		tracer: otel.Tracer("event-store"),
 		bus:    bus,
 	}

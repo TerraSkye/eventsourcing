@@ -45,7 +45,7 @@ func (b *commandBus) Send(ctx context.Context, cmd Command) error {
 	ctx, span := b.tracer.Start(ctx, "cqrs.command.send",
 		trace.WithAttributes(
 
-			attribute.String("cqrs.aggregate_id", cmd.AggregateID().String()),
+			attribute.String("cqrs.aggregate_id", cmd.AggregateID()),
 			attribute.String("cqrs.application", os.Getenv("application")),
 			attribute.String("cqrs.causation_id", MustExtractCausationId(ctx)),
 			attribute.String("cqrs.correlation_id", trace.SpanContextFromContext(ctx).TraceID().String()),

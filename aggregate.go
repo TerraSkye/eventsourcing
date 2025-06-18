@@ -5,11 +5,13 @@ import (
 	"time"
 )
 
+var now = time.Now
+
 // Aggregate is the interface that all aggregates must implement.
 type Aggregate interface {
 
 	// EntityID returns the unique identifier of the aggregate.
-	EntityID() uuid.UUID
+	EntityID() string
 
 	// AggregateVersion returns the version of the aggregate.
 	AggregateVersion() uint64
@@ -28,13 +30,13 @@ type Aggregate interface {
 }
 
 type AggregateBase struct {
-	id     uuid.UUID
+	id     string
 	v      uint64
 	events []Envelope
 }
 
 // NewAggregateBase creates an aggregate.
-func NewAggregateBase(id uuid.UUID) *AggregateBase {
+func NewAggregateBase(id string) *AggregateBase {
 	return &AggregateBase{
 		id:     id,
 		events: make([]Envelope, 0),
@@ -42,7 +44,7 @@ func NewAggregateBase(id uuid.UUID) *AggregateBase {
 }
 
 // EntityID implements the EntityID method of the eh.Entity and eh.Aggregate interface.
-func (a *AggregateBase) EntityID() uuid.UUID {
+func (a *AggregateBase) EntityID() string {
 	return a.id
 }
 
@@ -76,7 +78,7 @@ func (a *AggregateBase) AppendEvent(event Event, options ...EventOption) {
 		Metadata:   make(map[string]any),
 		Event:      event,
 		Version:    a.AggregateVersion() + uint64(len(a.events)) + 1,
-		OccurredAt: time.Now(),
+		OccurredAt: now(),
 	}
 
 	for _, option := range options {

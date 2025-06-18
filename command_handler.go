@@ -38,7 +38,7 @@ func NewCommandHandler(
 			ctx, span := tracer.Start(ctx, "cqrs.command.handler.apply_command",
 				trace.WithAttributes(
 					attribute.String("command.type", TypeName(command)),
-					attribute.String("aggregate.id", command.AggregateID().String()),
+					attribute.String("aggregate.id", command.AggregateID()),
 					attribute.String("aggregate.version", MustExtractAggregateVersion(ctx)),
 
 					attribute.String("cqrs.causation_id", MustExtractCausationId(ctx)),
@@ -76,7 +76,7 @@ func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
 	// Start the tracing span for handling the command
 	ctx, span := h.tracer.Start(ctx, "cqrs.command.handler.execute",
 		trace.WithAttributes(
-			attribute.String("aggregate.id", command.AggregateID().String()),
+			attribute.String("aggregate.id", command.AggregateID()),
 			attribute.String("command.type", TypeName(command)),
 		),
 	)
@@ -96,7 +96,7 @@ func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
 
 		ctx2, span2 := h.tracer.Start(ctx, "cqrs.command.handler.load_aggregate",
 			trace.WithAttributes(
-				attribute.String("aggregate.id", command.AggregateID().String()),
+				attribute.String("aggregate.id", command.AggregateID()),
 			),
 		)
 
@@ -126,7 +126,7 @@ func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
 		aggregate.SetAggregateVersion(version)
 
 		span2.AddEvent("aggregate loaded", trace.WithAttributes(
-			attribute.String("aggregate.id", command.AggregateID().String()),
+			attribute.String("aggregate.id", command.AggregateID()),
 			attribute.Int64("aggregate.version", int64(version)),
 		))
 
@@ -134,7 +134,7 @@ func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
 		span2.End()
 	}
 
-	if err := h.dispatchCommand(WithAggregateUUID(WithAggregateVersion(ctx, version), command.AggregateID()), aggregate, command); err != nil {
+	if err := h.dispatchCommand(WithAggregateID(WithAggregateVersion(ctx, version), command.AggregateID()), aggregate, command); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err

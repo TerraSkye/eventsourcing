@@ -3,34 +3,35 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
+
 	"github.com/io-da/query"
 )
 
-type GenericQueryHandler[T query.Query, R Readmodel] interface {
+type GenericQueryHandler[T query.Query, R ReadModel] interface {
 	HandleQuery(ctx context.Context, qry T) (R, error)
 }
 
 type QueryIteratorProvider interface {
 	query.IteratorHandler
-	RegisterHandler(handler GenericQueryHandler[query.Query, Readmodel])
+	RegisterHandler(handler GenericQueryHandler[query.Query, ReadModel])
 }
 
 type QueryProvider interface {
 	query.Handler
-	RegisterHandler(handler GenericQueryHandler[query.Query, Readmodel])
+	RegisterHandler(handler GenericQueryHandler[query.Query, ReadModel])
 }
 
 type handler struct {
-	handlers map[string]GenericQueryHandler[query.Query, Readmodel]
+	handlers map[string]GenericQueryHandler[query.Query, ReadModel]
 }
 
 func NewQueryHandler() QueryProvider {
 	return &handler{
-		handlers: make(map[string]GenericQueryHandler[query.Query, Readmodel]),
+		handlers: make(map[string]GenericQueryHandler[query.Query, ReadModel]),
 	}
 }
 
-func (t *handler) RegisterHandler(handler GenericQueryHandler[query.Query, Readmodel]) {
+func (t *handler) RegisterHandler(handler GenericQueryHandler[query.Query, ReadModel]) {
 	var cmd query.Query
 	queryType := TypeName(cmd)
 	// Store a type-erased function that preserves the correct signature
@@ -62,16 +63,16 @@ func (t *handler) Handle(ctx context.Context, qry query.Query, res *query.Result
 }
 
 type iteratorHandler struct {
-	handlers map[string]GenericQueryHandler[query.Query, Readmodel]
+	handlers map[string]GenericQueryHandler[query.Query, ReadModel]
 }
 
 func NewQueryIteratorHandler() QueryIteratorProvider {
 	return &iteratorHandler{
-		handlers: make(map[string]GenericQueryHandler[query.Query, Readmodel]),
+		handlers: make(map[string]GenericQueryHandler[query.Query, ReadModel]),
 	}
 }
 
-func (t *iteratorHandler) RegisterHandler(handler GenericQueryHandler[query.Query, Readmodel]) {
+func (t *iteratorHandler) RegisterHandler(handler GenericQueryHandler[query.Query, ReadModel]) {
 	var cmd query.Query
 	queryType := TypeName(cmd)
 	// Store a type-erased function that preserves the correct signature

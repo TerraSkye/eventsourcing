@@ -7,7 +7,7 @@ import (
 )
 
 type Event interface {
-	AggregateID() uuid.UUID
+	AggregateID() string
 }
 
 type Envelope struct {

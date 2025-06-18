@@ -3,7 +3,6 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"time"
 )
 
@@ -152,9 +151,9 @@ func MustExtractCorrelationId(ctx context.Context) string {
 	return ""
 }
 
-// MustExtractAggregateUUID extracts the aggregate UUID from the context.
+// MustExtractAggregateID extracts the aggregate UUID from the context.
 // If the value is missing or of the wrong type, it returns an empty string.
-func MustExtractAggregateUUID(ctx context.Context) string {
+func MustExtractAggregateID(ctx context.Context) string {
 	if aggregateUUID, ok := ctx.Value(AggregateUUIDKey).(string); ok {
 		return aggregateUUID
 	}
@@ -194,9 +193,9 @@ func WithCorrelationId(ctx context.Context, correlationId string) context.Contex
 	return context.WithValue(ctx, CorrelationIdKey, correlationId)
 }
 
-// WithAggregateUUID adds the aggregate UUID to the context.
-func WithAggregateUUID(ctx context.Context, aggregateUUID uuid.UUID) context.Context {
-	return context.WithValue(ctx, AggregateUUIDKey, aggregateUUID.String())
+// WithAggregateID adds the aggregate UUID to the context.
+func WithAggregateID(ctx context.Context, aggregateUUID string) context.Context {
+	return context.WithValue(ctx, AggregateUUIDKey, aggregateUUID)
 }
 
 // WithApplication adds the application name to the context.
