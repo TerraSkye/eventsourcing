@@ -3,18 +3,55 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
+	"iter"
+	"sync"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"sync"
 )
 
 type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
 	bus    EventBus
+	global []*Envelope
 	events map[string][]*Envelope
+}
+
+func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (iter.Seq[*Envelope], error) {
+	ctx, span := m.tracer.Start(ctx, "MemoryStore.LoadFromAll",
+		trace.WithAttributes(
+			attribute.Int64("start_version", int64(version)),
+		),
+	)
+	defer span.End()
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	seq := func(yield func(*Envelope) bool) {
+		for _, events := range m.events {
+			if int(version) < len(events) {
+				for _, event := range events[version:] {
+					select {
+					case <-ctx.Done():
+						span.RecordError(ctx.Err())
+						span.SetStatus(codes.Error, ctx.Err().Error())
+						return
+					default:
+						if !yield(event) {
+							return
+						}
+					}
+				}
+			}
+		}
+		span.SetStatus(codes.Ok, "")
+	}
+
+	return seq, nil
 }
 
 func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersion uint64) error {
@@ -40,6 +77,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 			return err
 		}
 		m.events[event.Event.AggregateID()] = append(m.events[event.Event.AggregateID()], &events[i])
+		m.global = append(m.global, &events[i])
 		span.AddEvent("Stored event",
 			trace.WithAttributes(
 				attribute.String("event.aggregate_id", event.Event.AggregateID()),
@@ -75,61 +113,72 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 
 }
 
-func (m *MemoryStore) Load(ctx context.Context, u string) (<-chan *Envelope, error) {
+func (m *MemoryStore) LoadStream(ctx context.Context, u string) (iter.Seq[*Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "MemoryStore.Load",
 		trace.WithAttributes(attribute.String("aggregate_id", u)),
 	)
 	defer span.End()
 
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	events, exists := m.events[u]
+	m.mu.RUnlock()
 
-	out := make(chan *Envelope, 10)
-	go func() {
-		defer close(out)
-		if events, exists := m.events[u]; exists {
-			for _, event := range events {
-				select {
-				case <-ctx.Done():
+	if !exists {
+		// Return empty sequence
+		return func(yield func(*Envelope) bool) {}, nil
+	}
+
+	seq := func(yield func(*Envelope) bool) {
+		for _, event := range events {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if !yield(event) {
 					return
-				case out <- event:
 				}
 			}
 		}
-	}()
+	}
 
-	return out, nil
+	return seq, nil
 }
 
-func (m *MemoryStore) LoadFrom(ctx context.Context, id string, version int) (<-chan *Envelope, error) {
+func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (iter.Seq[*Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "MemoryStore.LoadFrom",
 		trace.WithAttributes(
 			attribute.String("aggregate_id", id),
-			attribute.Int("start_version", version),
+			attribute.Int("start_version", int(version)),
 		),
 	)
 	defer span.End()
 
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	events, exists := m.events[id]
+	m.mu.RUnlock()
 
-	out := make(chan *Envelope, 10)
-	go func() {
-		defer close(out)
-		if events, exists := m.events[id]; exists && version < len(events) {
-			for _, event := range events[version:] {
-				select {
-				case <-ctx.Done():
-					span.RecordError(ctx.Err())
-					span.SetStatus(codes.Error, ctx.Err().Error())
+	if !exists || int(version) >= len(events) {
+		// Return empty sequence
+		return func(yield func(*Envelope) bool) {}, nil
+	}
+
+	seq := func(yield func(*Envelope) bool) {
+		for _, event := range events[version:] {
+			select {
+			case <-ctx.Done():
+				span.RecordError(ctx.Err())
+				span.SetStatus(codes.Error, ctx.Err().Error())
+				return
+			default:
+				if !yield(event) {
 					return
-				case out <- event:
 				}
 			}
 		}
-	}()
-	span.SetStatus(codes.Ok, "")
-	return out, nil
+		span.SetStatus(codes.Ok, "")
+	}
+
+	return seq, nil
 }
 
 func (m *MemoryStore) Close() error {
@@ -142,6 +191,7 @@ func (m *MemoryStore) Close() error {
 func NewMemoryStore(bus EventBus) EventStore {
 	return &MemoryStore{
 		events: make(map[string][]*Envelope),
+		global: make([]*Envelope, 0),
 		tracer: otel.Tracer("event-store"),
 		bus:    bus,
 	}

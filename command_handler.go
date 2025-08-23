@@ -2,13 +2,18 @@ package eventsourcing
 
 import (
 	"context"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
-type CommandHandler struct {
+type CommandHandler interface {
+	Handle(ctx context.Context, command Command) error
+}
+
+type commandHandler struct {
 	store               EventStore
 	tracer              trace.Tracer
 	aggregateForCommand func(cmd Command) (Aggregate, error)
@@ -22,11 +27,11 @@ func NewCommandHandler(
 	aggregateForCommand func(cmd Command) (Aggregate, error),
 	dispatchEvent func(aggregate Aggregate, event Event) error,
 	dispatchCommand func(ctx context.Context, aggregate Aggregate, command Command) error,
-) *CommandHandler {
+) CommandHandler {
 
 	tracer := otel.Tracer("command-handler")
 
-	h := &CommandHandler{
+	h := &commandHandler{
 		store:               store,
 		tracer:              tracer,
 		aggregateForCommand: aggregateForCommand,
@@ -71,7 +76,7 @@ func NewCommandHandler(
 	return h
 }
 
-func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
+func (h *commandHandler) Handle(ctx context.Context, command Command) error {
 
 	// Start the tracing span for handling the command
 	ctx, span := h.tracer.Start(ctx, "cqrs.command.handler.execute",
@@ -102,7 +107,7 @@ func (h *CommandHandler) Handle(ctx context.Context, command Command) error {
 
 		// the aggregate is being prepared here. we would want to trace this as wel.
 
-		events, err := h.store.LoadFrom(ctx2, command.AggregateID(), 0)
+		events, err := h.store.LoadStream(ctx2, command.AggregateID())
 
 		if err != nil {
 			span2.RecordError(err)
