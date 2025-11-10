@@ -2,36 +2,50 @@ package eventsourcing
 
 import (
 	"context"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-	"os"
+	"fmt"
 	"sync"
 )
+
+type GenericCommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
+
+// CommandBus defines the contract for dispatching commands in the system.
+type CommandBus interface {
+	// RegisterHandler registers a handler for a specific command type.
+	// Panics if a handler is already registered for that type.
+	RegisterHandler[C Command](handler GenericCommandHandler[C])
+
+	// Dispatch sends a command to its registered handler and returns the events and error.
+	// Returns an error if no handler is registered or if type conversion fails.
+	Dispatch(ctx context.Context, cmd Command) (AppendResult, error)
+}
 
 type CommandBus interface {
 	Send(ctx context.Context, cmd Command) error
 	AddHandler(handler func(ctx context.Context, command Command) error)
 }
 
+// CommandHandler is a generic handler for a specific command type
+
 type CommandWithCtx struct {
 	Ctx        context.Context
 	Command    Command
-	ResponseCh chan<- error
+	ResponseCh chan<- commandBusResult
+}
+
+type commandBusResult struct {
+	AppendResult
+	error
 }
 
 type commandBus struct {
-	tracer   trace.Tracer
-	handlers []func(ctx context.Context, command Command) error
+	handlers map[string]func(ctx context.Context, command Command) error
 	queue    chan CommandWithCtx
-	sync.RWMutex
+	mu       sync.RWMutex
 }
 
 func NewCommandBus(bufferSize int) CommandBus {
 	bus := &commandBus{
-		queue:  make(chan CommandWithCtx, bufferSize),
-		tracer: otel.Tracer("command-bus"),
+		queue: make(chan CommandWithCtx, bufferSize),
 	}
 
 	go bus.start()
@@ -39,27 +53,7 @@ func NewCommandBus(bufferSize int) CommandBus {
 }
 
 func (b *commandBus) Send(ctx context.Context, cmd Command) error {
-	responseCh := make(chan error, 1)
-
-	// Start tracing
-	ctx, span := b.tracer.Start(ctx, "cqrs.command.send",
-		trace.WithAttributes(
-
-			attribute.String("cqrs.aggregate_id", cmd.AggregateID()),
-			attribute.String("cqrs.application", os.Getenv("application")),
-			attribute.String("cqrs.causation_id", MustExtractCausationId(ctx)),
-			attribute.String("cqrs.correlation_id", trace.SpanContextFromContext(ctx).TraceID().String()),
-			attribute.String("cqrs.command", TypeName(cmd)),
-			// Messaging attributes
-			attribute.String("messaging.conversation_id", trace.SpanContextFromContext(ctx).TraceID().String()),
-			attribute.String("messaging.destination_kind", "aggregate"),
-			attribute.String("messaging.message_id", MustExtractCausationId(ctx)),
-			attribute.String("messaging.operation", "publish"),
-			attribute.String("messaging.system", "cqrs"),
-		),
-	)
-
-	defer span.End()
+	responseCh := make(chan commandBusResult, 1)
 
 	// Enqueue the command with the response channel
 	select {
@@ -67,35 +61,60 @@ func (b *commandBus) Send(ctx context.Context, cmd Command) error {
 		// Wait for processing result
 		select {
 		case err := <-responseCh:
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			} else {
-				span.SetStatus(codes.Ok, "")
-			}
 			return err // Return processing error (or nil if success)
 		case <-ctx.Done():
-			span.RecordError(ctx.Err())
-			span.SetStatus(codes.Error, ctx.Err().Error())
 			return ctx.Err() // Context timeout/cancellation
 		}
 
 	case <-ctx.Done():
-		span.RecordError(ctx.Err())
-		span.SetStatus(codes.Error, ctx.Err().Error())
 		return ctx.Err() // Context timeout before enqueueing
 	}
 }
 
-func (b *commandBus) AddHandler(handler func(ctx context.Context, command Command) error) {
-	b.Lock()
-	defer b.Unlock()
-	b.handlers = append(b.handlers, handler)
+// RegisterHandler registers a command handler for a specific command type.
+// Panics if a handler is already registered for the type.
+func (b *commandBus) RegisterHandler[C Command](handler GenericCommandHandler[C]) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	cmdName := TypeName((*C)(nil))
+	if _, exists := b.handlers[cmdName]; exists {
+		panic(fmt.Sprintf("handler already registered for command type %s", cmdName))
+	}
+
+	// Wrap the typed handler with a type assertion
+	b.handlers[cmdName] = func(ctx context.Context, command Command) ([]Event, error) {
+		cmd, ok := command.(C)
+		if !ok {
+			return nil, fmt.Errorf("invalid command type: expected %T, got %T", *new(C), command)
+		}
+		return handler(ctx, cmd)
+	}
 }
 
 func (b *commandBus) start() {
 	go func() {
 		for cmdWithCtx := range b.queue {
+
+			routeTo := TypeName(cmdWithCtx.Command)
+
+			h, exists := b.handlers[routeTo]
+
+			if !exists {
+				cmdWithCtx.ResponseCh <- commandBusResult{
+					AppendResult: AppendResult{Successful: false},
+					error:        fmt.Errorf("command %s not found", routeTo),
+				}
+				continue
+			}
+
+			result, err := h(cmdWithCtx.Ctx, cmdWithCtx.Command)
+
+			cmdWithCtx.ResponseCh <- commandBusResult{
+				AppendResult: result,
+				error:        err,
+			}
+
 			for _, handler := range b.handlers {
 				go func(handlerFunc func(ctx context.Context, command Command) error) {
 					err := handlerFunc(cmdWithCtx.Ctx, cmdWithCtx.Command)

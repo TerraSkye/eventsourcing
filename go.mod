@@ -5,6 +5,7 @@ go 1.24.1
 replace github.com/io-da/query => github.com/terraskye/query v0.0.0-20250310130952-cd3f17f32d38
 
 require (
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/google/uuid v1.6.0
 	github.com/io-da/query v1.3.5
 	go.opentelemetry.io/otel v1.35.0
