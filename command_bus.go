@@ -6,125 +6,191 @@ import (
 	"sync"
 )
 
-type GenericCommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
-
-// CommandBus defines the contract for dispatching commands in the system.
-type CommandBus interface {
-	// RegisterHandler registers a handler for a specific command type.
-	// Panics if a handler is already registered for that type.
-	RegisterHandler[C Command](handler GenericCommandHandler[C])
-
-	// Dispatch sends a command to its registered handler and returns the events and error.
-	// Returns an error if no handler is registered or if type conversion fails.
-	Dispatch(ctx context.Context, cmd Command) (AppendResult, error)
-}
-
-type CommandBus interface {
-	Send(ctx context.Context, cmd Command) error
-	AddHandler(handler func(ctx context.Context, command Command) error)
-}
-
-// CommandHandler is a generic handler for a specific command type
-
-type CommandWithCtx struct {
+// queuedCommand represents a command enqueued in the command bus for processing.
+// Each queuedCommand includes the context for cancellation, the command itself,
+// and a response channel to return the processing result.
+type queuedCommand struct {
 	Ctx        context.Context
 	Command    Command
-	ResponseCh chan<- commandBusResult
+	ResponseCh chan<- commandResult
 }
 
-type commandBusResult struct {
-	AppendResult
-	error
+// commandResult represents the result of processing a command.
+// It contains the AppendResult (success/failure metadata) and any error
+// encountered during command handling.
+type commandResult struct {
+	Result AppendResult
+	Err    error
 }
 
+// commandBus is an internal, in-memory, type-safe command dispatcher.
+// It maintains a mapping of command type names to their handlers, a queue for
+// incoming commands, and synchronization mechanisms for safe concurrent access.
+//
+// The commandBus supports:
+//   - Enqueuing commands for asynchronous processing
+//   - Typed command registration using generics
+//   - Safe shutdown that waits for in-flight commands to complete
+//   - Panic recovery in handlers to prevent the bus from crashing
 type commandBus struct {
-	handlers map[string]func(ctx context.Context, command Command) error
-	queue    chan CommandWithCtx
+	handlers map[string]func(ctx context.Context, command Command) (AppendResult, error)
+	queue    chan queuedCommand
+	stopCh   chan struct{}
+	wg       sync.WaitGroup
 	mu       sync.RWMutex
 }
 
-func NewCommandBus(bufferSize int) CommandBus {
+// NewCommandBus creates a new instance of commandBus with a buffered queue.
+//
+// Parameters:
+//   - bufferSize: the size of the internal queue for enqueued commands.
+//
+// Returns:
+//   - pointer to a newly initialized commandBus. The internal processing
+//     goroutine is started automatically.
+//
+// Example:
+//
+//	bus := NewCommandBus(100)
+func NewCommandBus(bufferSize int) *commandBus {
 	bus := &commandBus{
-		queue: make(chan CommandWithCtx, bufferSize),
+		queue:    make(chan queuedCommand, bufferSize),
+		handlers: make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
+		stopCh:   make(chan struct{}),
 	}
 
 	go bus.start()
 	return bus
 }
 
-func (b *commandBus) Send(ctx context.Context, cmd Command) error {
-	responseCh := make(chan commandBusResult, 1)
+// Dispatch enqueues a command for processing by the registered handler and
+// waits for the result. It is safe to call concurrently.
+//
+// Parameters:
+//   - ctx: the context for cancellation or timeout
+//   - cmd: the command to dispatch
+//
+// Returns:
+//   - AppendResult: indicates success/failure of command processing
+//   - error: non-nil if the dispatch failed due to context cancellation or processing error
+//
+// Notes:
+//   - Returns an error immediately if the bus has been stopped.
+//   - Waits for the handler to complete and sends the result back via a response channel.
+func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
+	select {
+	case <-b.stopCh:
+		return AppendResult{Successful: false}, fmt.Errorf("command bus is stopped")
+	default:
+	}
+
+	responseCh := make(chan commandResult, 1)
+	b.wg.Add(1)
+	defer b.wg.Done()
 
 	// Enqueue the command with the response channel
 	select {
-	case b.queue <- CommandWithCtx{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
+	case b.queue <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
 		// Wait for processing result
 		select {
-		case err := <-responseCh:
-			return err // Return processing error (or nil if success)
+		case result := <-responseCh:
+			return result.Result, result.Err // Return processing error (or nil if success)
 		case <-ctx.Done():
-			return ctx.Err() // Context timeout/cancellation
+			return AppendResult{Successful: false}, ctx.Err() // Context timeout/cancellation
 		}
-
 	case <-ctx.Done():
-		return ctx.Err() // Context timeout before enqueueing
+		return AppendResult{Successful: false}, ctx.Err() // Context timeout before enqueueing
 	}
 }
 
-// RegisterHandler registers a command handler for a specific command type.
-// Panics if a handler is already registered for the type.
-func (b *commandBus) RegisterHandler[C Command](handler GenericCommandHandler[C]) {
+// start begins processing commands from the internal queue. It is invoked
+// automatically by NewCommandBus and should not be called manually.
+//
+// Behavior:
+//   - Routes commands to their registered handler based on TypeName.
+//   - Recovers from panics in handlers and returns a failure result instead of crashing.
+//   - Sends results back via the queuedCommand's ResponseCh.
+func (b *commandBus) start() {
+	for cmd := range b.queue {
+
+		routeTo := TypeName(cmd.Command)
+
+		h, exists := b.handlers[routeTo]
+
+		if !exists {
+			cmd.ResponseCh <- commandResult{
+				Result: AppendResult{Successful: false},
+				Err:    fmt.Errorf("no commandhandler found for `%s`", routeTo),
+			}
+			continue
+		}
+
+		// recover from panics to keep bus alive
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					cmd.ResponseCh <- commandResult{
+						Result: AppendResult{Successful: false},
+						Err:    fmt.Errorf("panic in handler: %v", r),
+					}
+				}
+			}()
+
+			res, err := h(cmd.Ctx, cmd.Command)
+
+			cmd.ResponseCh <- commandResult{
+				Result: res,
+				Err:    err,
+			}
+		}()
+	}
+}
+
+// Register adds a new typed command handler to the bus.
+//
+// Parameters:
+//   - b: pointer to the commandBus
+//   - handler: a generic CommandHandler[Command] function for a specific command type C
+//
+// Notes:
+//   - Derives the command type name automatically using TypeName to avoid
+//     manual registration strings.
+//   - Panics if a handler is already registered for the same command type.
+//
+// Example:
+//
+//	err := Register(bus, fooHandler)
+func Register[C Command](b *commandBus, handler CommandHandler[C]) {
+	cmdName := TypeName((*C)(nil))
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	cmdName := TypeName((*C)(nil))
 	if _, exists := b.handlers[cmdName]; exists {
 		panic(fmt.Sprintf("handler already registered for command type %s", cmdName))
 	}
 
-	// Wrap the typed handler with a type assertion
-	b.handlers[cmdName] = func(ctx context.Context, command Command) ([]Event, error) {
-		cmd, ok := command.(C)
+	b.handlers[cmdName] = func(ctx context.Context, cmd Command) (AppendResult, error) {
+		c, ok := cmd.(C)
 		if !ok {
-			return nil, fmt.Errorf("invalid command type: expected %T, got %T", *new(C), command)
+			return AppendResult{Successful: false}, fmt.Errorf("expected command type %s but got %T", cmdName, cmd)
 		}
-		return handler(ctx, cmd)
+		return handler(ctx, c)
 	}
 }
 
-func (b *commandBus) start() {
-	go func() {
-		for cmdWithCtx := range b.queue {
-
-			routeTo := TypeName(cmdWithCtx.Command)
-
-			h, exists := b.handlers[routeTo]
-
-			if !exists {
-				cmdWithCtx.ResponseCh <- commandBusResult{
-					AppendResult: AppendResult{Successful: false},
-					error:        fmt.Errorf("command %s not found", routeTo),
-				}
-				continue
-			}
-
-			result, err := h(cmdWithCtx.Ctx, cmdWithCtx.Command)
-
-			cmdWithCtx.ResponseCh <- commandBusResult{
-				AppendResult: result,
-				error:        err,
-			}
-
-			for _, handler := range b.handlers {
-				go func(handlerFunc func(ctx context.Context, command Command) error) {
-					err := handlerFunc(cmdWithCtx.Ctx, cmdWithCtx.Command)
-					if err != nil {
-						cmdWithCtx.ResponseCh <- err
-					} else {
-						cmdWithCtx.ResponseCh <- nil
-					}
-				}(handler)
-			}
-		}
-	}()
+// Stop shuts down the commandBus safely.
+//
+// Behavior:
+//   - Stops accepting new commands.
+//   - Closes the internal queue channel.
+//   - Waits for all in-flight commands to finish before returning.
+//
+// Example:
+//
+//	bus.Stop()
+func (b *commandBus) Stop() {
+	close(b.stopCh)
+	close(b.queue)
+	b.wg.Wait()
 }

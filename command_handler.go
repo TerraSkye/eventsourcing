@@ -10,6 +10,43 @@ import (
 	"github.com/google/uuid"
 )
 
+// CommandHandler defines a function type for handling commands of a specific type.
+//
+// C represents the concrete command type implementing the Command interface.
+//
+// A CommandHandler is responsible for implementing the business logic associated
+// with a command. This typically includes validation, orchestration, and producing
+// side effects, such as persisting events to an EventStore or triggering other operations.
+//
+// Handlers of this type are generally registered with a CommandBus, which ensures that
+// commands are dispatched to the correct handler based on their type.
+//
+// Parameters:
+//   - ctx: The context for controlling cancellation, deadlines, and carrying request-scoped values.
+//   - command: The command of type C, representing the intent to perform a domain action.
+//
+// Returns:
+//   - AppendResult: Represents the result of handling the command, including success status,
+//     the next expected version of the aggregate, and any events that were persisted.
+//   - error: Non-nil if the command handling failed, e.g., due to validation errors, business rule violations,
+//     or persistence failures.
+//
+// Notes:
+//   - Implementations should treat the command as immutable.
+//   - Any domain state changes should be expressed via events (AppendResult.Events) rather than directly mutating state.
+//   - Handlers should not panic; all errors should be returned via the error return value.
+//
+// Example Usage:
+//
+//	func HandleReserveSeat(ctx context.Context, cmd ReserveSeat) (AppendResult, error) {
+//	    if seatAlreadyReserved(cmd.SeatNumber) {
+//	        return AppendResult{Successful: false}, fmt.Errorf("seat already reserved")
+//	    }
+//	    events := []Event{SeatReserved{SeatNumber: cmd.SeatNumber, UserID: cmd.UserID}}
+//	    return AppendResult{Successful: true, Events: events}, nil
+//	}
+type CommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
+
 // Evolver evolves the given state into a new state with the event applied.
 //
 // T represents the aggregate state type.
@@ -48,10 +85,10 @@ type Evolver[T any] func(currentState T, envelope *Envelope) T
 type Decider[T any, C Command] func(state T, cmd C) ([]Event, error)
 
 // CommandHandlerOption defines a function type that modifies handlerOptions.
-// These options are applied when constructing a CommandHandler to customize behavior.
+// These options are applied when constructing a NewCommandHandler to customize behavior.
 type CommandHandlerOption func(configuration *handlerOptions)
 
-// CommandHandler returns a generic command handler for any aggregate type.
+// NewCommandHandler returns a generic command handler for any aggregate type.
 //
 // It provides a reusable pattern for handling commands in an event-sourced system
 // by performing the following steps:
@@ -89,63 +126,63 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //
 // Example Usage:
 //
-//	handler := CommandHandler(store, evolveFunc, decideFunc, WithRevision(Any{}))
+//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithRevision(Any{}))
 //	result, err := handler(ctx, myCommand)
-func CommandHandler[T any, C Command](
+func NewCommandHandler[T any, C Command](
 	store EventStore,
 	initialState T,
 	evolve Evolver[T],
 	decide Decider[T, C],
 	opts ...CommandHandlerOption,
-) func(ctx context.Context, command C) (AppendResult, error) {
+) CommandHandler[C] {
 	return func(ctx context.Context, command C) (AppendResult, error) {
+		// Apply handler options
 		cfg := &handlerOptions{
 			Revision:      Any{}, // default
 			RetryStrategy: &backoff.StopBackOff{},
-			MetadataFuncs: make([]func(ctx context.Context) map[string]any, 0),
+			MetadataFuncs: []func(ctx context.Context) map[string]any{},
 		}
 		for _, o := range opts {
 			o(cfg)
 		}
 
 		state := initialState
-
 		var revision uint64
-
+		// Retry loop for handling concurrency conflicts
 		result, err := backoff.RetryWithData(func() (AppendResult, error) {
 
-			// Load event history for the aggregate
+			// --- Load history ---
 			history, err := store.LoadStreamFrom(ctx, command.AggregateID(), revision)
 			if err != nil {
 				// when failing to load of the event stream. this is the error.
-				return AppendResult{Successful: false}, backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
+				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
 			}
-
+			// --- Evolve state ---
 			for envelope := range history {
 				revision = envelope.Version
 				state = evolve(state, envelope)
 			}
 
-			if _, shouldBeExact := cfg.Revision.(ExplicitRevision); shouldBeExact {
+			// Update revision if ExplicitRevision is used
+			if _, ok := cfg.Revision.(ExplicitRevision); ok {
 				cfg.Revision = ExplicitRevision(revision)
 			}
 
-			// Decide what events should occur based on the command and state
+			// --- Decide events ---
 			events, err := decide(state, command)
 
 			if err != nil {
 				return AppendResult{Successful: false}, backoff.Permanent(err) // business rule violation
 			}
 
+			// If no events, return success without saving
 			if len(events) == 0 {
 				// Nothing to persist
 				return AppendResult{Successful: true, NextExpectedVersion: revision}, nil
 			}
 
-			expectedVersion := revision
-			// Wrap events in envelopes
+			// --- Wrap events in envelopes ---
 			envelopes := make([]Envelope, len(events))
-
 			baseMetadata := make(map[string]any)
 			for _, fn := range cfg.MetadataFuncs {
 				for k, v := range fn(ctx) {
@@ -153,6 +190,7 @@ func CommandHandler[T any, C Command](
 				}
 			}
 
+			expectedVersion := revision
 			for i, event := range events {
 				expectedVersion++
 				envelopes[i] = Envelope{
@@ -164,19 +202,19 @@ func CommandHandler[T any, C Command](
 				}
 			}
 
-			// Persist the events
-			if result, err := store.Save(ctx, envelopes, cfg.Revision); err != nil {
+			// --- Persist events ---
+			result, err := store.Save(ctx, envelopes, cfg.Revision)
+
+			if err != nil {
 				var conflict *StreamRevisionConflictError
 				if errors.As(err, &conflict) {
-					// we will retry concurrency errors
+					// Retry on concurrency conflicts
 					return AppendResult{Successful: false, NextExpectedVersion: revision}, conflict
 				}
 
-				// an event store error occurred. could not save the events
 				return result, backoff.Permanent(fmt.Errorf("failed to save events: %w", err))
-			} else {
-				return result, nil
 			}
+			return result, nil
 		}, cfg.RetryStrategy)
 
 		return result, err
@@ -184,44 +222,74 @@ func CommandHandler[T any, C Command](
 	}
 }
 
+// handlerOptions defines configuration for a CommandHandler.
+//
+// It is used internally by NewCommandHandler to control behavior such as
+// concurrency checks, retry strategy, and event metadata enrichment.
+//
+// Fields:
+//   - Revision: Determines the concurrency check applied when saving events.
+//     Defaults to Any{}.
+//   - RetryStrategy: Strategy for retrying operations in case of transient
+//     failures or version conflicts. Defaults to no retries.
+//   - ShouldRetry: Optional hook to override which errors are considered
+//     retryable. If nil, only version conflicts trigger retries.
+//   - MetadataFuncs: Slice of functions that generate metadata for each event.
+//     Each function receives the context and returns a map of key-value pairs.
 type handlerOptions struct {
-	// Revision is the condition we apply on the stream when saving (defaults to current state )
+	// Revision is the condition applied when saving events to the stream.
+	// It determines the concurrency check behavior (default is Any).
 	Revision Revision
-	// RetryStrategy is the strategy to retry on version-conflicts version-conflict. (default none)
+
+	// RetryStrategy defines how the handler should retry operations in case of transient failures
+	// or version conflicts. If nil, no retries are performed.
 	RetryStrategy backoff.BackOff
-	// ShouldRetry is an optional hook to decide whether a given error should be retried.
-	// If nil, only ErrVersionConflict is considered retryable.
+
+	// ShouldRetry is an optional hook to determine whether a given error should trigger a retry.
+	// If nil, only version conflicts (ErrVersionConflict) are considered retryable.
 	ShouldRetry func(error) bool
-	// MetadataFuncs is is an
+
+	// MetadataFuncs is a list of functions used to enrich events with metadata before saving.
+	// Each function receives the context and returns a map of key-value pairs.
 	MetadataFuncs []func(ctx context.Context) map[string]any
 }
 
-// WithRevision sets the expected stream revision for a CommandHandler.
+// WithRevision sets the expected stream revision for a NewCommandHandler.
 //
-// Parameters:
-//   - rev: The Revision value that determines the concurrency check
-//     when saving events (e.g., Any, NoStream, StreamExists, ExplicitRevision).
+// The Revision controls the concurrency check when persisting events. For example:
+//   - Any{}: no version check (default)
+//   - NoStream{}: ensures the stream does not exist
+//   - StreamExists{}: ensures the stream exists
+//   - ExplicitRevision{N}: expects the stream to be at version N
 //
 // Usage:
 //
-//	handler := CommandHandler(store, evolve, decide, WithRevision(NoStream))
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithRevision(NoStream))
 func WithRevision(rev Revision) CommandHandlerOption {
 	return func(cfg *handlerOptions) { cfg.Revision = rev }
 }
 
-// WithRevision sets the expected stream revision for a CommandHandler.
+// WithRetryStrategy sets the retry strategy for a NewCommandHandler.
 //
-// Parameters:
-//   - rev: The Revision value that determines the concurrency check
-//     when saving events (e.g., Any, NoStream, StreamExists, ExplicitRevision).
+// The BackOff strategy controls how many times and with what delay the handler
+// retries saving events in case of concurrency conflicts or transient errors.
 //
 // Usage:
 //
-//	handler := CommandHandler(store, evolve, decide, WithRevision(NoStream))
-func WithRetryStrategy(backoff backoff.BackOff) CommandHandlerOption {
-	return func(cfg *handlerOptions) { cfg.RetryStrategy = backoff }
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithRetryStrategy(myBackoff))
+func WithRetryStrategy(strategy backoff.BackOff) CommandHandlerOption {
+	return func(cfg *handlerOptions) { cfg.RetryStrategy = strategy }
 }
 
+// WithMetadataExtractor adds a metadata function to a NewCommandHandler.
+//
+// Each metadata function is called for every command handling execution and can
+// inject additional key-value pairs into the event envelopes. Multiple metadata
+// extractors can be combined; they are applied in order of registration.
+//
+// Usage:
+//
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithMetadataExtractor(myMetadataFunc))
 func WithMetadataExtractor(fn func(ctx context.Context) map[string]any) CommandHandlerOption {
 	return func(h *handlerOptions) {
 		h.MetadataFuncs = append(h.MetadataFuncs, fn)

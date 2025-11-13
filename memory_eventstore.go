@@ -54,7 +54,7 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (iter.Seq
 	return seq, nil
 }
 
-func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersion uint64) error {
+func (m *MemoryStore) Save(ctx context.Context, events []Envelope, revision Revision) (AppendResult, error) {
 	ctx, span := m.tracer.Start(ctx, "cqrs.event.store.write",
 		trace.WithAttributes(attribute.Int("event.count", len(events))),
 	)
@@ -64,55 +64,86 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, originalVersi
 	defer m.mu.Unlock()
 
 	if len(events) == 0 {
-		return nil
+		return AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
 
-	for i, event := range events {
-		currentVersion := uint64(len(m.events[event.Event.AggregateID()]))
+	aggregateID := events[0].Event.AggregateID()
+	currentVersion := uint64(len(m.events[aggregateID]))
 
-		if currentVersion != originalVersion {
-			err := fmt.Errorf("version mismatch: expected %d, got %d", originalVersion, currentVersion)
+	// Handle revision enforcement
+	switch rev := revision.(type) {
+	case Any:
+		// No concurrency check
+	case NoStream:
+		if currentVersion != 0 {
+			err := fmt.Errorf("stream already exists for aggregate %s", aggregateID)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
-			return err
+			return AppendResult{Successful: false}, err
 		}
-		m.events[event.Event.AggregateID()] = append(m.events[event.Event.AggregateID()], &events[i])
-		m.global = append(m.global, &events[i])
-		span.AddEvent("Stored event",
-			trace.WithAttributes(
-				attribute.String("event.aggregate_id", event.Event.AggregateID()),
-				attribute.String("event.type", TypeName(event.Event)),
-				attribute.Int("version", int(originalVersion)),
-			),
-		)
-		originalVersion++
-
+	case StreamExists:
+		if currentVersion == 0 {
+			err := fmt.Errorf("stream does not exist for aggregate %s", aggregateID)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return AppendResult{Successful: false}, err
+		}
+	case ExplicitRevision:
+		if currentVersion != uint64(rev) {
+			err := fmt.Errorf("version mismatch for aggregate %s: expected %d, got %d", aggregateID, rev, currentVersion)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return AppendResult{Successful: false}, err
+		}
+	default:
+		err := fmt.Errorf("unsupported revision type for aggregate %s", aggregateID)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return AppendResult{Successful: false}, err
 	}
 
-	for _, event := range events {
+	// Append events
+	for i := range events {
+		m.events[aggregateID] = append(m.events[aggregateID], &events[i])
+		m.global = append(m.global, &events[i])
 
-		eventCtx, eventSpan := m.tracer.Start(ctx, " cqrs.event.store.publish",
+		span.AddEvent("Stored event",
+			trace.WithAttributes(
+				attribute.String("event.aggregate_id", aggregateID),
+				attribute.String("event.type", TypeName(events[i].Event)),
+				attribute.Int("version", int(currentVersion)),
+			),
+		)
+
+		currentVersion++
+	}
+
+	// Publish events
+	for _, event := range events {
+		eventCtx, eventSpan := m.tracer.Start(ctx, "cqrs.event.store.publish",
 			trace.WithAttributes(
 				attribute.String("event.aggregate_id", event.Event.AggregateID()),
 				attribute.String("event.type", TypeName(event.Event)),
 			),
 		)
 
-		//TODO populate the context with the event envelope
 		if err := m.bus.Dispatch(eventCtx, event.Event); err != nil {
 			eventSpan.RecordError(err)
 			eventSpan.SetStatus(codes.Error, err.Error())
 			eventSpan.End()
-			return err
+			return AppendResult{
+				Successful: false,
+			}, err
 		}
 
 		eventSpan.End()
 	}
 
-	return nil
-
+	return AppendResult{
+		Successful:          true,
+		NextExpectedVersion: currentVersion,
+	}, nil
 }
-
 func (m *MemoryStore) LoadStream(ctx context.Context, u string) (iter.Seq[*Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "MemoryStore.Load",
 		trace.WithAttributes(attribute.String("aggregate_id", u)),

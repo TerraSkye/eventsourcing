@@ -27,7 +27,7 @@ package eventsourcing
 //	CreateAccount     Create a new user account
 //
 // 2. **Aggregate target**:
-//   - Every Command must identify the entity it targets through `AggregateID()` (or equivalent in your domain).
+//   - Every Command must identify the entity it targets through `AggregateID()` (or a similar method in your domain model).
 //   - This allows the handler to locate the relevant state.
 //
 // 3. **Immutability**:
