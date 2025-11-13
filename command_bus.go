@@ -3,6 +3,7 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"sync"
 )
 
@@ -24,7 +25,7 @@ type commandResult struct {
 }
 
 // commandBus is an internal, in-memory, type-safe command dispatcher.
-// It maintains a mapping of command type names to their handlers, a queue for
+// It maintains a mapping of command type names to their handlers, a queues for
 // incoming commands, and synchronization mechanisms for safe concurrent access.
 //
 // The commandBus supports:
@@ -33,17 +34,18 @@ type commandResult struct {
 //   - Safe shutdown that waits for in-flight commands to complete
 //   - Panic recovery in handlers to prevent the bus from crashing
 type commandBus struct {
-	handlers map[string]func(ctx context.Context, command Command) (AppendResult, error)
-	queue    chan queuedCommand
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
-	mu       sync.RWMutex
+	handlers   map[string]func(ctx context.Context, command Command) (AppendResult, error)
+	queues     []chan queuedCommand
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
+	mu         sync.RWMutex
+	shardCount int
 }
 
-// NewCommandBus creates a new instance of commandBus with a buffered queue.
+// NewCommandBus creates a new instance of commandBus with a buffered queues.
 //
 // Parameters:
-//   - bufferSize: the size of the internal queue for enqueued commands.
+//   - bufferSize: the size of the internal queues for enqueued commands.
 //
 // Returns:
 //   - pointer to a newly initialized commandBus. The internal processing
@@ -52,14 +54,24 @@ type commandBus struct {
 // Example:
 //
 //	bus := NewCommandBus(100)
-func NewCommandBus(bufferSize int) *commandBus {
-	bus := &commandBus{
-		queue:    make(chan queuedCommand, bufferSize),
-		handlers: make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
-		stopCh:   make(chan struct{}),
+func NewCommandBus(bufferSize int, shardCount int) *commandBus {
+
+	if shardCount <= 0 {
+		shardCount = 1
 	}
 
-	go bus.start()
+	bus := &commandBus{
+		queues:     make([]chan queuedCommand, bufferSize),
+		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
+		stopCh:     make(chan struct{}),
+		shardCount: shardCount,
+	}
+
+	for i := 0; i < shardCount; i++ {
+		bus.queues[i] = make(chan queuedCommand, bufferSize)
+		go bus.worker(bus.queues[i])
+	}
+
 	return bus
 }
 
@@ -88,9 +100,11 @@ func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	b.wg.Add(1)
 	defer b.wg.Done()
 
+	shard := b.getShard(cmd.AggregateID())
+
 	// Enqueue the command with the response channel
 	select {
-	case b.queue <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
+	case b.queues[shard] <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
 		// Wait for processing result
 		select {
 		case result := <-responseCh:
@@ -103,29 +117,23 @@ func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	}
 }
 
-// start begins processing commands from the internal queue. It is invoked
-// automatically by NewCommandBus and should not be called manually.
-//
-// Behavior:
-//   - Routes commands to their registered handler based on TypeName.
-//   - Recovers from panics in handlers and returns a failure result instead of crashing.
-//   - Sends results back via the queuedCommand's ResponseCh.
-func (b *commandBus) start() {
-	for cmd := range b.queue {
+// worker processes commands from a single shard queues.
+func (b *commandBus) worker(queue chan queuedCommand) {
+	for cmd := range queue {
+		cmdName := TypeName(cmd.Command)
 
-		routeTo := TypeName(cmd.Command)
-
-		h, exists := b.handlers[routeTo]
+		b.mu.RLock()
+		h, exists := b.handlers[cmdName]
+		b.mu.RUnlock()
 
 		if !exists {
 			cmd.ResponseCh <- commandResult{
 				Result: AppendResult{Successful: false},
-				Err:    fmt.Errorf("no commandhandler found for `%s`", routeTo),
+				Err:    fmt.Errorf("no handler for command %s", cmdName),
 			}
 			continue
 		}
 
-		// recover from panics to keep bus alive
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -137,13 +145,15 @@ func (b *commandBus) start() {
 			}()
 
 			res, err := h(cmd.Ctx, cmd.Command)
-
-			cmd.ResponseCh <- commandResult{
-				Result: res,
-				Err:    err,
-			}
+			cmd.ResponseCh <- commandResult{Result: res, Err: err}
 		}()
 	}
+}
+
+func (b *commandBus) getShard(aggregateID string) int {
+	hash := fnv.New32a()
+	hash.Write([]byte(aggregateID))
+	return int(hash.Sum32()) % b.shardCount
 }
 
 // Register adds a new typed command handler to the bus.
@@ -183,7 +193,7 @@ func Register[C Command](b *commandBus, handler CommandHandler[C]) {
 //
 // Behavior:
 //   - Stops accepting new commands.
-//   - Closes the internal queue channel.
+//   - Closes the internal queues channel.
 //   - Waits for all in-flight commands to finish before returning.
 //
 // Example:
@@ -191,6 +201,8 @@ func Register[C Command](b *commandBus, handler CommandHandler[C]) {
 //	bus.Stop()
 func (b *commandBus) Stop() {
 	close(b.stopCh)
-	close(b.queue)
+	for _, q := range b.queues {
+		close(q)
+	}
 	b.wg.Wait()
 }
