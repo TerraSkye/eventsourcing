@@ -25,14 +25,17 @@ type EventStore interface {
 	//   - ctx: Request-scoped context for cancellation and tracing.
 	//   - events: A slice of Envelope values to append. Each envelope should have
 	//     the aggregate ID and version set consistently.
-	//   - originalVersion: The version of the aggregate as last seen by the caller.
-	//     If the current store version does not match originalVersion, the store
-	//     should reject the operation (optimistic concurrency control).
+	//   - revision: The expected stream state or concurrency requirement. This can
+	//     be one of:
+	//       - Any: always append, do not check for conflicts.
+	//       - NoStream: stream must not exist; fail if it does.
+	//       - StreamExists: stream must exist; fail if it does not.
+	//		 -
 	//
 	// Errors:
 	//   - ErrConcurrency if the originalVersion does not match.
 	//   - Any store-specific persistence error.
-	Save(ctx context.Context, events []Envelope, originalVersion uint64) error
+	Save(ctx context.Context, events []Envelope, revision Revision) (AppendResult, error)
 
 	// LoadStream loads all events for the given aggregate ID from version 0 onward.
 	//
@@ -74,4 +77,10 @@ type EventStore interface {
 	//
 	// Implementations should make Close idempotent.
 	Close() error
+}
+
+// AppendResult describes the outcome of an append operation.
+type AppendResult struct {
+	Successful          bool
+	NextExpectedVersion uint64
 }

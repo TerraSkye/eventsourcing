@@ -2,110 +2,207 @@ package eventsourcing
 
 import (
 	"context"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-	"os"
+	"fmt"
+	"hash/fnv"
 	"sync"
 )
 
-type CommandBus interface {
-	Send(ctx context.Context, cmd Command) error
-	AddHandler(handler func(ctx context.Context, command Command) error)
-}
-
-type CommandWithCtx struct {
+// queuedCommand represents a command enqueued in the command bus for processing.
+// Each queuedCommand includes the context for cancellation, the command itself,
+// and a response channel to return the processing result.
+type queuedCommand struct {
 	Ctx        context.Context
 	Command    Command
-	ResponseCh chan<- error
+	ResponseCh chan<- commandResult
 }
 
+// commandResult represents the result of processing a command.
+// It contains the AppendResult (success/failure metadata) and any error
+// encountered during command handling.
+type commandResult struct {
+	Result AppendResult
+	Err    error
+}
+
+// commandBus is an internal, in-memory, type-safe command dispatcher.
+// It maintains a mapping of command type names to their handlers, a queues for
+// incoming commands, and synchronization mechanisms for safe concurrent access.
+//
+// The commandBus supports:
+//   - Enqueuing commands for asynchronous processing
+//   - Typed command registration using generics
+//   - Safe shutdown that waits for in-flight commands to complete
+//   - Panic recovery in handlers to prevent the bus from crashing
 type commandBus struct {
-	tracer   trace.Tracer
-	handlers []func(ctx context.Context, command Command) error
-	queue    chan CommandWithCtx
-	sync.RWMutex
+	handlers   map[string]func(ctx context.Context, command Command) (AppendResult, error)
+	queues     []chan queuedCommand
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
+	mu         sync.RWMutex
+	shardCount int
 }
 
-func NewCommandBus(bufferSize int) CommandBus {
-	bus := &commandBus{
-		queue:  make(chan CommandWithCtx, bufferSize),
-		tracer: otel.Tracer("command-bus"),
+// NewCommandBus creates a new instance of commandBus with a buffered queues.
+//
+// Parameters:
+//   - bufferSize: the size of the internal queues for enqueued commands.
+//
+// Returns:
+//   - pointer to a newly initialized commandBus. The internal processing
+//     goroutine is started automatically.
+//
+// Example:
+//
+//	bus := NewCommandBus(100)
+func NewCommandBus(bufferSize int, shardCount int) *commandBus {
+
+	if shardCount <= 0 {
+		shardCount = 1
 	}
 
-	go bus.start()
+	bus := &commandBus{
+		queues:     make([]chan queuedCommand, bufferSize),
+		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
+		stopCh:     make(chan struct{}),
+		shardCount: shardCount,
+	}
+
+	for i := 0; i < shardCount; i++ {
+		bus.queues[i] = make(chan queuedCommand, bufferSize)
+		go bus.worker(bus.queues[i])
+	}
+
 	return bus
 }
 
-func (b *commandBus) Send(ctx context.Context, cmd Command) error {
-	responseCh := make(chan error, 1)
+// Dispatch enqueues a command for processing by the registered handler and
+// waits for the result. It is safe to call concurrently.
+//
+// Parameters:
+//   - ctx: the context for cancellation or timeout
+//   - cmd: the command to dispatch
+//
+// Returns:
+//   - AppendResult: indicates success/failure of command processing
+//   - error: non-nil if the dispatch failed due to context cancellation or processing error
+//
+// Notes:
+//   - Returns an error immediately if the bus has been stopped.
+//   - Waits for the handler to complete and sends the result back via a response channel.
+func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
+	select {
+	case <-b.stopCh:
+		return AppendResult{Successful: false}, fmt.Errorf("command bus is stopped")
+	default:
+	}
 
-	// Start tracing
-	ctx, span := b.tracer.Start(ctx, "cqrs.command.send",
-		trace.WithAttributes(
+	responseCh := make(chan commandResult, 1)
+	b.wg.Add(1)
+	defer b.wg.Done()
 
-			attribute.String("cqrs.aggregate_id", cmd.AggregateID()),
-			attribute.String("cqrs.application", os.Getenv("application")),
-			attribute.String("cqrs.causation_id", MustExtractCausationId(ctx)),
-			attribute.String("cqrs.correlation_id", trace.SpanContextFromContext(ctx).TraceID().String()),
-			attribute.String("cqrs.command", TypeName(cmd)),
-			// Messaging attributes
-			attribute.String("messaging.conversation_id", trace.SpanContextFromContext(ctx).TraceID().String()),
-			attribute.String("messaging.destination_kind", "aggregate"),
-			attribute.String("messaging.message_id", MustExtractCausationId(ctx)),
-			attribute.String("messaging.operation", "publish"),
-			attribute.String("messaging.system", "cqrs"),
-		),
-	)
-
-	defer span.End()
+	shard := b.getShard(cmd.AggregateID())
 
 	// Enqueue the command with the response channel
 	select {
-	case b.queue <- CommandWithCtx{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
+	case b.queues[shard] <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
 		// Wait for processing result
 		select {
-		case err := <-responseCh:
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			} else {
-				span.SetStatus(codes.Ok, "")
-			}
-			return err // Return processing error (or nil if success)
+		case result := <-responseCh:
+			return result.Result, result.Err // Return processing error (or nil if success)
 		case <-ctx.Done():
-			span.RecordError(ctx.Err())
-			span.SetStatus(codes.Error, ctx.Err().Error())
-			return ctx.Err() // Context timeout/cancellation
+			return AppendResult{Successful: false}, ctx.Err() // Context timeout/cancellation
 		}
-
 	case <-ctx.Done():
-		span.RecordError(ctx.Err())
-		span.SetStatus(codes.Error, ctx.Err().Error())
-		return ctx.Err() // Context timeout before enqueueing
+		return AppendResult{Successful: false}, ctx.Err() // Context timeout before enqueueing
 	}
 }
 
-func (b *commandBus) AddHandler(handler func(ctx context.Context, command Command) error) {
-	b.Lock()
-	defer b.Unlock()
-	b.handlers = append(b.handlers, handler)
+// worker processes commands from a single shard queues.
+func (b *commandBus) worker(queue chan queuedCommand) {
+	for cmd := range queue {
+		cmdName := TypeName(cmd.Command)
+
+		b.mu.RLock()
+		h, exists := b.handlers[cmdName]
+		b.mu.RUnlock()
+
+		if !exists {
+			cmd.ResponseCh <- commandResult{
+				Result: AppendResult{Successful: false},
+				Err:    fmt.Errorf("no handler for command %s", cmdName),
+			}
+			continue
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					cmd.ResponseCh <- commandResult{
+						Result: AppendResult{Successful: false},
+						Err:    fmt.Errorf("panic in handler: %v", r),
+					}
+				}
+			}()
+
+			res, err := h(cmd.Ctx, cmd.Command)
+			cmd.ResponseCh <- commandResult{Result: res, Err: err}
+		}()
+	}
 }
 
-func (b *commandBus) start() {
-	go func() {
-		for cmdWithCtx := range b.queue {
-			for _, handler := range b.handlers {
-				go func(handlerFunc func(ctx context.Context, command Command) error) {
-					err := handlerFunc(cmdWithCtx.Ctx, cmdWithCtx.Command)
-					if err != nil {
-						cmdWithCtx.ResponseCh <- err
-					} else {
-						cmdWithCtx.ResponseCh <- nil
-					}
-				}(handler)
-			}
+func (b *commandBus) getShard(aggregateID string) int {
+	hash := fnv.New32a()
+	hash.Write([]byte(aggregateID))
+	return int(hash.Sum32()) % b.shardCount
+}
+
+// Register adds a new typed command handler to the bus.
+//
+// Parameters:
+//   - b: pointer to the commandBus
+//   - handler: a generic CommandHandler[Command] function for a specific command type C
+//
+// Notes:
+//   - Derives the command type name automatically using TypeName to avoid
+//     manual registration strings.
+//   - Panics if a handler is already registered for the same command type.
+//
+// Example:
+//
+//	err := Register(bus, fooHandler)
+func Register[C Command](b *commandBus, handler CommandHandler[C]) {
+	cmdName := TypeName((*C)(nil))
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, exists := b.handlers[cmdName]; exists {
+		panic(fmt.Sprintf("handler already registered for command type %s", cmdName))
+	}
+
+	b.handlers[cmdName] = func(ctx context.Context, cmd Command) (AppendResult, error) {
+		c, ok := cmd.(C)
+		if !ok {
+			return AppendResult{Successful: false}, fmt.Errorf("expected command type %s but got %T", cmdName, cmd)
 		}
-	}()
+		return handler(ctx, c)
+	}
+}
+
+// Stop shuts down the commandBus safely.
+//
+// Behavior:
+//   - Stops accepting new commands.
+//   - Closes the internal queues channel.
+//   - Waits for all in-flight commands to finish before returning.
+//
+// Example:
+//
+//	bus.Stop()
+func (b *commandBus) Stop() {
+	close(b.stopCh)
+	for _, q := range b.queues {
+		close(q)
+	}
+	b.wg.Wait()
 }
