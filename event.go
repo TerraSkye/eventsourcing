@@ -13,6 +13,7 @@ type Event interface {
 
 type Envelope struct {
 	UUID       uuid.UUID
+	StreamID   string
 	Metadata   map[string]any
 	Event      Event
 	Version    uint64

@@ -1,126 +1,19 @@
 package eventsourcing
 
-//type EventBus interface {
-//	Dispatch(ctx context.Context, event Event) error
-//	Subscribe(handler EventHandler)
-//	SubscribeToGroup(handler *eventGroupProcessor)
-//}
-//
-//type eventBus struct {
-//	tracer        trace.Tracer
-//	handlers      []EventHandler
-//	//groupHandlers map[string][]GroupEventHandler
-//	totalHandlers uint64
-//	sync.RWMutex
-//}
-//
-//func NewEventBus() EventBus {
-//	return &eventBus{
-//		tracer:        otel.Tracer("eventbus"),
-//		//groupHandlers: make(map[string][]GroupEventHandler),
-//		handlers:      make([]EventHandler, 0),
-//	}
-//}
-//
-//// Dispatch sends the event to all subscribed handlers concurrently.
-//func (b *eventBus) Dispatch(ctx context.Context, event Event) error {
-//	// Start a new tracing span, linking it to the incoming context
-//	ctx, span := b.tracer.Start(ctx, "cqrs.event.bus.dispatch",
-//		trace.WithAttributes(
-//			attribute.String("event.aggregate_id", event.AggregateID()),
-//			attribute.String("event.type", TypeName(event)),
-//		),
-//	)
-//	defer span.End()
-//
-//	b.RLock()
-//	handlers := append([]EventHandler{}, b.handlers...)
-//	b.RUnlock()
-//
-//	var wg sync.WaitGroup
-//	errChan := make(chan error, len(handlers))
-//
-//	for _, handler := range handlers {
-//		expectedEvent := handler.NewEvent()
-//
-//		if TypeName(expectedEvent) == TypeName(event) {
-//			wg.Add(1)
-//			go func(h EventHandler) {
-//				defer wg.Done()
-//				h.HandlerName()
-//				// Create a new span for the handler, linking it to Dispatch
-//				handlerCtx, handlerSpan := b.tracer.Start(ctx, "cqrs.event.handler.process",
-//					trace.WithAttributes(
-//						attribute.String("handler.name", h.HandlerName()),
-//						attribute.String("event.aggregate_id", event.AggregateID()),
-//						attribute.String("event.type", TypeName(event)),
-//					),
-//					trace.WithLinks(trace.LinkFromContext(ctx)),
-//				)
-//
-//				if err := h.Handle(handlerCtx, event); err != nil {
-//					handlerSpan.RecordError(err)
-//					handlerSpan.SetStatus(codes.Error, err.Error())
-//					errChan <- err
-//				}
-//
-//				handlerSpan.End()
-//			}(handler)
-//		}
-//	}
-//
-//	for handlerName, group := range b.groupHandlers {
-//
-//		for _, handler := range group {
-//			expectedEvent := handler.NewEvent()
-//			if TypeName(expectedEvent) == TypeName(event) {
-//				wg.Add(1)
-//				go func(h GroupEventHandler) {
-//					defer wg.Done()
-//
-//					// Create a new span for the handler, linking it to Dispatch
-//					handlerCtx, handlerSpan := b.tracer.Start(ctx, "cqrs.event.handler.process",
-//						trace.WithAttributes(
-//							attribute.String("handler.name", handlerName),
-//							attribute.String("event.aggregate_id", event.AggregateID()),
-//							attribute.String("event.type", TypeName(event)),
-//						),
-//						trace.WithLinks(trace.LinkFromContext(ctx)),
-//					)
-//
-//					if err := h.Handle(handlerCtx, event); err != nil {
-//						handlerSpan.RecordError(err)
-//						handlerSpan.SetStatus(codes.Error, err.Error())
-//						errChan <- err
-//					}
-//					handlerSpan.End()
-//				}(handler)
-//			}
-//		}
-//	}
-//
-//	wg.Wait()
-//	close(errChan)
-//
-//	if len(errChan) > 0 {
-//
-//		err := <-errChan
-//		span.RecordError(err)
-//		span.SetStatus(codes.Error, err.Error())
-//		return err
-//	}
-//	return nil
-//}
-//
-//func (b *eventBus) Subscribe(handler EventHandler) {
-//	b.Lock()
-//	defer b.Unlock()
-//	b.handlers = append(b.handlers, handler)
-//}
-//
-//func (b *eventBus) SubscribeToGroup(handler *eventGroupProcessor) {
-//	b.Lock()
-//	defer b.Unlock()
-//	b.groupHandlers[handler.groupName] = handler.groupEventHandlers
-//	b.totalHandlers += uint64(len(handler.groupEventHandlers))
-//}
+import "context"
+
+// EventBus is an EventHandler that distributes published events to all matching
+// handlers that are registered, but only one of each type will handle the event.
+// Events are not guaranteed to be handeled in order.
+type EventBus interface {
+	// AddHandler adds a handler for an event. Returns an error if either the
+	// matcher or handler is nil, the handler is already added or there was some
+	// other problem adding the handler (for networked handlers for example).
+	Subscribe(ctx context.Context, name string, filter func(Event) bool, handler EventHandler) error
+
+	// Errors returns an error channel where async handling errors are sent.
+	Errors() <-chan error
+
+	// Close closes the EventBus and waits for all handlers to finish.
+	Close() error
+}

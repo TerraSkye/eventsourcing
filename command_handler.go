@@ -10,6 +10,32 @@ import (
 	"github.com/google/uuid"
 )
 
+// StreamNamer produces the stream name for a given command, with access to context
+type StreamNamer func(ctx context.Context, cmd Command) string
+
+// DefaultStreamNamer is the default function used to determine the stream name
+// for a given command when no custom StreamNamer is provided.
+//
+// By default, it returns the AggregateID of the command as the stream name.
+//
+// This variable can be overridden globally to change the default behavior
+// for all command handlers, for example to support multi-tenancy, prefixes,
+// or other custom naming conventions.
+//
+// Example usage:
+//
+//	// Default behavior uses AggregateID
+//	stream := DefaultStreamNamer(ctx, myCommand)
+//
+//	// Override globally
+//	DefaultStreamNamer = func(ctx context.Context, cmd Command) string {
+//	    tenant := ctx.Value("tenant").(string)
+//	    return fmt.Sprintf("%s-orders-%s", tenant, cmd.AggregateID())
+//	}
+var DefaultStreamNamer StreamNamer = func(ctx context.Context, cmd Command) string {
+	return cmd.AggregateID()
+}
+
 // CommandHandler defines a function type for handling commands of a specific type.
 //
 // C represents the concrete command type implementing the Command interface.
@@ -106,7 +132,6 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //   - opts: Optional CommandHandlerOption values for customizing behavior, such as:
 //   - Revision: The expected stream revision (default is Any).
 //   - RetryAttempts: Number of retries on version conflicts (default 0).
-//   - RetryDelay: Delay between retries (default 100ms).
 //
 // Returns:
 //   - A function that takes a context and a command of type C, and returns:
@@ -141,10 +166,13 @@ func NewCommandHandler[T any, C Command](
 			Revision:      Any{}, // default
 			RetryStrategy: &backoff.StopBackOff{},
 			MetadataFuncs: []func(ctx context.Context) map[string]any{},
+			StreamNamer:   DefaultStreamNamer,
 		}
 		for _, o := range opts {
 			o(cfg)
 		}
+
+		var stream = cfg.StreamNamer(ctx, command)
 
 		state := initialState
 		var revision uint64
@@ -152,7 +180,7 @@ func NewCommandHandler[T any, C Command](
 		result, err := backoff.RetryWithData(func() (AppendResult, error) {
 
 			// --- Load history ---
-			history, err := store.LoadStreamFrom(ctx, command.AggregateID(), revision)
+			history, err := store.LoadStreamFrom(ctx, stream, revision)
 			if err != nil {
 				// when failing to load of the event stream. this is the error.
 				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
@@ -195,6 +223,7 @@ func NewCommandHandler[T any, C Command](
 				expectedVersion++
 				envelopes[i] = Envelope{
 					UUID:       uuid.New(),
+					StreamID:   stream,
 					Event:      event,
 					Metadata:   baseMetadata,
 					Version:    expectedVersion,
@@ -232,10 +261,12 @@ func NewCommandHandler[T any, C Command](
 //     Defaults to Any{}.
 //   - RetryStrategy: Strategy for retrying operations in case of transient
 //     failures or version conflicts. Defaults to no retries.
-//   - ShouldRetry: Optional hook to override which errors are considered
-//     retryable. If nil, only version conflicts trigger retries.
 //   - MetadataFuncs: Slice of functions that generate metadata for each event.
 //     Each function receives the context and returns a map of key-value pairs.
+//   - StreamNamer: Function used to determine the stream name for a command.
+//     If nil, DefaultStreamNamer is used, which returns the AggregateID by default.
+//     This can be overridden per handler or globally for custom naming conventions
+//     (e.g., multi-tenancy, dynamic prefixes, or other domain-specific logic).
 type handlerOptions struct {
 	// Revision is the condition applied when saving events to the stream.
 	// It determines the concurrency check behavior (default is Any).
@@ -245,13 +276,13 @@ type handlerOptions struct {
 	// or version conflicts. If nil, no retries are performed.
 	RetryStrategy backoff.BackOff
 
-	// ShouldRetry is an optional hook to determine whether a given error should trigger a retry.
-	// If nil, only version conflicts (ErrVersionConflict) are considered retryable.
-	ShouldRetry func(error) bool
-
 	// MetadataFuncs is a list of functions used to enrich events with metadata before saving.
 	// Each function receives the context and returns a map of key-value pairs.
 	MetadataFuncs []func(ctx context.Context) map[string]any
+
+	// StreamNamer produces the name of the event stream for a command.
+	// If nil, DefaultStreamNamer is used.
+	StreamNamer StreamNamer
 }
 
 // WithRevision sets the expected stream revision for a NewCommandHandler.
