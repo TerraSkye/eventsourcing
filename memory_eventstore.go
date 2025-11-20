@@ -15,7 +15,7 @@ import (
 type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
-	bus    EventBus
+	//bus    EventBus
 	global []*Envelope
 	events map[string][]*Envelope
 }
@@ -119,25 +119,25 @@ func (m *MemoryStore) Save(ctx context.Context, events []Envelope, revision Revi
 	}
 
 	// Publish events
-	for _, event := range events {
-		eventCtx, eventSpan := m.tracer.Start(ctx, "cqrs.event.store.publish",
-			trace.WithAttributes(
-				attribute.String("event.aggregate_id", event.Event.AggregateID()),
-				attribute.String("event.type", TypeName(event.Event)),
-			),
-		)
-
-		if err := m.bus.Dispatch(eventCtx, event.Event); err != nil {
-			eventSpan.RecordError(err)
-			eventSpan.SetStatus(codes.Error, err.Error())
-			eventSpan.End()
-			return AppendResult{
-				Successful: false,
-			}, err
-		}
-
-		eventSpan.End()
-	}
+	//for _, event := range events {
+	//	eventCtx, eventSpan := m.tracer.Start(ctx, "cqrs.event.store.publish",
+	//		trace.WithAttributes(
+	//			attribute.String("event.aggregate_id", event.Event.AggregateID()),
+	//			attribute.String("event.type", TypeName(event.Event)),
+	//		),
+	//	)
+	//
+	//	//if err := m.bus.Dispatch(eventCtx, event.Event); err != nil {
+	//	//	eventSpan.RecordError(err)
+	//	//	eventSpan.SetStatus(codes.Error, err.Error())
+	//	//	eventSpan.End()
+	//	//	return AppendResult{
+	//	//		Successful: false,
+	//	//	}, err
+	//	//}
+	//
+	//	eventSpan.End()
+	//}
 
 	return AppendResult{
 		Successful:          true,
@@ -219,11 +219,10 @@ func (m *MemoryStore) Close() error {
 	return nil
 }
 
-func NewMemoryStore(bus EventBus) EventStore {
+func NewMemoryStore() EventStore {
 	return &MemoryStore{
 		events: make(map[string][]*Envelope),
 		global: make([]*Envelope, 0),
 		tracer: otel.Tracer("event-store"),
-		bus:    bus,
 	}
 }
