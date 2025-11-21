@@ -2,7 +2,6 @@ package eventsourcing
 
 import (
 	"context"
-	"iter"
 )
 
 // EventStore defines the contract for an append-only event store
@@ -47,7 +46,7 @@ type EventStore interface {
 	// Returns:
 	//   - iter.Seq[*Envelope]: Lazy iterator over events.
 	//   - error: Non-nil if the store could not read events.
-	LoadStream(ctx context.Context, id string) (iter.Seq[*Envelope], error)
+	LoadStream(ctx context.Context, id string) (*EnvelopeIterator, error)
 
 	// LoadStreamFrom loads all events for the given aggregate ID starting at the specified version.
 	//
@@ -57,8 +56,8 @@ type EventStore interface {
 	//   - version: Zero-based version index from which to start iteration.
 	//
 	// Returns:
-	//   - iter.Seq[*Envelope]: Lazy iterator over events from
-	LoadStreamFrom(ctx context.Context, id string, version uint64) (iter.Seq[*Envelope], error)
+	//   - EnvelopeIterator: Lazy iterator over events from
+	LoadStreamFrom(ctx context.Context, id string, version uint64) (*EnvelopeIterator, error)
 
 	// LoadFromAll loads all events from all aggregates starting at the specified version index.
 	//
@@ -70,7 +69,7 @@ type EventStore interface {
 	// Events should be yielded in chronological order as stored by the backend.
 	// Consumers should not assume global ordering unless explicitly documented by
 	// the implementation.
-	LoadFromAll(ctx context.Context, version uint64) (iter.Seq[*Envelope], error)
+	LoadFromAll(ctx context.Context, version uint64) (*EnvelopeIterator, error)
 	// Close releases any resources held by the EventStore, such as network
 	// connections or file handles. After Close is called, the EventStore should
 	// not be used.

@@ -180,16 +180,24 @@ func NewCommandHandler[T any, C Command](
 		result, err := backoff.RetryWithData(func() (AppendResult, error) {
 
 			// --- Load history ---
-			history, err := store.LoadStreamFrom(ctx, stream, revision)
+			iter, err := store.LoadStreamFrom(ctx, stream, revision)
 			if err != nil {
 				// when failing to load of the event stream. this is the error.
 				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
 			}
-			// --- Evolve state ---
-			for envelope := range history {
+
+			for iter.Next(ctx) {
+				envelope := iter.Value()
 				revision = envelope.Version
 				state = evolve(state, envelope)
 			}
+
+			if err := iter.Err(); err != nil {
+
+				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, err
+			}
+
+			// --- Evolve state ---
 
 			// Update revision if ExplicitRevision is used
 			if _, ok := cfg.Revision.(ExplicitRevision); ok {

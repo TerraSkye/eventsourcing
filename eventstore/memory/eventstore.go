@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/terraskye/eventsourcing"
-	"iter"
 	"sync"
 
 	"go.opentelemetry.io/otel"
@@ -13,7 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type MemoryStore struct {
+type memoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
 	//bus    EventBus
@@ -21,8 +20,8 @@ type MemoryStore struct {
 	events map[string][]*eventsourcing.Envelope
 }
 
-func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (iter.Seq[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "MemoryStore.LoadFromAll",
+func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.EnvelopeIterator, error) {
+	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFromAll",
 		trace.WithAttributes(
 			attribute.Int64("start_version", int64(version)),
 		),
@@ -32,30 +31,27 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (iter.Seq
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	seq := func(yield func(*eventsourcing.Envelope) bool) {
-		for _, events := range m.events {
-			if int(version) < len(events) {
-				for _, event := range events[version:] {
-					select {
-					case <-ctx.Done():
-						span.RecordError(ctx.Err())
-						span.SetStatus(codes.Error, ctx.Err().Error())
-						return
-					default:
-						if !yield(event) {
-							return
-						}
-					}
-				}
-			}
-		}
-		span.SetStatus(codes.Ok, "")
-	}
+	index := version
+	allEvents := m.global // global slice of all events
 
-	return seq, nil
+	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+		if ctx.Err() != nil {
+			span.RecordError(ctx.Err())
+			span.SetStatus(codes.Error, ctx.Err().Error())
+			return nil, ctx.Err()
+		}
+		if int(index) >= len(allEvents) {
+			return nil, nil
+		}
+		ev := allEvents[index]
+		index++
+		return ev, nil
+	})
+
+	return iter, nil
 }
 
-func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.Revision) (eventsourcing.AppendResult, error) {
+func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.Revision) (eventsourcing.AppendResult, error) {
 	ctx, span := m.tracer.Start(ctx, "cqrs.event.store.write",
 		trace.WithAttributes(attribute.Int("event.count", len(events))),
 	)
@@ -145,8 +141,8 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		NextExpectedVersion: currentVersion,
 	}, nil
 }
-func (m *MemoryStore) LoadStream(ctx context.Context, u string) (iter.Seq[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "MemoryStore.Load",
+func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.EnvelopeIterator, error) {
+	ctx, span := m.tracer.Start(ctx, "memoryStore.Load",
 		trace.WithAttributes(attribute.String("aggregate_id", u)),
 	)
 	defer span.End()
@@ -157,27 +153,30 @@ func (m *MemoryStore) LoadStream(ctx context.Context, u string) (iter.Seq[*event
 
 	if !exists {
 		// Return empty sequence
-		return func(yield func(*eventsourcing.Envelope) bool) {}, nil
+		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+			return nil, nil
+		}), nil
 	}
 
-	seq := func(yield func(*eventsourcing.Envelope) bool) {
-		for _, event := range events {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if !yield(event) {
-					return
-				}
-			}
+	index := 0
+	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+		if ctx.Err() != nil {
+			span.RecordError(ctx.Err())
+			span.SetStatus(codes.Error, ctx.Err().Error())
+			return nil, ctx.Err()
 		}
-	}
-
-	return seq, nil
+		if index >= len(events) {
+			return nil, nil
+		}
+		ev := events[index]
+		index++
+		return ev, nil
+	})
+	return iter, nil
 }
 
-func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (iter.Seq[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "MemoryStore.LoadFrom",
+func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.EnvelopeIterator, error) {
+	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFrom",
 		trace.WithAttributes(
 			attribute.String("aggregate_id", id),
 			attribute.Int("start_version", int(version)),
@@ -191,29 +190,29 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 
 	if !exists || int(version) >= len(events) {
 		// Return empty sequence
-		return func(yield func(*eventsourcing.Envelope) bool) {}, nil
+		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, nil }), nil
 	}
 
-	seq := func(yield func(*eventsourcing.Envelope) bool) {
-		for _, event := range events[version:] {
-			select {
-			case <-ctx.Done():
-				span.RecordError(ctx.Err())
-				span.SetStatus(codes.Error, ctx.Err().Error())
-				return
-			default:
-				if !yield(event) {
-					return
-				}
-			}
+	index := version
+
+	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+		if ctx.Err() != nil {
+			span.RecordError(ctx.Err())
+			span.SetStatus(codes.Error, ctx.Err().Error())
+			return nil, ctx.Err()
 		}
-		span.SetStatus(codes.Ok, "")
-	}
+		if int(index) >= len(events) {
+			return nil, nil
+		}
+		ev := events[index]
+		index++
+		return ev, nil
+	})
 
-	return seq, nil
+	return iter, nil
 }
 
-func (m *MemoryStore) Close() error {
+func (m *memoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = make(map[string][]*eventsourcing.Envelope)
@@ -221,7 +220,7 @@ func (m *MemoryStore) Close() error {
 }
 
 func NewMemoryStore() eventsourcing.EventStore {
-	return &MemoryStore{
+	return &memoryStore{
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
 		tracer: otel.Tracer("event-store"),
