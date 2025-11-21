@@ -41,6 +41,7 @@ func (b *eventBus) Subscribe(
 	name string,
 	filter func(cqrs.Event) bool,
 	handler cqrs.EventHandler,
+	opts ...cqrs.SubscriberOption,
 ) error {
 	if filter == nil || handler == nil {
 		return errors.New("filter and handler cannot be nil")
@@ -62,8 +63,9 @@ func (b *eventBus) Subscribe(
 		name:    name,
 		filter:  filter,
 		handler: handler,
-		events:  make(chan cqrs.Event, b.bufferSize),
-		cancel:  cancel,
+		//TODO change cqrs.event to cqrs.Envelope
+		events: make(chan cqrs.Event, b.bufferSize),
+		cancel: cancel,
 	}
 
 	b.subs[name] = s
@@ -124,6 +126,9 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			if !ok {
 				return
 			}
+
+			// todo extract event envelope
+			// todo add envelope content into ctx
 
 			// Handle event
 			if err := s.handler.Handle(ctx, ev); err != nil {

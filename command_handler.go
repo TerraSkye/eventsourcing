@@ -146,7 +146,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //   - If the configured Revision is ExplicitRevision, it is updated to the latest version
 //     before saving to ensure optimistic concurrency control.
 //   - If the decide function returns no events, the handler returns a successful result without persisting.
-//   - Each event is wrapped in a Envelope with a new UUID, metadata map, version, and timestamp.
+//   - Each event is wrapped in an Envelope with a new UUID, metadata map, version, and timestamp.
 //   - Errors during loading, evolving, deciding, or saving are propagated with context using errors.Wrap.
 //
 // Example Usage:
@@ -222,7 +222,7 @@ func NewCommandHandler[T any, C Command](
 			for i, event := range events {
 				expectedVersion++
 				envelopes[i] = Envelope{
-					UUID:       uuid.New(),
+					EventID:    uuid.New(),
 					StreamID:   stream,
 					Event:      event,
 					Metadata:   baseMetadata,
