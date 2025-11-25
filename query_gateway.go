@@ -3,8 +3,6 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
-
-	"github.com/io-da/query"
 )
 
 // GenericQueryGateway provides a typed interface for executing queries
@@ -12,7 +10,7 @@ import (
 // it to be used wherever a QueryHandler is expected.
 //
 // Type Parameters:
-//   - T: The query type implementing query.Query.
+//   - T: The query type implementing Query.
 //   - R: The result type.
 //
 // Parameters:
@@ -35,7 +33,7 @@ import (
 //	    panic(err)
 //	}
 //	fmt.Println(result.Value)
-type GenericQueryGateway[T query.Query, R any | Iterator[any]] struct {
+type GenericQueryGateway[T Query, R any | Iterator[any]] struct {
 	bus *QueryBus
 }
 
@@ -44,7 +42,7 @@ type GenericQueryGateway[T query.Query, R any | Iterator[any]] struct {
 //
 // Returns:
 //   - GenericQueryGateway[T,R]: a typed interface to execute queries.
-func NewQueryGateway[T query.Query, R any | Iterator[any]](bus *QueryBus) GenericQueryGateway[T, R] {
+func NewQueryGateway[T Query, R any | Iterator[any]](bus *QueryBus) GenericQueryGateway[T, R] {
 	return GenericQueryGateway[T, R]{bus: bus}
 }
 

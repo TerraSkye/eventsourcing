@@ -2,16 +2,19 @@ package eventsourcing
 
 import (
 	"context"
-
-	"github.com/io-da/query"
 )
+
+// Query is the interface that must be implemented by any type to be considered a query.
+type Query interface {
+	ID() []byte
+}
 
 // QueryHandler represents a handler for a specific query type T and
 // produces a result of type R. This interface allows generic, type-safe
 // registration and execution of query logic.
 //
 // Type Parameters:
-//   - T: The query type implementing query.Query.
+//   - T: The query type implementing Query.
 //   - R: The return type, either a single ReadModel or an Iterator.
 //
 // Example Usage:
@@ -24,7 +27,7 @@ import (
 //	})
 //
 //	var _ QueryHandler[MyQuery, *MyResult] = handler
-type QueryHandler[T query.Query, R any | Iterator[any]] interface {
+type QueryHandler[T Query, R any | Iterator[any]] interface {
 	HandleQuery(ctx context.Context, qry T) (R, error)
 }
 
@@ -36,7 +39,7 @@ type QueryHandler[T query.Query, R any | Iterator[any]] interface {
 //	handler := NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
 //	    return &MyResult{Value: 42}, nil
 //	})
-type queryHandlerFunc[T query.Query, R any | Iterator[any]] func(ctx context.Context, qry T) (R, error)
+type queryHandlerFunc[T Query, R any | Iterator[any]] func(ctx context.Context, qry T) (R, error)
 
 // HandleQuery calls the underlying function.
 func (f queryHandlerFunc[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
@@ -56,6 +59,6 @@ func (f queryHandlerFunc[T, R]) HandleQuery(ctx context.Context, qry T) (R, erro
 //	handler := NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
 //	    return &MyResult{Value: 42}, nil
 //	})
-func NewQueryHandlerFunc[T query.Query, R any | Iterator[any]](fn func(ctx context.Context, qry T) (R, error)) QueryHandler[T, R] {
+func NewQueryHandlerFunc[T Query, R any | Iterator[any]](fn func(ctx context.Context, qry T) (R, error)) QueryHandler[T, R] {
 	return queryHandlerFunc[T, R](fn)
 }

@@ -2,8 +2,6 @@ package eventsourcing
 
 import (
 	"fmt"
-
-	"github.com/io-da/query"
 )
 
 // QueryBus acts as a central registry for query handlers. It stores
@@ -68,7 +66,7 @@ type handlerSettings struct {
 //	}))
 //
 // Generic helper function
-func RegisterQueryHandler[T query.Query, R any | Iterator[any]](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
+func RegisterQueryHandler[T Query, R any | Iterator[any]](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
 	key := fmt.Sprintf("%T|%T", *new(T), *new(R))
 	bus.handlers[key] = handler
 
