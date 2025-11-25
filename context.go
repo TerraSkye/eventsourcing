@@ -18,7 +18,7 @@ const (
 	metadataKey   ctxKey = "metadata"
 )
 
-// New: WithEnvelope
+// WithEnvelope adds the context of the Envelope to the context
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = context.WithValue(ctx, streamIDKey, env.StreamID)
 	ctx = context.WithValue(ctx, eventIDKey, env.EventID)

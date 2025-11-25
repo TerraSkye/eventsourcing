@@ -2,9 +2,10 @@ package eventsourcing_test
 
 import (
 	"context"
+	"testing"
+
 	"github.com/stretchr/testify/assert"
 	cqrs "github.com/terraskye/eventsourcing"
-	"testing"
 )
 
 type CartCreated struct {

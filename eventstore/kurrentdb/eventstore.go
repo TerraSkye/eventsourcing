@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	cqrs "github.com/terraskye/eventsourcing"
 )
@@ -12,7 +13,7 @@ type eventstore struct {
 	client *kurrentdb.Client
 }
 
-// NewEventBus creates a KurrentDB-backed event bus
+// NewEventStore creates a KurrentDB-backed eventstore
 func NewEventStore(db *kurrentdb.Client) cqrs.EventStore {
 	return &eventstore{
 		client: db,
@@ -61,7 +62,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 
 }
 
-func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.EnvelopeIterator, error) {
+func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction: kurrentdb.Forwards,
 		From: kurrentdb.StreamRevision{
@@ -117,7 +118,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.EnvelopeIt
 	return iter, nil
 }
 
-func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*cqrs.EnvelopeIterator, error) {
+func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
 
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction: kurrentdb.Forwards,
@@ -174,7 +175,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 	return iter, nil
 }
 
-func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.EnvelopeIterator, error) {
+func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
 
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
 		Direction: kurrentdb.Forwards,

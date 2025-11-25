@@ -3,8 +3,9 @@ package memory
 import (
 	"context"
 	"fmt"
-	"github.com/terraskye/eventsourcing"
 	"sync"
+
+	"github.com/terraskye/eventsourcing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -20,7 +21,7 @@ type memoryStore struct {
 	events map[string][]*eventsourcing.Envelope
 }
 
-func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.EnvelopeIterator, error) {
+func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFromAll",
 		trace.WithAttributes(
 			attribute.Int64("start_version", int64(version)),
@@ -141,7 +142,7 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		NextExpectedVersion: currentVersion,
 	}, nil
 }
-func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.EnvelopeIterator, error) {
+func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "memoryStore.Load",
 		trace.WithAttributes(attribute.String("aggregate_id", u)),
 	)
@@ -175,7 +176,7 @@ func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 	return iter, nil
 }
 
-func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.EnvelopeIterator, error) {
+func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFrom",
 		trace.WithAttributes(
 			attribute.String("aggregate_id", id),
