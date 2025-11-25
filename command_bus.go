@@ -120,7 +120,7 @@ func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 // worker processes commands from a single shard queues.
 func (b *commandBus) worker(queue chan queuedCommand) {
 	for cmd := range queue {
-		cmdName := TypeName(cmd.Command)
+		cmdName := fmt.Sprintf("%T", cmd.Command)
 
 		b.mu.RLock()
 		h, exists := b.handlers[cmdName]
@@ -163,7 +163,7 @@ func (b *commandBus) getShard(aggregateID string) int {
 //   - handler: a generic CommandHandler[Command] function for a specific command type C
 //
 // Notes:
-//   - Derives the command type name automatically using TypeName to avoid
+//   - Derives the command type name automatically using fmt.Sprintf("%T") to avoid
 //     manual registration strings.
 //   - Panics if a handler is already registered for the same command type.
 //
@@ -171,8 +171,7 @@ func (b *commandBus) getShard(aggregateID string) int {
 //
 //	err := Register(bus, fooHandler)
 func Register[C Command](b *commandBus, handler CommandHandler[C]) {
-	cmdName := TypeName((*C)(nil))
-
+	cmdName := fmt.Sprintf("%T", (*C)(nil))
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

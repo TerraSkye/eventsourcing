@@ -334,3 +334,18 @@ func WithMetadataExtractor(fn func(ctx context.Context) map[string]any) CommandH
 		h.MetadataFuncs = append(h.MetadataFuncs, fn)
 	}
 }
+
+// WithStreamNamer adds stream namer to a NewCommandHandler.
+//
+// Each metadata function is called for every command handling execution and can
+// inject additional key-value pairs into the event envelopes. Multiple metadata
+// extractors can be combined; they are applied in order of registration.
+//
+// Usage:
+//
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithMetadataExtractor(myMetadataFunc))
+func WithStreamNamer(namer StreamNamer) CommandHandlerOption {
+	return func(h *handlerOptions) {
+		h.StreamNamer = namer
+	}
+}
