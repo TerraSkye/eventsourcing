@@ -11,7 +11,7 @@ type EventBus interface {
 	// AddHandler adds a handler for an event. Returns an error if either the
 	// matcher or handler is nil, the handler is already added or there was some
 	// other problem adding the handler (for networked handlers for example).
-	Subscribe(ctx context.Context, name string, filter func(Event) bool, handler EventHandler, options ...SubscriberOption) error
+	Subscribe(ctx context.Context, name string, handler EventHandler, options ...SubscriberOption) error
 
 	// Errors returns an error channel where async handling errors are sent.
 	Errors() <-chan error

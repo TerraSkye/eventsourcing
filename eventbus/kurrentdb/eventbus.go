@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	cqrs "github.com/terraskye/eventsourcing"
-	"sync"
 )
 
 type eventBus struct {
@@ -38,8 +39,8 @@ func NewEventBus(db *kurrentdb.Client, buffer uint64) cqrs.EventBus {
 	}
 }
 
-func (b *eventBus) Subscribe(ctx context.Context, name string, filter func(cqrs.Event) bool, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
-	if filter == nil || handler == nil {
+func (b *eventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
+	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
 	}
 
@@ -61,7 +62,7 @@ func (b *eventBus) Subscribe(ctx context.Context, name string, filter func(cqrs.
 		o(&opt)
 	}
 
-	sub := &subscriber{name: name, filter: filter, handler: handler, cancel: cancel, opt: opt}
+	sub := &subscriber{name: name, handler: handler, cancel: cancel, opt: opt}
 	b.subs[name] = sub
 	b.mu.Unlock()
 
@@ -150,7 +151,7 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		}
 
 		if s.filter(envelope.Event) {
-			if err := s.handler.Handle(ctx, envelope.Event); err != nil {
+			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
 				select {
 				case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
 				default:
@@ -200,5 +201,31 @@ func WithFromStart() cqrs.SubscriberOption {
 			panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
 		}
 		opts.From = kurrentdb.Start{}
+	}
+}
+
+func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*kurrentdb.SubscribeToAllOptions)
+		if !ok {
+			panic(fmt.Sprintf("WithFilterEvents: expected *SubscribeToAllOptions, got %T", cfg))
+		}
+		opts.Filter = &kurrentdb.SubscriptionFilter{
+			Type:     kurrentdb.EventFilterType,
+			Prefixes: filteredEvents,
+		}
+	}
+}
+
+func WithFilterStream(streams []string) cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*kurrentdb.SubscribeToAllOptions)
+		if !ok {
+			panic(fmt.Sprintf("WithFilterStream: expected *SubscribeToAllOptions, got %T", cfg))
+		}
+		opts.Filter = &kurrentdb.SubscriptionFilter{
+			Type:     kurrentdb.StreamFilterType,
+			Prefixes: streams,
+		}
 	}
 }

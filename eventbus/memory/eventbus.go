@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	cqrs "github.com/terraskye/eventsourcing"
@@ -11,10 +12,14 @@ import (
 
 type subscriber struct {
 	name    string
-	filter  func(cqrs.Event) bool
 	handler cqrs.EventHandler
-	events  chan cqrs.Event
+	filter  *filter
+	events  chan *cqrs.Envelope
 	cancel  context.CancelFunc
+}
+
+type filter struct {
+	events []string
 }
 
 type eventBus struct {
@@ -39,11 +44,10 @@ func NewEventBus(bufferSize int) cqrs.EventBus {
 func (b *eventBus) Subscribe(
 	ctx context.Context,
 	name string,
-	filter func(cqrs.Event) bool,
 	handler cqrs.EventHandler,
 	opts ...cqrs.SubscriberOption,
 ) error {
-	if filter == nil || handler == nil {
+	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
 	}
 
@@ -61,11 +65,16 @@ func (b *eventBus) Subscribe(
 	workerCtx, cancel := context.WithCancel(context.Background())
 	s := &subscriber{
 		name:    name,
-		filter:  filter,
 		handler: handler,
-		//TODO change cqrs.event to cqrs.Envelope
-		events: make(chan cqrs.Event, b.bufferSize),
+		filter: &filter{
+			events: make([]string, 0),
+		},
+		events: make(chan *cqrs.Envelope, b.bufferSize),
 		cancel: cancel,
+	}
+
+	for _, opt := range opts {
+		opt(s.filter)
 	}
 
 	b.subs[name] = s
@@ -131,7 +140,7 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			// todo add envelope content into ctx
 
 			// Handle event
-			if err := s.handler.Handle(ctx, ev); err != nil {
+			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, ev), ev.Event); err != nil {
 				select {
 				case b.errs <- fmt.Errorf("handler %q: %w", s.name, err):
 				default:
@@ -165,12 +174,24 @@ func (b *eventBus) Dispatch(ev *cqrs.Envelope) {
 	}
 
 	for _, s := range b.subs {
-		if s.filter(ev.Event) {
+
+		if s.filter.events == nil || slices.Contains(s.filter.events, cqrs.TypeName(ev.Event)) {
 			select {
-			case s.events <- ev.Event:
+			case s.events <- ev:
 			default:
 				// Drop event if subscriber is busy
 			}
 		}
+	}
+}
+
+func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*filter)
+		if !ok {
+			panic(fmt.Sprintf("WithFilterEvents: expected *filter, got %T", cfg))
+		}
+
+		opts.events = filteredEvents
 	}
 }

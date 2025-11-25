@@ -46,3 +46,27 @@ func NewIterator(nextFunc func(ctx context.Context) (*Envelope, error)) *Envelop
 		nextFunc: nextFunc,
 	}
 }
+
+// Iterator is the struct that keeps track of the all the information needed to iterate over all the items.
+type Iterator[Entity any, Criteria any] struct {
+}
+
+func (i *Iterator[Entity, Criteria]) Next(ctx context.Context) bool {
+	return false
+}
+
+func (i *Iterator[Entity, Criteria]) Value() *Entity {
+	return nil
+}
+
+func (i *Iterator[Entity, Criteria]) Err() error {
+	return nil
+}
+
+func (i *Iterator[Entity, Criteria]) All(ctx context.Context) ([]*Entity, error) {
+	var results []*Entity
+	for i.Next(ctx) {
+		results = append(results, i.Value())
+	}
+	return results, i.Err()
+}
