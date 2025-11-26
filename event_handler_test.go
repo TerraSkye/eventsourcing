@@ -8,9 +8,15 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
+var _ cqrs.Event = (*CartCreated)(nil)
+var _ cqrs.Event = (*ItemAdded)(nil)
+var _ cqrs.Event = (*OtherEvent)(nil)
+
 type CartCreated struct {
 	ID string
 }
+
+func (c CartCreated) EventType() string { return cqrs.TypeName(c) }
 
 func (c CartCreated) AggregateID() string { return c.ID }
 
@@ -19,10 +25,12 @@ type ItemAdded struct {
 }
 
 func (i ItemAdded) AggregateID() string { return i.ID }
+func (i ItemAdded) EventType() string   { return cqrs.TypeName(i) }
 
 type OtherEvent struct{}
 
 func (o OtherEvent) AggregateID() string { return "" }
+func (o OtherEvent) EventType() string   { return cqrs.TypeName(o) }
 
 // --- Tests ---
 

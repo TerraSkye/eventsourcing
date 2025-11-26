@@ -30,8 +30,7 @@ var (
 // registerEventTypeDefault registers an event using its derived type name.
 // Panics if the event name is already registered.
 func registerEventTypeDefault[T Event](ev T) {
-	eventName := TypeName(ev)
-
+	eventName := ev.EventType()
 	mu.Lock()
 	defer mu.Unlock()
 

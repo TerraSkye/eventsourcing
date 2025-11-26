@@ -9,6 +9,7 @@ import (
 // Event is a domain event describing a change that has happened to an aggregate.
 type Event interface {
 	AggregateID() string
+	EventType() string
 }
 
 type Envelope struct {

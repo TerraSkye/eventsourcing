@@ -39,7 +39,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 
 		kevents[i] = kurrentdb.EventData{
 			EventID:     ev.EventID,
-			EventType:   cqrs.TypeName(ev.Event),
+			EventType:   ev.Event.EventType(),
 			ContentType: kurrentdb.ContentTypeJson,
 			Data:        eventData,
 			Metadata:    metaData,
