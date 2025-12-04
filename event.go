@@ -13,10 +13,11 @@ type Event interface {
 }
 
 type Envelope struct {
-	EventID    uuid.UUID
-	StreamID   string
-	Metadata   map[string]any
-	Event      Event
-	Version    uint64
-	OccurredAt time.Time
+	EventID       uuid.UUID
+	StreamID      string
+	Metadata      map[string]any
+	Event         Event
+	Version       uint64
+	GlobalVersion uint64
+	OccurredAt    time.Time
 }

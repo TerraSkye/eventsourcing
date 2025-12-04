@@ -7,6 +7,10 @@ import (
 	"sync"
 )
 
+type Dispatcher interface {
+	Dispatch(ctx context.Context, cmd Command) (AppendResult, error)
+}
+
 // queuedCommand represents a command enqueued in the command bus for processing.
 // Each queuedCommand includes the context for cancellation, the command itself,
 // and a response channel to return the processing result.
@@ -61,7 +65,7 @@ func NewCommandBus(bufferSize int, shardCount int) *commandBus {
 	}
 
 	bus := &commandBus{
-		queues:     make([]chan queuedCommand, bufferSize),
+		queues:     make([]chan queuedCommand, shardCount),
 		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
 		stopCh:     make(chan struct{}),
 		shardCount: shardCount,
@@ -171,7 +175,10 @@ func (b *commandBus) getShard(aggregateID string) int {
 //
 //	err := Register(bus, fooHandler)
 func Register[C Command](b *commandBus, handler CommandHandler[C]) {
-	cmdName := fmt.Sprintf("%T", (*C)(nil))
+
+	var zero C
+
+	cmdName := fmt.Sprintf("%T", zero)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

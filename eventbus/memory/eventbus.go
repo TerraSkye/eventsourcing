@@ -136,9 +136,6 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 				return
 			}
 
-			// todo extract event envelope
-			// todo add envelope content into ctx
-
 			// Handle event
 			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, ev), ev.Event); err != nil {
 				select {
@@ -175,11 +172,9 @@ func (b *eventBus) Dispatch(ev *cqrs.Envelope) {
 
 	for _, s := range b.subs {
 
-		if s.filter.events == nil || slices.Contains(s.filter.events, cqrs.TypeName(ev.Event)) {
+		if len(s.filter.events) == 0 || slices.Contains(s.filter.events, ev.Event.EventType()) {
 			select {
 			case s.events <- ev:
-			default:
-				// Drop event if subscriber is busy
 			}
 		}
 	}

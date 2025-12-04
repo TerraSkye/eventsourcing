@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/terraskye/eventsourcing"
@@ -42,7 +43,7 @@ func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventso
 			return nil, ctx.Err()
 		}
 		if int(index) >= len(allEvents) {
-			return nil, nil
+			return nil, io.EOF
 		}
 		ev := allEvents[index]
 		index++
@@ -155,7 +156,7 @@ func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 	if !exists {
 		// Return empty sequence
 		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-			return nil, nil
+			return nil, io.EOF
 		}), nil
 	}
 
@@ -167,7 +168,7 @@ func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 			return nil, ctx.Err()
 		}
 		if index >= len(events) {
-			return nil, nil
+			return nil, io.EOF
 		}
 		ev := events[index]
 		index++
@@ -191,7 +192,7 @@ func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 
 	if !exists || int(version) >= len(events) {
 		// Return empty sequence
-		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, nil }), nil
+		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, io.EOF }), nil
 	}
 
 	index := version
@@ -203,7 +204,7 @@ func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 			return nil, ctx.Err()
 		}
 		if int(index) >= len(events) {
-			return nil, nil
+			return nil, io.EOF
 		}
 		ev := events[index]
 		index++

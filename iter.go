@@ -2,13 +2,8 @@ package eventsourcing
 
 import (
 	"context"
-	"fmt"
+	"io"
 )
-
-// ErrEOF is returned by a nextFunc to indicate that the iterator
-// has reached the end of its sequence. This is a normal termination
-// signal and not considered an error.
-var ErrEOF = fmt.Errorf("iterator: end of iteration")
 
 // Iterator is a generic, type-safe iterator over items of type T.
 //
@@ -30,7 +25,7 @@ var ErrEOF = fmt.Errorf("iterator: end of iteration")
 //	i := 0
 //	iter := NewIterator(func(ctx context.Context) (int, error) {
 //	    if i >= len(items) {
-//	        return 0, ErrEOF
+//	        return 0, io.EOF
 //	    }
 //	    val := items[i]
 //	    i++
@@ -47,7 +42,7 @@ type Iterator[T any] struct {
 	// nextFunc is the function that produces the next value in the iteration.
 	// It must return:
 	//   - (T, nil) for a valid item
-	//   - (any, ErrEOF) to signal end of iteration
+	//   - (any, io.EOF) to signal end of iteration
 	//   - (any, error) to signal a failure during iteration
 	nextFunc func(ctx context.Context) (T, error)
 
@@ -69,7 +64,7 @@ type Iterator[T any] struct {
 //
 // Behavior:
 //   - Calls nextFunc to retrieve the next item.
-//   - If nextFunc returns ErrEOF, marks iteration as done and returns false.
+//   - If nextFunc returns io.EOF, marks iteration as done and returns false.
 //   - If nextFunc returns a non-nil error, stores it and returns false.
 //   - Otherwise, stores the item in current and returns true.
 //
@@ -85,7 +80,7 @@ func (it *Iterator[T]) Next(ctx context.Context) bool {
 
 	val, err := it.nextFunc(ctx)
 	if err != nil {
-		if err == ErrEOF {
+		if err == io.EOF {
 			it.done = true
 			it.err = nil
 		} else {
@@ -144,7 +139,7 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 // Parameters:
 //   - nextFunc: function that produces the next item. Must return:
 //     (T, nil) for valid items
-//     (any, ErrEOF) to signal end of iteration
+//     (any, io.EOF) to signal end of iteration
 //     (any, error) to signal a failure
 //
 // Returns:
@@ -154,7 +149,7 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 //
 //	iter := NewIterator(func(ctx context.Context) (int, error) {
 //	    if i >= len(items) {
-//	        return 0, ErrEOF
+//	        return 0, io.EOF
 //	    }
 //	    val := items[i]
 //	    i++
