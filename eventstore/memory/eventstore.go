@@ -8,27 +8,18 @@ import (
 
 	"github.com/terraskye/eventsourcing"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
-type memoryStore struct {
+type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
-	//bus    EventBus
+	bus    chan *eventsourcing.Envelope
 	global []*eventsourcing.Envelope
 	events map[string][]*eventsourcing.Envelope
 }
 
-func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFromAll",
-		trace.WithAttributes(
-			attribute.Int64("start_version", int64(version)),
-		),
-	)
-	defer span.End()
+func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -38,8 +29,6 @@ func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventso
 
 	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
-			span.RecordError(ctx.Err())
-			span.SetStatus(codes.Error, ctx.Err().Error())
 			return nil, ctx.Err()
 		}
 		if int(index) >= len(allEvents) {
@@ -53,12 +42,7 @@ func (m *memoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventso
 	return iter, nil
 }
 
-func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.Revision) (eventsourcing.AppendResult, error) {
-	ctx, span := m.tracer.Start(ctx, "cqrs.event.store.write",
-		trace.WithAttributes(attribute.Int("event.count", len(events))),
-	)
-	defer span.End()
-
+func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.Revision) (eventsourcing.AppendResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -76,28 +60,20 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	case eventsourcing.NoStream:
 		if currentVersion != 0 {
 			err := fmt.Errorf("stream already exists for aggregate %s", aggregateID)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
 			err := fmt.Errorf("stream does not exist for aggregate %s", aggregateID)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	case eventsourcing.ExplicitRevision:
 		if currentVersion != uint64(rev) {
 			err := fmt.Errorf("version mismatch for aggregate %s: expected %d, got %d", aggregateID, rev, currentVersion)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	default:
 		err := fmt.Errorf("unsupported revision type for aggregate %s", aggregateID)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
 		return eventsourcing.AppendResult{Successful: false}, err
 	}
 
@@ -105,16 +81,13 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	for i := range events {
 		m.events[aggregateID] = append(m.events[aggregateID], &events[i])
 		m.global = append(m.global, &events[i])
-
-		span.AddEvent("Stored event",
-			trace.WithAttributes(
-				attribute.String("event.aggregate_id", aggregateID),
-				attribute.String("event.type", eventsourcing.TypeName(events[i].Event)),
-				attribute.Int("version", int(currentVersion)),
-			),
-		)
-
 		currentVersion++
+
+		select {
+		case m.bus <- &events[i]:
+		default:
+			// Drop error if channel full
+		}
 	}
 
 	// Publish events
@@ -143,11 +116,8 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		NextExpectedVersion: currentVersion,
 	}, nil
 }
-func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "memoryStore.Load",
-		trace.WithAttributes(attribute.String("aggregate_id", u)),
-	)
-	defer span.End()
+
+func (m *MemoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
 	events, exists := m.events[u]
@@ -163,8 +133,6 @@ func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 	index := 0
 	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
-			span.RecordError(ctx.Err())
-			span.SetStatus(codes.Error, ctx.Err().Error())
 			return nil, ctx.Err()
 		}
 		if index >= len(events) {
@@ -177,14 +145,7 @@ func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 	return iter, nil
 }
 
-func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	ctx, span := m.tracer.Start(ctx, "memoryStore.LoadFrom",
-		trace.WithAttributes(
-			attribute.String("aggregate_id", id),
-			attribute.Int("start_version", int(version)),
-		),
-	)
-	defer span.End()
+func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
 	events, exists := m.events[id]
@@ -199,8 +160,6 @@ func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 
 	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
-			span.RecordError(ctx.Err())
-			span.SetStatus(codes.Error, ctx.Err().Error())
 			return nil, ctx.Err()
 		}
 		if int(index) >= len(events) {
@@ -214,17 +173,22 @@ func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 	return iter, nil
 }
 
-func (m *memoryStore) Close() error {
+func (m *MemoryStore) Events() <-chan *eventsourcing.Envelope {
+	return m.bus
+}
+
+func (m *MemoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = make(map[string][]*eventsourcing.Envelope)
+	close(m.bus)
 	return nil
 }
 
-func NewMemoryStore() eventsourcing.EventStore {
-	return &memoryStore{
+func NewMemoryStore(buffer int64) *MemoryStore {
+	return &MemoryStore{
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
-		tracer: otel.Tracer("event-store"),
+		bus:    make(chan *eventsourcing.Envelope, buffer),
 	}
 }
