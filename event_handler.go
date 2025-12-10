@@ -108,9 +108,9 @@ func OnEvent[T Event](fn func(ctx context.Context, ev T) error) EventHandler {
 	return typedEventHandler[T](fn)
 }
 
-// eventGroupProcessor is a collection of typed event handlers.
+// EventGroupProcessor is a collection of typed event handlers.
 // It routes incoming events to the correct handler based on event type.
-type eventGroupProcessor struct {
+type EventGroupProcessor struct {
 	handlers map[string]EventHandler // key = EventName()
 }
 
@@ -143,7 +143,7 @@ type eventGroupProcessor struct {
 //	)
 //	group.Handle(ctx, CartCreated{ID: "t1"})
 //	group.Handle(ctx, ItemAdded{ID: "c1"})
-func NewEventGroupProcessor(handlers ...EventHandler) *eventGroupProcessor {
+func NewEventGroupProcessor(handlers ...EventHandler) EventGroupProcessor {
 	m := make(map[string]EventHandler, len(handlers))
 	for _, h := range handlers {
 
@@ -159,15 +159,15 @@ func NewEventGroupProcessor(handlers ...EventHandler) *eventGroupProcessor {
 		m[name] = h
 	}
 
-	return &eventGroupProcessor{
+	return EventGroupProcessor{
 		handlers: m,
 	}
 }
 
 // Handle routes the given event to the correct typed handler.
 // Returns ErrSkippedEvent if no handler exists for the event type.
-func (p *eventGroupProcessor) Handle(ctx context.Context, ev Event) error {
-	name := TypeName(ev)
+func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
+	name := ev.EventType()
 	h, ok := p.handlers[name]
 
 	if !ok {
@@ -178,7 +178,7 @@ func (p *eventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 
 // StreamFilter returns a sorted list of all event names handled by this group.
 // Useful for subscribing to streams or listing registered handlers.
-func (p *eventGroupProcessor) StreamFilter() []string {
+func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
 	for name := range p.handlers {
 		out = append(out, name)

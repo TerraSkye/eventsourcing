@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	cqrs "github.com/terraskye/eventsourcing"
@@ -84,7 +85,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// Stream finished normally
-			return nil, cqrs.WrapEventStoreError(err)
+			return nil, io.EOF
 		}
 
 		// Convert KurrentDB event to cqrs.Event

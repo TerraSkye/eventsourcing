@@ -17,7 +17,7 @@ import (
 type memoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
-	//bus    EventBus
+	bus    chan *eventsourcing.Envelope
 	global []*eventsourcing.Envelope
 	events map[string][]*eventsourcing.Envelope
 }
@@ -101,8 +101,12 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		return eventsourcing.AppendResult{Successful: false}, err
 	}
 
+	var globalVersion = uint64(len(m.global))
+
 	// Append events
 	for i := range events {
+
+		events[i].GlobalVersion = globalVersion
 		m.events[aggregateID] = append(m.events[aggregateID], &events[i])
 		m.global = append(m.global, &events[i])
 
@@ -115,6 +119,15 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		)
 
 		currentVersion++
+		globalVersion++
+
+		select {
+		case m.bus <- &events[i]:
+			// sent successfully
+		default:
+			// no subscribers → drop event
+		}
+
 	}
 
 	// Publish events
@@ -143,6 +156,7 @@ func (m *memoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		NextExpectedVersion: currentVersion,
 	}, nil
 }
+
 func (m *memoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	ctx, span := m.tracer.Start(ctx, "memoryStore.Load",
 		trace.WithAttributes(attribute.String("aggregate_id", u)),
@@ -214,6 +228,10 @@ func (m *memoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 	return iter, nil
 }
 
+func (m *memoryStore) Events() <-chan *eventsourcing.Envelope {
+	return m.bus
+}
+
 func (m *memoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -225,6 +243,7 @@ func NewMemoryStore() eventsourcing.EventStore {
 	return &memoryStore{
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
+		bus:    make(chan *eventsourcing.Envelope, 100),
 		tracer: otel.Tracer("event-store"),
 	}
 }
