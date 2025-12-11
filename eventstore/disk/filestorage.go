@@ -1,4 +1,4 @@
-package infra
+package file
 
 import (
 	"context"
@@ -25,7 +25,7 @@ type FilesStore struct {
 	globalSeq uint64
 }
 
-func New(dir string) (*FilesStore, error) {
+func NewFileStore(dir string) (*FilesStore, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "all"), 0o755); err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		f.globalSeq++
 		events[i].GlobalVersion = f.globalSeq
 
-		fname := fmt.Sprintf("%04d-%s.json", events[i].Version, events[i].Event.EventType())
+		fname := fmt.Sprintf("%010d-%s.json", events[i].Version, events[i].Event.EventType())
 		path := filepath.Join(sdir, fname)
 
 		eventData, _ := json.Marshal(events[i].Event)
@@ -112,8 +112,11 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			return cqrs.AppendResult{}, err
 		}
 		// symlink to all/
-		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%04d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
-		if err := os.Symlink(path, all); err != nil {
+		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
+
+		rel, _ := filepath.Rel(filepath.Join(f.baseDir, "all"), path)
+
+		if err := os.Symlink(rel, all); err != nil {
 			return cqrs.AppendResult{}, err
 		}
 
@@ -186,7 +189,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 				return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot create event %q: %w", storedEv.EventType, err))
 			}
 
-			if err := json.Unmarshal(storedEv.Data, ev); err != nil {
+			if err := json.Unmarshal(storedEv.Data, &ev); err != nil {
 				return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot unmarshal event %q: %w", storedEv.EventType, err))
 			}
 

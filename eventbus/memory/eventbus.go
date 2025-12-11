@@ -22,7 +22,7 @@ type filter struct {
 	events []string
 }
 
-type eventBus struct {
+type EventBus struct {
 	mu         sync.RWMutex
 	subs       map[string]*subscriber
 	closed     bool
@@ -32,8 +32,8 @@ type eventBus struct {
 }
 
 // NewEventBus constructs a new bus with a given subscriber buffer size.
-func NewEventBus(bufferSize int) cqrs.EventBus {
-	return &eventBus{
+func NewEventBus(bufferSize int) *EventBus {
+	return &EventBus{
 		subs:       make(map[string]*subscriber),
 		errs:       make(chan error, 64),
 		bufferSize: bufferSize,
@@ -41,7 +41,7 @@ func NewEventBus(bufferSize int) cqrs.EventBus {
 }
 
 // Subscribe registers a handler with a filter and name.
-func (b *eventBus) Subscribe(
+func (b *EventBus) Subscribe(
 	ctx context.Context,
 	name string,
 	handler cqrs.EventHandler,
@@ -92,12 +92,12 @@ func (b *eventBus) Subscribe(
 	return nil
 }
 
-func (b *eventBus) Errors() <-chan error {
+func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
 // Close shuts down the bus and waits for all workers.
-func (b *eventBus) Close() error {
+func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -123,7 +123,7 @@ func (b *eventBus) Close() error {
 }
 
 // runSubscriber processes events for a single handler.
-func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
+func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
 	for {
@@ -148,7 +148,7 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	}
 }
 
-func (b *eventBus) removeSubscriber(name string) {
+func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	s, ok := b.subs[name]
 	if !ok {
@@ -162,8 +162,8 @@ func (b *eventBus) removeSubscriber(name string) {
 	close(s.events)
 }
 
-// Dispatch sends an event to all matching subscribers.
-func (b *eventBus) Dispatch(ev *cqrs.Envelope) {
+// Dispatch EventBus an event to all matching subscribers.
+func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.closed {
