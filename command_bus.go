@@ -28,16 +28,16 @@ type commandResult struct {
 	Err    error
 }
 
-// commandBus is an internal, in-memory, type-safe command dispatcher.
+// CommandBus is an internal, in-memory, type-safe command dispatcher.
 // It maintains a mapping of command type names to their handlers, a queues for
 // incoming commands, and synchronization mechanisms for safe concurrent access.
 //
-// The commandBus supports:
+// The CommandBus supports:
 //   - Enqueuing commands for asynchronous processing
 //   - Typed command registration using generics
 //   - Safe shutdown that waits for in-flight commands to complete
 //   - Panic recovery in handlers to prevent the bus from crashing
-type commandBus struct {
+type CommandBus struct {
 	handlers   map[string]func(ctx context.Context, command Command) (AppendResult, error)
 	queues     []chan queuedCommand
 	stopCh     chan struct{}
@@ -46,25 +46,25 @@ type commandBus struct {
 	shardCount int
 }
 
-// NewCommandBus creates a new instance of commandBus with a buffered queues.
+// NewCommandBus creates a new instance of CommandBus with a buffered queues.
 //
 // Parameters:
 //   - bufferSize: the size of the internal queues for enqueued commands.
 //
 // Returns:
-//   - pointer to a newly initialized commandBus. The internal processing
+//   - pointer to a newly initialized CommandBus. The internal processing
 //     goroutine is started automatically.
 //
 // Example:
 //
 //	bus := NewCommandBus(100)
-func NewCommandBus(bufferSize int, shardCount int) *commandBus {
+func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 
 	if shardCount <= 0 {
 		shardCount = 1
 	}
 
-	bus := &commandBus{
+	bus := &CommandBus{
 		queues:     make([]chan queuedCommand, shardCount),
 		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
 		stopCh:     make(chan struct{}),
@@ -93,7 +93,7 @@ func NewCommandBus(bufferSize int, shardCount int) *commandBus {
 // Notes:
 //   - Returns an error immediately if the bus has been stopped.
 //   - Waits for the handler to complete and sends the result back via a response channel.
-func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
+func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
 	select {
 	case <-b.stopCh:
 		return AppendResult{Successful: false}, fmt.Errorf("command bus is stopped")
@@ -122,7 +122,7 @@ func (b *commandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 }
 
 // worker processes commands from a single shard queues.
-func (b *commandBus) worker(queue chan queuedCommand) {
+func (b *CommandBus) worker(queue chan queuedCommand) {
 	for cmd := range queue {
 		cmdName := fmt.Sprintf("%T", cmd.Command)
 
@@ -154,7 +154,7 @@ func (b *commandBus) worker(queue chan queuedCommand) {
 	}
 }
 
-func (b *commandBus) getShard(aggregateID string) int {
+func (b *CommandBus) getShard(aggregateID string) int {
 	hash := fnv.New32a()
 	hash.Write([]byte(aggregateID))
 	return int(hash.Sum32()) % b.shardCount
@@ -163,7 +163,7 @@ func (b *commandBus) getShard(aggregateID string) int {
 // Register adds a new typed command handler to the bus.
 //
 // Parameters:
-//   - b: pointer to the commandBus
+//   - b: pointer to the CommandBus
 //   - handler: a generic CommandHandler[Command] function for a specific command type C
 //
 // Notes:
@@ -174,7 +174,7 @@ func (b *commandBus) getShard(aggregateID string) int {
 // Example:
 //
 //	err := Register(bus, fooHandler)
-func Register[C Command](b *commandBus, handler CommandHandler[C]) {
+func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 
 	var zero C
 
@@ -195,7 +195,7 @@ func Register[C Command](b *commandBus, handler CommandHandler[C]) {
 	}
 }
 
-// Stop shuts down the commandBus safely.
+// Stop shuts down the CommandBus safely.
 //
 // Behavior:
 //   - Stops accepting new commands.
@@ -205,7 +205,7 @@ func Register[C Command](b *commandBus, handler CommandHandler[C]) {
 // Example:
 //
 //	bus.Stop()
-func (b *commandBus) Stop() {
+func (b *CommandBus) Stop() {
 	close(b.stopCh)
 	for _, q := range b.queues {
 		close(q)
