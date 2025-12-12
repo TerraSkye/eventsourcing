@@ -1,6 +1,7 @@
 package eventsourcing
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -19,6 +20,8 @@ type OtherEvent struct {
 
 func (e *OtherEvent) EventType() string   { return "OtherEvent" }
 func (e *OtherEvent) AggregateID() string { return e.Name }
+
+// --- Tests ---
 
 func TestRegisterEventByType(t *testing.T) {
 	// Reset registry
@@ -96,12 +99,19 @@ func TestNewEventByNameErrors(t *testing.T) {
 	// Reset registry
 	mu.Lock()
 	registry = map[string]func() Event{}
+	registry["NilFactory"] = func() Event { return nil }
 	mu.Unlock()
 
 	_, err := NewEventByName("NonExistent")
 	if err == nil {
 		t.Fatal("expected error for unregistered event")
 	}
+
+	_, err2 := NewEventByName("NilFactory")
+	if err2 == nil {
+		t.Fatal("expected error for unregistered event")
+	}
+
 }
 
 func TestConcurrencySafety(t *testing.T) {
@@ -116,7 +126,7 @@ func TestConcurrencySafety(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			name := "Evt" + string(rune(i))
+			name := "Evt" + strconv.Itoa(i)
 			RegisterEventByName(name, func() Event { return &OtherEvent{Name: name} })
 		}(i)
 	}
@@ -125,7 +135,7 @@ func TestConcurrencySafety(t *testing.T) {
 
 	// Verify all events are registered
 	for i := 0; i < 100; i++ {
-		name := "Evt" + string(rune(i))
+		name := "Evt" + strconv.Itoa(i)
 		ev, err := NewEventByName(name)
 		if err != nil {
 			t.Fatalf("event %s not registered: %v", name, err)

@@ -11,7 +11,7 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
-type eventBus struct {
+type EventBus struct {
 	db     *kurrentdb.Client
 	subs   map[string]*subscriber
 	mu     sync.RWMutex
@@ -30,8 +30,8 @@ type subscriber struct {
 }
 
 // NewEventBus creates a KurrentDB-backed event bus
-func NewEventBus(db *kurrentdb.Client, buffer uint64) cqrs.EventBus {
-	return &eventBus{
+func NewEventBus(db *kurrentdb.Client, buffer uint64) *EventBus {
+	return &EventBus{
 		db:     db,
 		subs:   make(map[string]*subscriber),
 		errs:   make(chan error, 64),
@@ -39,7 +39,7 @@ func NewEventBus(db *kurrentdb.Client, buffer uint64) cqrs.EventBus {
 	}
 }
 
-func (b *eventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
+func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
 	}
@@ -79,7 +79,7 @@ func (b *eventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	return nil
 }
 
-func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
+func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
 	stream, err := b.db.SubscribeToAll(ctx, s.opt)
@@ -161,7 +161,7 @@ func (b *eventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	}
 }
 
-func (b *eventBus) removeSubscriber(name string) {
+func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	sub, ok := b.subs[name]
 	if ok {
@@ -171,11 +171,11 @@ func (b *eventBus) removeSubscriber(name string) {
 	b.mu.Unlock()
 }
 
-func (b *eventBus) Errors() <-chan error {
+func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
-func (b *eventBus) Close() error {
+func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()

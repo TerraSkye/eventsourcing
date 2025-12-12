@@ -162,7 +162,7 @@ func (b *EventBus) removeSubscriber(name string) {
 	close(s.events)
 }
 
-// Dispatch EventBus an event to all matching subscribers.
+// Dispatch sends an event to all matching subscribers.
 func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()

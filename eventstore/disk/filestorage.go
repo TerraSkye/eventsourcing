@@ -1,4 +1,4 @@
-package file
+package disk
 
 import (
 	"context"
@@ -146,7 +146,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cqrs.NewIterator(func(ctx context.Context) (*cqrs.Envelope, error) {
+			return cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 				return nil, io.EOF
 			}), nil
 		}
@@ -208,7 +208,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 		return nil, io.EOF
 	}
 
-	return cqrs.NewIterator(nextFunc), nil
+	return cqrs.NewIteratorFunc(nextFunc), nil
 }
 
 func (f *FilesStore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {

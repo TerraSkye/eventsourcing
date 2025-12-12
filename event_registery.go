@@ -9,6 +9,7 @@ var (
 	// registry maps event names to their factory functions.
 	// Each factory must return a new instance of a concrete Event type.
 	registry = map[string]func() Event{}
+
 	// mu protects access to the registry for concurrent operations.
 	mu sync.RWMutex
 
@@ -55,6 +56,7 @@ var (
 	RegisterEventByName func(name string, fn func() Event) = func(name string, fn func() Event) {
 		registerEventNameDefault(name, fn)
 	}
+
 	// NewEventByName creates a new instance of a registered Event by its name.
 	//
 	// This function allows dynamic instantiation of events using their string name.
@@ -110,5 +112,9 @@ func newEventByNameDefault(name string) (Event, error) {
 	if !ok {
 		return nil, fmt.Errorf("event not registered: %s", name)
 	}
-	return factory(), nil
+	ev := factory()
+	if ev == nil {
+		return nil, fmt.Errorf("factory returned nil for event: %s", name)
+	}
+	return ev, nil
 }
