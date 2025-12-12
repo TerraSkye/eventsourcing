@@ -5,6 +5,8 @@ import (
 	"io"
 )
 
+type IterFunc[T any] func(ctx context.Context) (T, error)
+
 // Iterator is a generic, type-safe iterator over items of type T.
 //
 // It abstracts the iteration logic, allowing for multiple iteration strategies
@@ -23,7 +25,7 @@ import (
 //
 //	items := []int{1, 2, 3, 4, 5}
 //	i := 0
-//	iter := NewIterator(func(ctx context.Context) (int, error) {
+//	iter := NewIteratorFunc(func(ctx context.Context) (int, error) {
 //	    if i >= len(items) {
 //	        return 0, io.EOF
 //	    }
@@ -134,7 +136,7 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 	return results, it.Err()
 }
 
-// NewIterator constructs a new Iterator[T] using the provided nextFunc.
+// NewIteratorFunc constructs a new Iterator[T] using the provided nextFunc.
 //
 // Parameters:
 //   - nextFunc: function that produces the next item. Must return:
@@ -147,7 +149,7 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 //
 // Example:
 //
-//	iter := NewIterator(func(ctx context.Context) (int, error) {
+//	iter := NewIteratorFunc(func(ctx context.Context) (int, error) {
 //	    if i >= len(items) {
 //	        return 0, io.EOF
 //	    }
@@ -155,6 +157,34 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 //	    i++
 //	    return val, nil
 //	})
-func NewIterator[T any](nextFunc func(ctx context.Context) (T, error)) *Iterator[T] {
+func NewIteratorFunc[T any](nextFunc func(ctx context.Context) (T, error)) *Iterator[T] {
 	return &Iterator[T]{nextFunc: nextFunc}
+}
+
+// NewSliceIterator constructs a new Iterator[T] using the provided slice T.
+//
+// Parameters:
+//   - slice: []T
+//
+// Returns:
+//   - *Iterator[T]: a new iterator ready for consumption via Next()/All()
+//
+// Example:
+//
+//	iter := NewSliceIterator([]int{1,2,3,4,5})
+func NewSliceIterator[T any](slice []T) *Iterator[T] {
+	index := 0
+
+	return &Iterator[T]{
+		nextFunc: func(ctx context.Context) (T, error) {
+			if index >= len(slice) {
+				var zero T
+				return zero, io.EOF
+			}
+
+			value := slice[index]
+			index++
+			return value, nil
+		},
+	}
 }

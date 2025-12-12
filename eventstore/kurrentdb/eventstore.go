@@ -75,7 +75,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		return nil, cqrs.WrapEventStoreError(err)
 	}
 
-	iter := cqrs.NewIterator(func(ctx context.Context) (*cqrs.Envelope, error) {
+	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -132,7 +132,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 		return nil, cqrs.WrapEventStoreError(err)
 	}
 
-	iter := cqrs.NewIterator(func(ctx context.Context) (*cqrs.Envelope, error) {
+	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -190,7 +190,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iter
 		return nil, cqrs.WrapEventStoreError(err)
 	}
 
-	iter := cqrs.NewIterator(func(ctx context.Context) (*cqrs.Envelope, error) {
+	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

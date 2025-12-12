@@ -24,20 +24,9 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventso
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	index := version
 	allEvents := m.global // global slice of all events
 
-	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if int(index) >= len(allEvents) {
-			return nil, io.EOF
-		}
-		ev := allEvents[index]
-		index++
-		return ev, nil
-	})
+	iter := eventsourcing.NewSliceIterator(allEvents)
 
 	return iter, nil
 }
@@ -125,13 +114,13 @@ func (m *MemoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.
 
 	if !exists {
 		// Return empty sequence
-		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+		return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 			return nil, io.EOF
 		}), nil
 	}
 
 	index := 0
-	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -153,12 +142,12 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 
 	if !exists || int(version) >= len(events) {
 		// Return empty sequence
-		return eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, io.EOF }), nil
+		return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, io.EOF }), nil
 	}
 
 	index := version
 
-	iter := eventsourcing.NewIterator(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

@@ -36,6 +36,7 @@ func NewQueryBus() *QueryBus {
 type HandlerOption func(*handlerSettings)
 
 // handlerSettings stores internal configuration for a registered handler.
+// TODO expand with querybus settings
 type handlerSettings struct {
 }
 

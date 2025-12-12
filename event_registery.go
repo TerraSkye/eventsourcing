@@ -6,47 +6,85 @@ import (
 )
 
 var (
-	// registry maps event names to their zero-value factory functions.
+	// registry maps event names to their factory functions.
+	// Each factory must return a new instance of a concrete Event type.
 	registry = map[string]func() Event{}
+
 	// mu protects access to the registry for concurrent operations.
 	mu sync.RWMutex
 
-	// RegisterEventByType registers an event using its type name.
-	// This function can be overridden to provide custom registration behavior.
-	RegisterEventByType func(ev Event) = func(ev Event) {
-		registerEventTypeDefault(ev)
+	// RegisterEventByType registers a new Event type using its default type name.
+	//
+	// It provides a reusable pattern for dynamically creating new event instances
+	// by string name. Registration performs the following steps:
+	//   1. Calls the provided factory function to obtain an instance of the event.
+	//   2. Retrieves the type name using EventType().
+	//   3. Registers the factory in the registry keyed by the type name.
+	//
+	// Parameters:
+	//   - fn: A factory function of type func() Event that returns a new instance
+	//     of the event. The factory must not return nil.
+	//
+	// Panics:
+	//   - If the factory function is nil.
+	//   - If the factory returns nil.
+	//   - If an event with the same type name is already registered.
+	//
+	// Example Usage:
+	//   RegisterEventByType(func() Event { return &InventoryChanged{} })
+	RegisterEventByType func(fn func() Event) = func(fn func() Event) {
+		registerEventNameDefault(fn().EventType(), fn)
 	}
 
-	// RegisterEventByName registers an event with a custom name.
-	// This function can be overridden to provide custom registration behavior.
-	RegisterEventByName func(name string, ev Event) = func(name string, ev Event) {
-		registerEventNameDefault(name, ev)
+	// RegisterEventByName registers a new Event type under a custom name.
+	//
+	// This is similar to RegisterEventByType, but allows using a name
+	// that is independent of EventType(). The provided factory function
+	// must return a new instance of the event type each time it is called.
+	//
+	// Parameters:
+	//   - name: The unique name to register the event under.
+	//   - fn: Factory function of type func() Event that returns a new instance.
+	//
+	// Panics:
+	//   - If fn is nil.
+	//   - If fn returns nil.
+	//   - If the name is already registered.
+	//
+	// Example Usage:
+	//   RegisterEventByName("CustomEventName", func() Event { return &InventoryChanged{} })
+	RegisterEventByName func(name string, fn func() Event) = func(name string, fn func() Event) {
+		registerEventNameDefault(name, fn)
 	}
-	// NewEventByName creates a new instance of a registered event by its name.
-	// This function can be overridden to provide custom event creation logic.
+
+	// NewEventByName creates a new instance of a registered Event by its name.
+	//
+	// This function allows dynamic instantiation of events using their string name.
+	// It performs the following steps:
+	//   1. Looks up the factory function in the registry.
+	//   2. Calls the factory to create a new instance.
+	//
+	// Parameters:
+	//   - name: The name of the event to create.
+	//
+	// Returns:
+	//   - Event: A new instance of the registered event.
+	//   - error: Non-nil if the event name is not registered or the factory
+	//     returned nil.
+	//
+	// Example Usage:
+	//   ev, err := NewEventByName("InventoryChanged")
 	NewEventByName func(name string) (Event, error) = newEventByNameDefault
 )
 
-// registerEventTypeDefault registers an event using its derived type name.
-// Panics if the event name is already registered.
-func registerEventTypeDefault[T Event](ev T) {
-	eventName := ev.EventType()
-	mu.Lock()
-	defer mu.Unlock()
-
-	if _, exists := registry[eventName]; exists {
-		panic(fmt.Sprintf("event already registered: %s", eventName))
+// registerEventNameDefault is the internal implementation for registering an event under a name.
+//
+// It validates the factory function, ensures uniqueness, and stores the factory.
+func registerEventNameDefault(name string, fn func() Event) {
+	if fn == nil {
+		panic("cannot register nil factory")
 	}
 
-	registry[eventName] = func() Event {
-		var z T
-		return z
-	}
-}
-
-// registerEventNameDefault registers an event with a custom name.
-// Panics if the name is already registered.
-func registerEventNameDefault[T Event](name string, _ T) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -54,14 +92,18 @@ func registerEventNameDefault[T Event](name string, _ T) {
 		panic(fmt.Sprintf("event already registered: %s", name))
 	}
 
-	registry[name] = func() Event {
-		var z T
-		return z
+	ev := fn()
+	if ev == nil {
+		panic(fmt.Sprintf("factory returned nil for event: %s", name))
 	}
+
+	registry[name] = fn
 }
 
-// newEventByNameDefault creates a new zero-value instance of a registered event by name.
-// Returns an error if the event is not registered.
+// newEventByNameDefault is the internal implementation of NewEventByName.
+//
+// It retrieves the factory for the given name and returns a new instance.
+// Returns an error if the event is not registered or the factory returns nil.
 func newEventByNameDefault(name string) (Event, error) {
 	mu.RLock()
 	factory, ok := registry[name]
@@ -70,5 +112,9 @@ func newEventByNameDefault(name string) (Event, error) {
 	if !ok {
 		return nil, fmt.Errorf("event not registered: %s", name)
 	}
-	return factory(), nil
+	ev := factory()
+	if ev == nil {
+		return nil, fmt.Errorf("factory returned nil for event: %s", name)
+	}
+	return ev, nil
 }

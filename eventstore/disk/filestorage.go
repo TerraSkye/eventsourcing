@@ -1,4 +1,4 @@
-package infra
+package disk
 
 import (
 	"context"
@@ -90,7 +90,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		f.globalSeq++
 		events[i].GlobalVersion = f.globalSeq
 
-		fname := fmt.Sprintf("%04d-%s.json", events[i].Version, events[i].Event.EventType())
+		fname := fmt.Sprintf("%010d-%s.json", events[i].Version, events[i].Event.EventType())
 		path := filepath.Join(sdir, fname)
 
 		eventData, _ := json.Marshal(events[i].Event)
@@ -111,9 +111,12 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		if err := os.WriteFile(path, serialzedData, 0o644); err != nil {
 			return cqrs.AppendResult{}, err
 		}
+
+		rel, _ := filepath.Rel(filepath.Join(f.baseDir, "all"), path)
+
 		// symlink to all/
-		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%04d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
-		if err := os.Symlink(path, all); err != nil {
+		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
+		if err := os.Symlink(rel, all); err != nil {
 			return cqrs.AppendResult{}, err
 		}
 
@@ -143,7 +146,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cqrs.NewIterator(func(ctx context.Context) (*cqrs.Envelope, error) {
+			return cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 				return nil, io.EOF
 			}), nil
 		}
@@ -205,7 +208,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 		return nil, io.EOF
 	}
 
-	return cqrs.NewIterator(nextFunc), nil
+	return cqrs.NewIteratorFunc(nextFunc), nil
 }
 
 func (f *FilesStore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
