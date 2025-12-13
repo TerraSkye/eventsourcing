@@ -72,8 +72,11 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		}
 	case cqrs.ExplicitRevision:
 		if currentVersion != uint64(rev) {
-			err := fmt.Errorf("version mismatch for stream %s: expected %d, got %d", id, rev, currentVersion)
-			return cqrs.AppendResult{Successful: false}, err
+			return cqrs.AppendResult{Successful: false}, cqrs.StreamRevisionConflictError{
+				Stream:           id,
+				ExpectedRevision: uint64(rev),
+				ActualRevision:   currentVersion,
+			}
 		}
 	default:
 		err := fmt.Errorf("unsupported revision type for stream %s", id)
@@ -186,11 +189,11 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 			ev, err := cqrs.NewEventByName(storedEv.EventType)
 			if err != nil {
 				// Wrap and propagate as EventStoreError
-				return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot create event %q: %w", storedEv.EventType, err))
+				return nil, fmt.Errorf("cannot create event %q: %w", storedEv.EventType, err)
 			}
 
 			if err := json.Unmarshal(storedEv.Data, &ev); err != nil {
-				return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot unmarshal event %q: %w", storedEv.EventType, err))
+				return nil, fmt.Errorf("cannot unmarshal event %q: %w", storedEv.EventType, err)
 			}
 
 			envelope := cqrs.Envelope{

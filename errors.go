@@ -1,8 +1,19 @@
 package eventsourcing
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var (
+	ErrStreamNotFound  = errors.New("stream not found")
+	ErrHandlerNotFound = errors.New("handler not registered")
+)
 
 type StreamRevisionConflictError struct {
+	Stream           string
+	ExpectedRevision uint64
+	ActualRevision   uint64
 }
 
 func (s StreamRevisionConflictError) Error() string {
@@ -16,23 +27,4 @@ type ErrSkippedEvent struct {
 
 func (e ErrSkippedEvent) Error() string {
 	return fmt.Sprintf("skipped event of type %T", e.Event)
-}
-
-type EventStoreError struct {
-	Err error
-}
-
-func (e *EventStoreError) Error() string {
-	return fmt.Sprintf("eventstore error: %v", e.Err)
-}
-
-func (e *EventStoreError) Unwrap() error {
-	return e.Err
-}
-
-func WrapEventStoreError(err error) error {
-	if err == nil {
-		return nil
-	}
-	return &EventStoreError{Err: err}
 }

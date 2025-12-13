@@ -66,7 +66,7 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 
 	bus := &CommandBus{
 		queues:     make([]chan queuedCommand, shardCount),
-		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)), // ✅ initialize
+		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)),
 		stopCh:     make(chan struct{}),
 		shardCount: shardCount,
 	}

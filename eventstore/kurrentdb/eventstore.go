@@ -72,7 +72,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 	}, -1)
 
 	if err != nil {
-		return nil, cqrs.WrapEventStoreError(err)
+		return nil, err
 	}
 
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
@@ -92,11 +92,11 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		var metadata map[string]any
@@ -129,7 +129,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 	}, -1)
 
 	if err != nil {
-		return nil, cqrs.WrapEventStoreError(err)
+		return nil, err
 	}
 
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
@@ -142,18 +142,18 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// Stream finished normally
-			return nil, cqrs.WrapEventStoreError(err)
+			return nil, err
 		}
 
 		// Convert KurrentDB event to cqrs.Event
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		var metadata map[string]any
@@ -187,7 +187,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iter
 	}, -1)
 
 	if err != nil {
-		return nil, cqrs.WrapEventStoreError(err)
+		return nil, err
 	}
 
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
@@ -200,18 +200,18 @@ func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iter
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// Stream finished normally
-			return nil, cqrs.WrapEventStoreError(err)
+			return nil, err
 		}
 
 		// Convert KurrentDB event to cqrs.Event
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, cqrs.WrapEventStoreError(fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err))
+			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
 		}
 
 		var metadata map[string]any

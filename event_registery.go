@@ -10,9 +10,33 @@ var (
 	// Each factory must return a new instance of a concrete Event type.
 	registry = map[string]func() Event{}
 
-	// mu protects access to the registry for concurrent operations.
-	mu sync.RWMutex
+	// registryMu protects access to the registry for concurrent operations.
+	registryMu sync.RWMutex
 
+	// RegisterEvent registers a new Event type using its default type name.
+	//
+	// It provides a reusable pattern for dynamically creating new event instances
+	// by string name. Registration performs the following steps:
+	//   1. Calls the provided factory function to obtain an instance of the event.
+	//   2. Retrieves the type name using EventType().
+	//   3. Registers the factory in the registry keyed by the type name.
+	//
+	// Parameters:
+	//   - event: A factory function of type func() Event that returns a new instance
+	//     of the event. The factory must not return nil.
+	//
+	// Panics:
+	//   - If the factory function is nil.
+	//   - If the factory returns nil.
+	//   - If an event with the same type name is already registered.
+	//
+	// Example Usage:
+	//   RegisterEvent(OrderCreated{})
+	RegisterEvent func(event Event) = func(event Event) {
+		RegisterEventByType(func() Event {
+			return event
+		})
+	}
 	// RegisterEventByType registers a new Event type using its default type name.
 	//
 	// It provides a reusable pattern for dynamically creating new event instances
@@ -85,8 +109,12 @@ func registerEventNameDefault(name string, fn func() Event) {
 		panic("cannot register nil factory")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	if name == "" {
+		panic("cannot register factory for empty name")
+	}
+
+	registryMu.Lock()
+	defer registryMu.Unlock()
 
 	if _, exists := registry[name]; exists {
 		panic(fmt.Sprintf("event already registered: %s", name))
@@ -105,9 +133,9 @@ func registerEventNameDefault(name string, fn func() Event) {
 // It retrieves the factory for the given name and returns a new instance.
 // Returns an error if the event is not registered or the factory returns nil.
 func newEventByNameDefault(name string) (Event, error) {
-	mu.RLock()
+	registryMu.RLock()
 	factory, ok := registry[name]
-	mu.RUnlock()
+	registryMu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("event not registered: %s", name)

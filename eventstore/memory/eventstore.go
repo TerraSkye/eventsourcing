@@ -39,8 +39,8 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
 
-	aggregateID := events[0].Event.AggregateID()
-	currentVersion := uint64(len(m.events[aggregateID]))
+	streamId := events[0].StreamID
+	currentVersion := uint64(len(m.events[streamId]))
 
 	// Handle revision enforcement
 	switch rev := revision.(type) {
@@ -48,27 +48,31 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		// No concurrency check
 	case eventsourcing.NoStream:
 		if currentVersion != 0 {
-			err := fmt.Errorf("stream already exists for aggregate %s", aggregateID)
+			err := fmt.Errorf("stream already exists for aggregate %s", streamId)
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
-			err := fmt.Errorf("stream does not exist for aggregate %s", aggregateID)
+			err := fmt.Errorf("stream does not exist for aggregate %s", streamId)
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	case eventsourcing.ExplicitRevision:
 		if currentVersion != uint64(rev) {
-			err := fmt.Errorf("version mismatch for aggregate %s: expected %d, got %d", aggregateID, rev, currentVersion)
-			return eventsourcing.AppendResult{Successful: false}, err
+			return eventsourcing.AppendResult{}, eventsourcing.StreamRevisionConflictError{
+				Stream:           streamId,
+				ExpectedRevision: uint64(rev),
+				ActualRevision:   currentVersion,
+			}
+
 		}
 	default:
-		err := fmt.Errorf("unsupported revision type for aggregate %s", aggregateID)
+		err := fmt.Errorf("unsupported revision type for aggregate %s", streamId)
 		return eventsourcing.AppendResult{Successful: false}, err
 	}
 
 	// Append events
 	for i := range events {
-		m.events[aggregateID] = append(m.events[aggregateID], &events[i])
+		m.events[streamId] = append(m.events[streamId], &events[i])
 		m.global = append(m.global, &events[i])
 		currentVersion++
 
@@ -78,27 +82,6 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 			// Drop error if channel full
 		}
 	}
-
-	// Publish events
-	//for _, event := range events {
-	//	eventCtx, eventSpan := m.tracer.Start(ctx, "cqrs.event.store.publish",
-	//		trace.WithAttributes(
-	//			attribute.String("event.aggregate_id", event.Event.AggregateID()),
-	//			attribute.String("event.type", TypeName(event.Event)),
-	//		),
-	//	)
-	//
-	//	//if err := m.bus.Dispatch(eventCtx, event.Event); err != nil {
-	//	//	eventSpan.RecordError(err)
-	//	//	eventSpan.SetStatus(codes.Error, err.Error())
-	//	//	eventSpan.End()
-	//	//	return AppendResult{
-	//	//		Successful: false,
-	//	//	}, err
-	//	//}
-	//
-	//	eventSpan.End()
-	//}
 
 	return eventsourcing.AppendResult{
 		Successful:          true,

@@ -183,7 +183,8 @@ func NewCommandHandler[T any, C Command](
 			iter, err := store.LoadStreamFrom(ctx, stream, revision)
 			if err != nil {
 				// when failing to load of the event stream. this is the error.
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
+				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
+					backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
 			}
 
 			for iter.Next(ctx) {
@@ -193,7 +194,6 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			if err := iter.Err(); err != nil {
-
 				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, err
 			}
 

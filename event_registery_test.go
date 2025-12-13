@@ -25,9 +25,9 @@ func (e *OtherEvent) AggregateID() string { return e.Name }
 
 func TestRegisterEventByType(t *testing.T) {
 	// Reset registry
-	mu.Lock()
+	registryMu.Lock()
 	registry = map[string]func() Event{}
-	mu.Unlock()
+	registryMu.Unlock()
 
 	t.Run("register and create new instance", func(t *testing.T) {
 		RegisterEventByType(func() Event { return &TestEvent{} })
@@ -64,9 +64,9 @@ func TestRegisterEventByType(t *testing.T) {
 
 func TestRegisterEventByName(t *testing.T) {
 	// Reset registry
-	mu.Lock()
+	registryMu.Lock()
 	registry = map[string]func() Event{}
-	mu.Unlock()
+	registryMu.Unlock()
 
 	t.Run("register by custom name", func(t *testing.T) {
 		RegisterEventByName("Custom", func() Event { return &TestEvent{} })
@@ -97,10 +97,10 @@ func TestRegisterEventByName(t *testing.T) {
 
 func TestNewEventByNameErrors(t *testing.T) {
 	// Reset registry
-	mu.Lock()
+	registryMu.Lock()
 	registry = map[string]func() Event{}
 	registry["NilFactory"] = func() Event { return nil }
-	mu.Unlock()
+	registryMu.Unlock()
 
 	_, err := NewEventByName("NonExistent")
 	if err == nil {
@@ -116,9 +116,9 @@ func TestNewEventByNameErrors(t *testing.T) {
 
 func TestConcurrencySafety(t *testing.T) {
 	// Reset registry
-	mu.Lock()
+	registryMu.Lock()
 	registry = map[string]func() Event{}
-	mu.Unlock()
+	registryMu.Unlock()
 
 	var wg sync.WaitGroup
 
@@ -148,9 +148,9 @@ func TestConcurrencySafety(t *testing.T) {
 
 func TestFactoryReturnsNil(t *testing.T) {
 	// Reset registry
-	mu.Lock()
+	registryMu.Lock()
 	registry = map[string]func() Event{}
-	mu.Unlock()
+	registryMu.Unlock()
 
 	defer func() {
 		if r := recover(); r == nil {
