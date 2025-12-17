@@ -31,14 +31,14 @@ func newSliceEnvelopeIterator(envs []*Envelope) *Iterator[*Envelope] {
 type testStore struct {
 	// configurable behavior
 	loadFn func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error)
-	saveFn func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error)
+	saveFn func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error)
 
 	// tracking
 	loadCalled int
 	saveCalled int
 }
 
-func (s *testStore) Save(ctx context.Context, events []Envelope, revision Revision) (AppendResult, error) {
+func (s *testStore) Save(ctx context.Context, events []Envelope, revision StreamState) (AppendResult, error) {
 	s.saveCalled++
 	return s.saveFn(ctx, events, revision)
 }
@@ -61,7 +61,7 @@ func TestNewCommandHandler_LoadError(t *testing.T) {
 	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
 		return nil, errors.New("db read failure")
 	}
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when load fails")
 		return AppendResult{}, nil
 	}
@@ -116,7 +116,7 @@ func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 		// no prior events
 		return newSliceEnvelopeIterator(nil), nil
 	}
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns no events")
 		return AppendResult{}, nil
 	}
@@ -164,7 +164,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 	}
 
 	// Check payload saved
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		// Expect two events saved
 		if len(envelopes) != 2 {
 			t.Fatalf("expected 2 envelopes, got %d", len(envelopes))
@@ -225,7 +225,7 @@ func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator(nil), nil
 	}
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{Successful: false}, fmt.Errorf("disk full")
 	}
 
@@ -256,7 +256,7 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 	}
 
 	callCount := 0
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		callCount++
 		if callCount == 1 {
 			// return a StreamRevisionConflictError to trigger retry
@@ -304,8 +304,8 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
 	}
 
-	var seenRevision Revision
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	var seenRevision StreamState
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		seenRevision = revision
 		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
@@ -317,7 +317,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
-		WithRevision(ExplicitRevision(5)), // will be updated to latest loaded revision (7)
+		WithRevision(Revision(5)), // will be updated to latest loaded revision (7)
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -325,17 +325,17 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// seenRevision should be an ExplicitRevision equal to 7
+	// seenRevision should be an Revision equal to 7
 	if seenRevision == nil {
 		t.Fatalf("expected revision passed to Save to be non-nil")
 	}
 	switch rv := seenRevision.(type) {
-	case ExplicitRevision:
+	case Revision:
 		if uint64(rv) != 7 {
 			t.Fatalf("expected revision 7, got %d", uint64(rv))
 		}
 	default:
-		t.Fatalf("expected ExplicitRevision, got %T", seenRevision)
+		t.Fatalf("expected Revision, got %T", seenRevision)
 	}
 }
 
@@ -344,7 +344,7 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator(nil), nil
 	}
-	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision Revision) (AppendResult, error) {
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		// verify metadata merged and overwritten by later extractor
 		if envelopes[0].Metadata["k"] != "b" {
 			t.Fatalf("expected metadata key 'k' to be overwritten by later extractor; got %v", envelopes[0].Metadata)

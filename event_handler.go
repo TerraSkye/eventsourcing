@@ -70,7 +70,7 @@ func (h typedEventHandler[T]) Handle(ctx context.Context, event Event) error {
 	ev, ok := event.(T)
 	if !ok {
 		// Return sentinel error instead of voiding it
-		return ErrSkippedEvent{Event: event}
+		return &ErrSkippedEvent{Event: event}
 	}
 	return h(ctx, ev)
 }
@@ -149,12 +149,12 @@ func NewEventGroupProcessor(handlers ...EventHandler) EventGroupProcessor {
 
 		u, ok := h.(interface{ EventName() string })
 		if !ok {
-			panic("OnEvent are accepted")
+			panic(fmt.Errorf("handler %T does not have a function `EventName()`", h))
 		}
 
 		name := u.EventName()
 		if _, exists := m[name]; exists {
-			panic(fmt.Sprintf("duplicate handler for event %s", name))
+			panic(fmt.Errorf("duplicate handler for event %s: %w", name, ErrDuplicateHandler))
 		}
 		m[name] = h
 	}
@@ -171,7 +171,7 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	h, ok := p.handlers[name]
 
 	if !ok {
-		return ErrSkippedEvent{Event: ev}
+		return &ErrSkippedEvent{Event: ev}
 	}
 	return h.Handle(ctx, ev)
 }

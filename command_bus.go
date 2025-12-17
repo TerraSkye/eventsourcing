@@ -2,6 +2,7 @@ package eventsourcing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"sync"
@@ -96,7 +97,7 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
 	select {
 	case <-b.stopCh:
-		return AppendResult{Successful: false}, fmt.Errorf("command bus is stopped")
+		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ErrCommandBusClosed)
 	default:
 	}
 
@@ -112,12 +113,12 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 		// Wait for processing result
 		select {
 		case result := <-responseCh:
-			return result.Result, result.Err // Return processing error (or nil if success)
+			return result.Result, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), result.Err) // Return processing error (or nil if success)
 		case <-ctx.Done():
-			return AppendResult{Successful: false}, ctx.Err() // Context timeout/cancellation
+			return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
 		}
 	case <-ctx.Done():
-		return AppendResult{Successful: false}, ctx.Err() // Context timeout before enqueueing
+		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
 	}
 }
 
@@ -133,7 +134,10 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 		if !exists {
 			cmd.ResponseCh <- commandResult{
 				Result: AppendResult{Successful: false},
-				Err:    fmt.Errorf("no handler for command %s", cmdName),
+				Err: fmt.Errorf(
+					"dispatch command %s for aggregate %q: %w",
+					cmdName, TypeName(cmd), ErrHandlerNotRegistered,
+				),
 			}
 			continue
 		}
@@ -141,9 +145,24 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
+
+					var panicErr error
+
+					if e, ok := r.(error); ok {
+						panicErr = e
+					} else {
+						panicErr = fmt.Errorf("panic: %v\n%s", r)
+					}
+
+					err := errors.Join(panicErr, ErrHandlerPanicked)
+
 					cmd.ResponseCh <- commandResult{
 						Result: AppendResult{Successful: false},
-						Err:    fmt.Errorf("panic in handler: %v", r),
+						//TODO improve the error. should it just be "UnrecoverableErr when handling Command ?
+						Err: fmt.Errorf(
+							"handling command %s for aggregate %q: %w",
+							cmdName, cmd.Command.AggregateID(), err,
+						),
 					}
 				}
 			}()
@@ -183,7 +202,7 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	defer b.mu.Unlock()
 
 	if _, exists := b.handlers[cmdName]; exists {
-		panic(fmt.Sprintf("handler already registered for command type %s", cmdName))
+		panic(fmt.Errorf("handler already registered for command type %s %w", cmdName, ErrDuplicateHandler))
 	}
 
 	b.handlers[cmdName] = func(ctx context.Context, cmd Command) (AppendResult, error) {

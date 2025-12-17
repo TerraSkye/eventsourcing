@@ -130,7 +130,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //   - evolve: A function of type Evolver[T] that reconstructs aggregate state from a sequence of events.
 //   - decide: A function of type Decider[T, C] that produces events based on the current state and command.
 //   - opts: Optional CommandHandlerOption values for customizing behavior, such as:
-//   - Revision: The expected stream revision (default is Any).
+//   - StreamState: The expected stream revision (default is Any).
 //   - RetryAttempts: Number of retries on version conflicts (default 0).
 //
 // Returns:
@@ -143,7 +143,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // Behavior Details:
 //   - The command’s AggregateID() is used to identify the target stream in the EventStore.
 //   - The SeqWithSideEffect wrapper tracks the last version while evolving state.
-//   - If the configured Revision is ExplicitRevision, it is updated to the latest version
+//   - If the configured StreamState is Revision, it is updated to the latest version
 //     before saving to ensure optimistic concurrency control.
 //   - If the decide function returns no events, the handler returns a successful result without persisting.
 //   - Each event is wrapped in an Envelope with a new UUID, metadata map, version, and timestamp.
@@ -183,8 +183,9 @@ func NewCommandHandler[T any, C Command](
 			iter, err := store.LoadStreamFrom(ctx, stream, revision)
 			if err != nil {
 				// when failing to load of the event stream. this is the error.
+				//TODO some errors are retryable, we should improve the decision here.
 				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
-					backoff.Permanent(fmt.Errorf("failed to load event stream: %w", err))
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): load failed: %w", command, command.AggregateID(), stream, err))
 			}
 
 			for iter.Next(ctx) {
@@ -194,21 +195,23 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			if err := iter.Err(); err != nil {
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1}, err
+				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
+					fmt.Errorf("handle command %T for aggregate %q (stream %q): iter failed: %w", command, command.AggregateID(), stream, err)
 			}
 
 			// --- Evolve state ---
 
-			// Update revision if ExplicitRevision is used
-			if _, ok := cfg.Revision.(ExplicitRevision); ok {
-				cfg.Revision = ExplicitRevision(revision)
+			// Update revision if Revision is used
+			if _, ok := cfg.Revision.(Revision); ok {
+				cfg.Revision = Revision(revision)
 			}
 
 			// --- Decide events ---
 			events, err := decide(state, command)
 
 			if err != nil {
-				return AppendResult{Successful: false}, backoff.Permanent(err) // business rule violation
+				return AppendResult{Successful: false},
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): business rule violation: %w", command, command.AggregateID(), stream, err)) // business rule violation
 			}
 
 			// If no events, return success without saving
@@ -248,8 +251,7 @@ func NewCommandHandler[T any, C Command](
 					// Retry on concurrency conflicts
 					return AppendResult{Successful: false, NextExpectedVersion: revision}, conflict
 				}
-
-				return result, backoff.Permanent(fmt.Errorf("failed to save events: %w", err))
+				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): failed to save event: %w", command, command.AggregateID(), stream, err))
 			}
 			return result, nil
 		}, cfg.RetryStrategy)
@@ -265,7 +267,7 @@ func NewCommandHandler[T any, C Command](
 // concurrency checks, retry strategy, and event metadata enrichment.
 //
 // Fields:
-//   - Revision: Determines the concurrency check applied when saving events.
+//   - StreamState: Determines the concurrency check applied when saving events.
 //     Defaults to Any{}.
 //   - RetryStrategy: Strategy for retrying operations in case of transient
 //     failures or version conflicts. Defaults to no retries.
@@ -278,7 +280,7 @@ func NewCommandHandler[T any, C Command](
 type handlerOptions struct {
 	// Revision is the condition applied when saving events to the stream.
 	// It determines the concurrency check behavior (default is Any).
-	Revision Revision
+	Revision StreamState
 
 	// RetryStrategy defines how the handler should retry operations in case of transient failures
 	// or version conflicts. If nil, no retries are performed.
@@ -295,16 +297,16 @@ type handlerOptions struct {
 
 // WithRevision sets the expected stream revision for a NewCommandHandler.
 //
-// The Revision controls the concurrency check when persisting events. For example:
+// The StreamState controls the concurrency check when persisting events. For example:
 //   - Any{}: no version check (default)
 //   - NoStream{}: ensures the stream does not exist
 //   - StreamExists{}: ensures the stream exists
-//   - ExplicitRevision{N}: expects the stream to be at version N
+//   - Revision{N}: expects the stream to be at version N
 //
 // Usage:
 //
 //	handler := NewCommandHandler(store, initialState, evolve, decide, WithRevision(NoStream))
-func WithRevision(rev Revision) CommandHandlerOption {
+func WithRevision(rev StreamState) CommandHandlerOption {
 	return func(cfg *handlerOptions) { cfg.Revision = rev }
 }
 

@@ -20,10 +20,8 @@ type MemoryStore struct {
 }
 
 func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	allEvents := m.global // global slice of all events
 
 	iter := eventsourcing.NewSliceIterator(allEvents)
@@ -31,7 +29,7 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventso
 	return iter, nil
 }
 
-func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.Revision) (eventsourcing.AppendResult, error) {
+func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -40,6 +38,16 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	}
 
 	streamId := events[0].StreamID
+	// Validate all events are for same stream
+	for i, env := range events {
+		if env.StreamID != streamId {
+			return eventsourcing.AppendResult{}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has different stream ID %q",
+				streamId, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
+			)
+		}
+	}
+
 	currentVersion := uint64(len(m.events[streamId]))
 
 	// Handle revision enforcement
@@ -48,25 +56,25 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		// No concurrency check
 	case eventsourcing.NoStream:
 		if currentVersion != 0 {
-			err := fmt.Errorf("stream already exists for aggregate %s", streamId)
+			err := fmt.Errorf("stream %q: already exists: %w", streamId, eventsourcing.ErrStreamExists)
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
 	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
-			err := fmt.Errorf("stream does not exist for aggregate %s", streamId)
+			err := fmt.Errorf("stream %q: should exist: %w ", streamId, eventsourcing.ErrStreamNotFound)
 			return eventsourcing.AppendResult{Successful: false}, err
 		}
-	case eventsourcing.ExplicitRevision:
+	case eventsourcing.Revision:
 		if currentVersion != uint64(rev) {
-			return eventsourcing.AppendResult{}, eventsourcing.StreamRevisionConflictError{
+			return eventsourcing.AppendResult{}, &eventsourcing.StreamRevisionConflictError{
 				Stream:           streamId,
-				ExpectedRevision: uint64(rev),
-				ActualRevision:   currentVersion,
+				ExpectedRevision: rev,
+				ActualRevision:   eventsourcing.Revision(currentVersion),
 			}
 
 		}
 	default:
-		err := fmt.Errorf("unsupported revision type for aggregate %s", streamId)
+		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamId, eventsourcing.ErrInvalidRevision)
 		return eventsourcing.AppendResult{Successful: false}, err
 	}
 
@@ -89,17 +97,17 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	}, nil
 }
 
-func (m *MemoryStore) LoadStream(ctx context.Context, u string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (m *MemoryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
-	events, exists := m.events[u]
+	events, exists := m.events[id]
 	m.mu.RUnlock()
 
 	if !exists {
-		// Return empty sequence
-		return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-			return nil, io.EOF
-		}), nil
+		return nil, fmt.Errorf(
+			"load stream %q: failed to check existence: %w",
+			id, eventsourcing.ErrStreamNotFound,
+		)
 	}
 
 	index := 0
@@ -123,9 +131,18 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 	events, exists := m.events[id]
 	m.mu.RUnlock()
 
-	if !exists || int(version) >= len(events) {
-		// Return empty sequence
-		return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) { return nil, io.EOF }), nil
+	if !exists {
+		return nil, fmt.Errorf(
+			"load stream %q: failed to check existence: %w",
+			id, eventsourcing.ErrStreamNotFound,
+		)
+	}
+
+	if int(version) >= len(events) {
+		return nil, fmt.Errorf(
+			"load stream %q: requested %d but stream has %d: %w",
+			id, version, len(events), eventsourcing.ErrInvalidRevision,
+		)
 	}
 
 	index := version

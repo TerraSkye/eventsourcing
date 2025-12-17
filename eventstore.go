@@ -34,7 +34,7 @@ type EventStore interface {
 	// Errors:
 	//   - ErrConcurrency if the originalVersion does not match.
 	//   - Any store-specific persistence error.
-	Save(ctx context.Context, events []Envelope, revision Revision) (AppendResult, error)
+	Save(ctx context.Context, events []Envelope, revision StreamState) (AppendResult, error)
 
 	// LoadStream loads all events for the given aggregate ID from version 0 onward.
 	//

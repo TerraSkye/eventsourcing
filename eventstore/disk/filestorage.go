@@ -39,7 +39,7 @@ func (f *FilesStore) streamDir(id string) string {
 	return filepath.Join(f.baseDir, id)
 }
 
-func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.Revision) (cqrs.AppendResult, error) {
+func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true}, nil
 	}
@@ -70,7 +70,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			err := fmt.Errorf("stream does not exist for stream %s", id)
 			return cqrs.AppendResult{Successful: false}, err
 		}
-	case cqrs.ExplicitRevision:
+	case cqrs.Revision:
 		if currentVersion != uint64(rev) {
 			return cqrs.AppendResult{Successful: false}, cqrs.StreamRevisionConflictError{
 				Stream:           id,

@@ -61,7 +61,7 @@ func (g GenericQueryGateway[T, R]) HandleQuery(ctx context.Context, qry T) (R, e
 	h, ok := g.bus.handlers[key]
 	if !ok {
 		var zero R
-		return zero, fmt.Errorf("no handler registered for query %T -> %T", qry, *new(R))
+		return zero, fmt.Errorf("no handler registered for query %T -> %T %w", qry, *new(R), ErrHandlerNotFound)
 	}
 
 	handler, ok := h.(QueryHandler[T, R])

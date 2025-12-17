@@ -3,6 +3,7 @@ package kurrentdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -21,24 +22,45 @@ func NewEventStore(db *kurrentdb.Client) cqrs.EventStore {
 	}
 }
 
-func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.Revision) (cqrs.AppendResult, error) {
+func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
+	if len(events) == 0 {
+		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
+	}
 
-	var kevents = make([]kurrentdb.EventData, len(events))
+	var streamId = events[0].StreamID
+
+	// Validate all events are for same stream
+	for i, env := range events {
+		if env.StreamID != streamId {
+			return cqrs.AppendResult{}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has different stream ID %q",
+				streamId, cqrs.ErrInvalidEventBatch, i, env.StreamID,
+			)
+		}
+	}
+
+	var kEvents = make([]kurrentdb.EventData, len(events))
 
 	for i, ev := range events {
 		eventData, err := json.Marshal(ev.Event)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false}, err
+			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+				"save events to stream %q: %w: event %d failed to marshal event data %s",
+				streamId, err, i, ev.Event.EventType(),
+			)
 		}
 
 		metaData, err := json.Marshal(ev.Metadata)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false}, err
+			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+				"save events to stream %q: %w: event %d failed to marshal meta data %s",
+				streamId, err, i, ev.Event.EventType(),
+			)
 		}
 
-		kevents[i] = kurrentdb.EventData{
+		kEvents[i] = kurrentdb.EventData{
 			EventID:     ev.EventID,
 			EventType:   ev.Event.EventType(),
 			ContentType: kurrentdb.ContentTypeJson,
@@ -47,13 +69,43 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		}
 	}
 
+	var streamState kurrentdb.StreamState
+	// Handle revision enforcement
+	switch rev := revision.(type) {
+	case cqrs.Any:
+		streamState = kurrentdb.Any{}
+	case cqrs.NoStream:
+		streamState = kurrentdb.NoStream{}
+	case cqrs.StreamExists:
+		streamState = kurrentdb.StreamExists{}
+	case cqrs.Revision:
+		streamState = kurrentdb.Revision(uint64(rev.ToRawInt64()))
+	default:
+		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamId, cqrs.ErrInvalidRevision)
+		return cqrs.AppendResult{Successful: false}, err
+	}
+
 	//todo use the revision here
 	result, err := e.client.AppendToStream(ctx, events[0].StreamID, kurrentdb.AppendToStreamOptions{
-		StreamState: kurrentdb.Any{},
-	}, kevents...)
+		StreamState: streamState,
+	}, kEvents...)
 
 	if err != nil {
-		return cqrs.AppendResult{Successful: false}, err
+		var conflictErr *kurrentdb.StreamRevisionConflictError
+		if errors.As(err, &conflictErr) {
+			//TODO extract the actual revisions..
+			return cqrs.AppendResult{}, &cqrs.StreamRevisionConflictError{
+				Stream: conflictErr.Stream,
+				//ExpectedRevision: conflictErr.ExpectedRevision,
+				//ActualRevision:   conflictErr.ActualRevision,
+			}
+		}
+
+		// this is an unexpected error when saving.
+		return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+			"save events to stream %q: persist failed: %w",
+			streamId, err,
+		)
 	}
 
 	return cqrs.AppendResult{
@@ -72,13 +124,20 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 	}, -1)
 
 	if err != nil {
-		return nil, err
+		//TODO enhance error variants
+		return nil, fmt.Errorf(
+			"load stream %q: failed to check existence: %w",
+			id, cqrs.ErrStreamNotFound,
+		)
 	}
 
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf(
+				"load stream %q: iteration failed : %w",
+				id, ctx.Err(),
+			)
 		default:
 		}
 
@@ -129,7 +188,10 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 	}, -1)
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"load stream %q: failed to check existence: %w",
+			id, cqrs.ErrStreamNotFound,
+		)
 	}
 
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
