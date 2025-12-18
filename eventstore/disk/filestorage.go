@@ -74,8 +74,8 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		if currentVersion != uint64(rev) {
 			return cqrs.AppendResult{Successful: false}, cqrs.StreamRevisionConflictError{
 				Stream:           id,
-				ExpectedRevision: uint64(rev),
-				ActualRevision:   currentVersion,
+				ExpectedRevision: rev,
+				ActualRevision:   cqrs.Revision(currentVersion),
 			}
 		}
 	default:

@@ -113,7 +113,10 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 		// Wait for processing result
 		select {
 		case result := <-responseCh:
-			return result.Result, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), result.Err) // Return processing error (or nil if success)
+			if result.Err != nil {
+				return result.Result, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), result.Err)
+			}
+			return result.Result, nil
 		case <-ctx.Done():
 			return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
 		}
@@ -151,7 +154,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 					if e, ok := r.(error); ok {
 						panicErr = e
 					} else {
-						panicErr = fmt.Errorf("panic: %v\n%s", r)
+						panicErr = fmt.Errorf("panic: %v", r)
 					}
 
 					err := errors.Join(panicErr, ErrHandlerPanicked)
