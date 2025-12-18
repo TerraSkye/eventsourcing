@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sync"
+
+	"go.opentelemetry.io/otel/metric"
 )
 
 type Dispatcher interface {
@@ -105,23 +107,37 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	b.wg.Add(1)
 	defer b.wg.Done()
 
-	shard := b.getShard(cmd.AggregateID())
+	shard := b.selectShard(cmd.AggregateID())
+
+	CommandBusQueueDepth.Add(ctx, 1,
+		metric.WithAttributes(
+			AttrShardID.Int(shard),
+			AttrCommandType.String(fmt.Sprintf("%T", cmd)),
+		),
+	)
 
 	// Enqueue the command with the response channel
 	select {
 	case b.queues[shard] <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
 		// Wait for processing result
-		select {
-		case result := <-responseCh:
-			if result.Err != nil {
-				return result.Result, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), result.Err)
-			}
-			return result.Result, nil
-		case <-ctx.Done():
-			return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
-		}
 	case <-ctx.Done():
+		CommandBusQueueDepth.Add(ctx, -1,
+			metric.WithAttributes(
+				AttrShardID.Int(shard),
+				AttrCommandType.String(fmt.Sprintf("%T", cmd)),
+			),
+		)
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
+	}
+
+	select {
+	case result := <-responseCh:
+		if result.Err != nil {
+			return result.Result, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), result.Err)
+		}
+		return result.Result, nil
+	case <-ctx.Done():
+		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %s for aggregate %q: %w", TypeName(cmd), cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
 	}
 }
 
@@ -176,7 +192,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 	}
 }
 
-func (b *CommandBus) getShard(aggregateID string) int {
+func (b *CommandBus) selectShard(aggregateID string) int {
 	hash := fnv.New32a()
 	hash.Write([]byte(aggregateID))
 	return int(hash.Sum32()) % b.shardCount

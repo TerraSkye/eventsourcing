@@ -8,7 +8,6 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -163,140 +162,221 @@ func NewCommandHandler[T any, C Command](
 	decide Decider[T, C],
 	opts ...CommandHandlerOption,
 ) CommandHandler[C] {
+
+	// Apply handler options
+	options := &handlerOptions{
+		StreamState:   Any{}, // default
+		RetryStrategy: &backoff.StopBackOff{},
+		MetadataFuncs: []func(ctx context.Context) map[string]any{},
+		StreamNamer:   DefaultStreamNamer,
+	}
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	return func(ctx context.Context, command C) (AppendResult, error) {
-		// Apply handler options
-		cfg := &handlerOptions{
-			StreamState:   Any{}, // default
-			RetryStrategy: &backoff.StopBackOff{},
-			MetadataFuncs: []func(ctx context.Context) map[string]any{},
-			StreamNamer:   DefaultStreamNamer,
-		}
-		for _, o := range opts {
-			o(cfg)
-		}
 		commandName := fmt.Sprintf("%T", command)
+		startTime := time.Now()
 
-		var stream = cfg.StreamNamer(ctx, command)
+		ctx, span := StartCommandSpan(ctx, command)
 
-		ctx, span := tracer.Start(ctx, "CommandHandler.Handle",
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(
-				attribute.String(AttrCommandType, commandName),
-				attribute.String(AttrAggregateID, command.AggregateID()),
-				attribute.String(AttrStreamID, stream),
+		defer func() {
+			// Record duration
+			CommandsDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()),
+				metric.WithAttributes(
+					AttrCommandType.String(commandName),
+				),
+			)
+
+			CommandsInFlight.Add(ctx, -1,
+				metric.WithAttributes(
+					AttrCommandType.String(commandName),
+				),
+			)
+		}()
+
+		// Track in-flight commands
+		CommandsInFlight.Add(ctx, 1,
+			metric.WithAttributes(
+				AttrCommandType.String(commandName),
 			),
 		)
 
-		defer span.End()
-
-		attrs := []attribute.KeyValue{
-			attribute.String("command.type", commandName),
-		}
-		CommandsInFlight.Add(ctx, 1, metric.WithAttributes(attrs...))
-		defer CommandsInFlight.Add(ctx, -1, metric.WithAttributes(attrs...))
-
-		// Track duration
-		start := time.Now()
+		streamID := options.StreamNamer(ctx, command)
+		span.SetAttributes(AttrStreamID.String(streamID))
 
 		state := initialState
-		var revision uint64
+		var lastRevision uint64
 		// Retry loop for handling concurrency conflicts
 		result, err := backoff.RetryNotifyWithData(func() (AppendResult, error) {
 
-			// --- Load history ---
-			iter, err := store.LoadStreamFrom(ctx, stream, revision)
-			if err != nil {
+			loadCtx, loadSpan := StartEventStoreSpan(ctx, "load_stream", streamID)
+			iter, loadErr := store.LoadStreamFrom(loadCtx, streamID, lastRevision)
+			if loadErr != nil {
+				EndEventStoreSpan(loadSpan, loadErr)
+				EventStoreErrors.Add(ctx, 1,
+					metric.WithAttributes(
+						AttrOperation.String("load_stream"),
+						AttrErrorType.String("load_error"),
+					),
+				)
 				// when failing to load of the event stream. this is the error.
 				//TODO some errors are retryable, we should improve the decision here.
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): load failed: %w", command, command.AggregateID(), stream, err))
+				return AppendResult{Successful: false, NextExpectedVersion: lastRevision + 1},
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): load failed: %w", command, command.AggregateID(), streamID, loadErr))
 			}
 
 			for iter.Next(ctx) {
 				envelope := iter.Value()
-				revision = envelope.Version
+				lastRevision = envelope.Version
 				state = evolve(state, envelope)
 			}
 
+			EndEventStoreSpan(loadSpan, iter.Err())
+
 			if err := iter.Err(); err != nil {
-				span.RecordError(err)
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
-					fmt.Errorf("handle command %T for aggregate %q (stream %q): iter failed: %w", command, command.AggregateID(), stream, err)
+				EventStoreErrors.Add(ctx, 1,
+					metric.WithAttributes(
+						AttrOperation.String("load_stream"),
+						AttrErrorType.String("iteration_error"),
+					),
+				)
+
+				return AppendResult{Successful: false, NextExpectedVersion: lastRevision + 1},
+					fmt.Errorf("handle command %T for aggregate %q (stream %q): iter failed: %w", command, command.AggregateID(), streamID, err)
 			}
 
 			// --- Evolve state ---
 
-			// Update revision if StreamState is used
-			if _, ok := cfg.StreamState.(Revision); ok {
-				cfg.StreamState = Revision(revision)
+			// Update lastRevision if StreamState is used
+			if _, ok := options.StreamState.(Revision); ok {
+				options.StreamState = Revision(lastRevision)
 			}
 
 			// --- Decide events ---
-			events, err := decide(state, command)
+			events, decideErr := decide(state, command)
 
-			if err != nil {
-				span.RecordError(err)
+			if decideErr != nil {
+				//TODO join the decide error with a senile business rule error.
+				span.RecordError(decideErr)
+
+				CommandsFailed.Add(ctx, 1,
+					metric.WithAttributes(
+						AttrCommandType.String(commandName),
+						AttrErrorType.String("decide_error"),
+					),
+				)
 				return AppendResult{Successful: false},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): business rule violation: %w", command, command.AggregateID(), stream, err)) // business rule violation
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): business rule violation: %w", command, command.AggregateID(), streamID, decideErr)) // business rule violation
 			}
 
 			// If no events, return success without saving
 			if len(events) == 0 {
+				span.AddEvent("no_events_produced")
 				// Nothing to persist
-				return AppendResult{Successful: true, NextExpectedVersion: revision}, nil
+
+				result := AppendResult{
+					Successful:          true,
+					NextExpectedVersion: lastRevision,
+				}
+				EndCommandSpan(span, &result, nil)
+				return result, nil
 			}
 
 			// --- Wrap events in envelopes ---
 			envelopes := make([]Envelope, len(events))
+			nextVersion := lastRevision + 1
 			baseMetadata := make(map[string]any)
-			for _, fn := range cfg.MetadataFuncs {
+			for _, fn := range options.MetadataFuncs {
 				for k, v := range fn(ctx) {
 					baseMetadata[k] = v
 				}
 			}
 
-			expectedVersion := revision
 			for i, event := range events {
-				expectedVersion++
 				envelopes[i] = Envelope{
 					EventID:    uuid.New(),
-					StreamID:   stream,
+					StreamID:   streamID,
 					Event:      event,
 					Metadata:   baseMetadata,
-					Version:    expectedVersion,
+					Version:    nextVersion + uint64(i),
 					OccurredAt: time.Now(),
 				}
+
+				// Add event attributes to span
+				span.AddEvent("event_decided",
+					trace.WithAttributes(
+						AttrEventType.String(event.EventType()),
+						AttrStreamVersion.Int64(int64(nextVersion+uint64(i))),
+					),
+				)
 			}
+
+			// Save events with tracing
+			saveCtx, saveSpan := StartEventStoreSpan(ctx, "save", streamID)
+			saveSpan.SetAttributes(AttrEventCount.Int(len(envelopes)))
 
 			// --- Persist events ---
-			result, err := store.Save(ctx, envelopes, cfg.StreamState)
+			result, persistErr := store.Save(saveCtx, envelopes, options.StreamState)
 
-			if err != nil {
+			if persistErr != nil {
+				EndEventStoreSpan(saveSpan, persistErr)
+
+				// Check if it's a concurrency conflict
 				var conflict *StreamRevisionConflictError
-				if errors.As(err, &conflict) {
+				if errors.As(persistErr, &conflict) {
+					RecordConcurrencyConflict(ctx, span, streamID, lastRevision, result.NextExpectedVersion)
 					// Retry on concurrency conflicts
-					return AppendResult{Successful: false, NextExpectedVersion: revision}, conflict
+					return AppendResult{Successful: false, NextExpectedVersion: lastRevision}, conflict
 				}
-				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): failed to save event: %w", command, command.AggregateID(), stream, err))
+
+				EventStoreErrors.Add(ctx, 1,
+					metric.WithAttributes(
+						AttrOperation.String("save"),
+						AttrErrorType.String("save_error"),
+					),
+				)
+
+				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): failed to save event: %w", command, command.AggregateID(), streamID, persistErr))
 			}
+
+			EndEventStoreSpan(saveSpan, nil)
+
+			// Record successful append
+			RecordEventsAppended(ctx, streamID, len(envelopes), options.StreamState)
+
+			EventStoreSaves.Add(ctx, 1,
+				metric.WithAttributes(
+					AttrOperation.String("save"),
+					AttrStreamID.String(streamID),
+				),
+			)
+
 			return result, nil
-		}, cfg.RetryStrategy, func(err error, duration time.Duration) {
+		}, options.RetryStrategy, func(err error, duration time.Duration) {
+			//TODO record that we are retrying
+			//RecordCommandRetry(ctx, span, retryCount, getMaxRetries(options.retryStrategy))
 			span.RecordError(err)
 		})
 
-		statusAttrs := append(attrs,
-			attribute.Bool("success", err == nil),
-		)
+		if err != nil {
+			CommandsFailed.Add(ctx, 1,
+				metric.WithAttributes(
+					AttrCommandType.String(commandName),
+					AttrErrorType.String("handler_error"),
+				),
+			)
+			EndCommandSpan(span, nil, err)
+			return AppendResult{}, err
+		}
 
-		StreamVersions.Record(ctx, int64(result.NextExpectedVersion),
+		CommandsHandled.Add(ctx, 1,
 			metric.WithAttributes(
-				attribute.String(AttrAggregateID, command.AggregateID()),
-				attribute.String(AttrStreamID, stream),
+				AttrCommandType.String(commandName),
 			),
 		)
 
-		CommandsHandled.Add(ctx, 1, metric.WithAttributes(statusAttrs...))
-		CommandsDuration.Record(ctx, float64(time.Since(start).Milliseconds()), metric.WithAttributes(statusAttrs...))
+		EndCommandSpan(span, &result, nil)
 
 		return result, err
 

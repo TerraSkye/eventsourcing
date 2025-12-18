@@ -152,9 +152,9 @@ func TestCommandBus_Stop(t *testing.T) {
 func TestCommandBus_ShardDeterministic(t *testing.T) {
 	bus := NewCommandBus(10, 3)
 
-	s1 := bus.getShard("abc")
-	s2 := bus.getShard("abc")
-	s3 := bus.getShard("xyz")
+	s1 := bus.selectShard("abc")
+	s2 := bus.selectShard("abc")
+	s3 := bus.selectShard("xyz")
 
 	if s1 != s2 {
 		t.Fatalf("shard hashing not deterministic")
