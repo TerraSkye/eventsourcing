@@ -8,6 +8,9 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // StreamNamer produces the stream name for a given command, with access to context
@@ -151,7 +154,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //
 // Example Usage:
 //
-//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithRevision(Any{}))
+//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithStreamState(Any{}))
 //	result, err := handler(ctx, myCommand)
 func NewCommandHandler[T any, C Command](
 	store EventStore,
@@ -163,7 +166,7 @@ func NewCommandHandler[T any, C Command](
 	return func(ctx context.Context, command C) (AppendResult, error) {
 		// Apply handler options
 		cfg := &handlerOptions{
-			Revision:      Any{}, // default
+			StreamState:   Any{}, // default
 			RetryStrategy: &backoff.StopBackOff{},
 			MetadataFuncs: []func(ctx context.Context) map[string]any{},
 			StreamNamer:   DefaultStreamNamer,
@@ -171,13 +174,34 @@ func NewCommandHandler[T any, C Command](
 		for _, o := range opts {
 			o(cfg)
 		}
+		commandName := fmt.Sprintf("%T", command)
 
 		var stream = cfg.StreamNamer(ctx, command)
+
+		ctx, span := tracer.Start(ctx, "CommandHandler.Handle",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.String(AttrCommandType, commandName),
+				attribute.String(AttrAggregateID, command.AggregateID()),
+				attribute.String(AttrStreamID, stream),
+			),
+		)
+
+		defer span.End()
+
+		attrs := []attribute.KeyValue{
+			attribute.String("command.type", commandName),
+		}
+		CommandsInFlight.Add(ctx, 1, metric.WithAttributes(attrs...))
+		defer CommandsInFlight.Add(ctx, -1, metric.WithAttributes(attrs...))
+
+		// Track duration
+		start := time.Now()
 
 		state := initialState
 		var revision uint64
 		// Retry loop for handling concurrency conflicts
-		result, err := backoff.RetryWithData(func() (AppendResult, error) {
+		result, err := backoff.RetryNotifyWithData(func() (AppendResult, error) {
 
 			// --- Load history ---
 			iter, err := store.LoadStreamFrom(ctx, stream, revision)
@@ -195,21 +219,23 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			if err := iter.Err(); err != nil {
+				span.RecordError(err)
 				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
 					fmt.Errorf("handle command %T for aggregate %q (stream %q): iter failed: %w", command, command.AggregateID(), stream, err)
 			}
 
 			// --- Evolve state ---
 
-			// Update revision if Revision is used
-			if _, ok := cfg.Revision.(Revision); ok {
-				cfg.Revision = Revision(revision)
+			// Update revision if StreamState is used
+			if _, ok := cfg.StreamState.(Revision); ok {
+				cfg.StreamState = Revision(revision)
 			}
 
 			// --- Decide events ---
 			events, err := decide(state, command)
 
 			if err != nil {
+				span.RecordError(err)
 				return AppendResult{Successful: false},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): business rule violation: %w", command, command.AggregateID(), stream, err)) // business rule violation
 			}
@@ -243,7 +269,7 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			// --- Persist events ---
-			result, err := store.Save(ctx, envelopes, cfg.Revision)
+			result, err := store.Save(ctx, envelopes, cfg.StreamState)
 
 			if err != nil {
 				var conflict *StreamRevisionConflictError
@@ -254,7 +280,23 @@ func NewCommandHandler[T any, C Command](
 				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): failed to save event: %w", command, command.AggregateID(), stream, err))
 			}
 			return result, nil
-		}, cfg.RetryStrategy)
+		}, cfg.RetryStrategy, func(err error, duration time.Duration) {
+			span.RecordError(err)
+		})
+
+		statusAttrs := append(attrs,
+			attribute.Bool("success", err == nil),
+		)
+
+		StreamVersions.Record(ctx, int64(result.NextExpectedVersion),
+			metric.WithAttributes(
+				attribute.String(AttrAggregateID, command.AggregateID()),
+				attribute.String(AttrStreamID, stream),
+			),
+		)
+
+		CommandsHandled.Add(ctx, 1, metric.WithAttributes(statusAttrs...))
+		CommandsDuration.Record(ctx, float64(time.Since(start).Milliseconds()), metric.WithAttributes(statusAttrs...))
 
 		return result, err
 
@@ -278,9 +320,9 @@ func NewCommandHandler[T any, C Command](
 //     This can be overridden per handler or globally for custom naming conventions
 //     (e.g., multi-tenancy, dynamic prefixes, or other domain-specific logic).
 type handlerOptions struct {
-	// Revision is the condition applied when saving events to the stream.
+	// StreamState is the condition applied when saving events to the stream.
 	// It determines the concurrency check behavior (default is Any).
-	Revision StreamState
+	StreamState StreamState
 
 	// RetryStrategy defines how the handler should retry operations in case of transient failures
 	// or version conflicts. If nil, no retries are performed.
@@ -295,7 +337,7 @@ type handlerOptions struct {
 	StreamNamer StreamNamer
 }
 
-// WithRevision sets the expected stream revision for a NewCommandHandler.
+// WithStreamState sets the expected stream revision for a NewCommandHandler.
 //
 // The StreamState controls the concurrency check when persisting events. For example:
 //   - Any{}: no version check (default)
@@ -305,9 +347,9 @@ type handlerOptions struct {
 //
 // Usage:
 //
-//	handler := NewCommandHandler(store, initialState, evolve, decide, WithRevision(NoStream))
-func WithRevision(rev StreamState) CommandHandlerOption {
-	return func(cfg *handlerOptions) { cfg.Revision = rev }
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithStreamState(NoStream))
+func WithStreamState(rev StreamState) CommandHandlerOption {
+	return func(cfg *handlerOptions) { cfg.StreamState = rev }
 }
 
 // WithRetryStrategy sets the retry strategy for a NewCommandHandler.

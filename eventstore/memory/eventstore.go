@@ -132,6 +132,9 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uin
 	m.mu.RUnlock()
 
 	if !exists {
+		return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+			return nil, io.EOF
+		}), nil
 		return nil, fmt.Errorf(
 			"load stream %q: failed to check existence: %w",
 			id, eventsourcing.ErrStreamNotFound,

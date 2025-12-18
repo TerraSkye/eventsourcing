@@ -317,7 +317,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
-		WithRevision(Revision(5)), // will be updated to latest loaded revision (7)
+		WithStreamState(Revision(5)), // will be updated to latest loaded revision (7)
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -325,7 +325,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// seenRevision should be an Revision equal to 7
+	// seenRevision should be an StreamState equal to 7
 	if seenRevision == nil {
 		t.Fatalf("expected revision passed to Save to be non-nil")
 	}
@@ -335,7 +335,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 			t.Fatalf("expected revision 7, got %d", uint64(rv))
 		}
 	default:
-		t.Fatalf("expected Revision, got %T", seenRevision)
+		t.Fatalf("expected StreamState, got %T", seenRevision)
 	}
 }
 
