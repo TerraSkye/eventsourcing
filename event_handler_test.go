@@ -2,6 +2,7 @@ package eventsourcing_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -51,18 +52,18 @@ func TestProjectorExample(t *testing.T) {
 
 	handler2 := cqrs.NewEventHandlerFunc(p.OnEvent)
 
-	handler1.Handle(context.Background(), CartCreated{ID: "abc"})
-	handler2.Handle(context.Background(), CartCreated{ID: "abc"})
+	handler1.Handle(context.Background(), &CartCreated{ID: "abc"})
+	handler2.Handle(context.Background(), &CartCreated{ID: "abc"})
 }
 
 func TestTypedEventHandler_Handle_CorrectType(t *testing.T) {
 	var called bool
-	handler := cqrs.OnEvent(func(ctx context.Context, ev CartCreated) error {
+	handler := cqrs.OnEvent(func(ctx context.Context, ev *CartCreated) error {
 		called = true
 		return nil
 	})
 
-	err := handler.Handle(context.Background(), CartCreated{ID: "abc"})
+	err := handler.Handle(context.Background(), &CartCreated{ID: "abc"})
 	assert.NoError(t, err)
 	assert.True(t, called, "Handler should have been called")
 }
@@ -73,8 +74,14 @@ func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
 		return nil
 	})
 
+	var skipped *cqrs.ErrSkippedEvent
+
 	err := handler.Handle(context.Background(), ItemAdded{ID: "xyz"})
-	assert.ErrorAs(t, err, &cqrs.ErrSkippedEvent{})
+
+	if !errors.As(err, &skipped) {
+		t.Fatalf("expected skipped event, got %v", err)
+	}
+
 }
 
 func TestEventGroupProcessor_RoutesEvents(t *testing.T) {
@@ -110,7 +117,12 @@ func TestEventGroupProcessor_SkippedEvent(t *testing.T) {
 	)
 
 	err := group.Handle(context.Background(), OtherEvent{})
-	assert.ErrorAs(t, err, &cqrs.ErrSkippedEvent{})
+
+	var expected *cqrs.ErrSkippedEvent
+
+	if !errors.As(err, &expected) {
+		t.Fatalf("expected skipped event, got %v", err)
+	}
 }
 
 func TestEventGroupProcessor_DuplicateHandlerPanics(t *testing.T) {

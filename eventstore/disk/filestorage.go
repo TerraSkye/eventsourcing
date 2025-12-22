@@ -72,7 +72,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		}
 	case cqrs.Revision:
 		if currentVersion != uint64(rev) {
-			return cqrs.AppendResult{Successful: false}, cqrs.StreamRevisionConflictError{
+			return cqrs.AppendResult{Successful: false}, &cqrs.StreamRevisionConflictError{
 				Stream:           id,
 				ExpectedRevision: rev,
 				ActualRevision:   cqrs.Revision(currentVersion),
@@ -94,6 +94,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		events[i].GlobalVersion = f.globalSeq
 
 		fname := fmt.Sprintf("%010d-%s.json", events[i].Version, events[i].Event.EventType())
+
 		path := filepath.Join(sdir, fname)
 
 		eventData, _ := json.Marshal(events[i].Event)
@@ -138,22 +139,50 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 }
 
 func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(f.streamDir(id), 0)
+	return f.loadFromDir(f.streamDir(id), cqrs.StreamExists{})
 }
 
-func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(f.streamDir(id), version)
 }
 
-func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+	return f.loadFromDir(filepath.Join(f.baseDir, "all"), version)
+}
+
+func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
-				return nil, io.EOF
-			}), nil
-		}
+		//TODO handle errors.
 		return nil, err
+	}
+
+	var offset uint64
+
+	switch from.(type) {
+	case cqrs.NoStream:
+		if len(files) != 0 {
+			return nil, fmt.Errorf(
+				"load stream %q: expected empty stream: %w",
+				dir, cqrs.ErrStreamExists,
+			)
+		}
+	case cqrs.StreamExists:
+		if len(files) == 0 {
+			return nil, fmt.Errorf(
+				"load stream %q: expected existing stream: %w",
+				dir, cqrs.ErrStreamNotFound,
+			)
+		}
+	case cqrs.Revision:
+		if int(from.ToRawInt64()) >= len(files) {
+			return nil, fmt.Errorf(
+				"load stream %q: requested %d but stream has %d: %w",
+				dir, from, len(files), cqrs.ErrInvalidRevision,
+			)
+		}
+		offset = uint64(from.ToRawInt64())
+	default:
 	}
 
 	idx := 0
@@ -170,7 +199,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 				continue
 			}
 			ver, _ := strconv.ParseUint(parts[0], 10, 64)
-			if ver < from {
+			if ver < offset {
 				continue
 			}
 
@@ -185,7 +214,7 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 				continue
 			}
 
-			// Convert KurrentDB event to cqrs.Event
+			// Convert KurrentDB event to cqrs.EventData
 			ev, err := cqrs.NewEventByName(storedEv.EventType)
 			if err != nil {
 				// Wrap and propagate as EventStoreError
@@ -212,10 +241,6 @@ func (f *FilesStore) loadFromDir(dir string, from uint64) (*cqrs.Iterator[*cqrs.
 	}
 
 	return cqrs.NewIteratorFunc(nextFunc), nil
-}
-
-func (f *FilesStore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(filepath.Join(f.baseDir, "all"), version)
 }
 
 func (f *FilesStore) Events() <-chan *cqrs.Envelope {

@@ -151,7 +151,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //
 // Example Usage:
 //
-//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithRevision(Any{}))
+//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithStreamState(Any{}))
 //	result, err := handler(ctx, myCommand)
 func NewCommandHandler[T any, C Command](
 	store EventStore,
@@ -160,101 +160,99 @@ func NewCommandHandler[T any, C Command](
 	decide Decider[T, C],
 	opts ...CommandHandlerOption,
 ) CommandHandler[C] {
+	// Apply handler options
+	options := &handlerOptions{
+		Revision:      Any{}, // default
+		RetryStrategy: &backoff.StopBackOff{},
+		MetadataFuncs: []func(ctx context.Context) map[string]any{},
+		StreamNamer:   DefaultStreamNamer,
+	}
+	for _, o := range opts {
+		o(options)
+	}
+
 	return func(ctx context.Context, command C) (AppendResult, error) {
-		// Apply handler options
-		cfg := &handlerOptions{
-			Revision:      Any{}, // default
-			RetryStrategy: &backoff.StopBackOff{},
-			MetadataFuncs: []func(ctx context.Context) map[string]any{},
-			StreamNamer:   DefaultStreamNamer,
-		}
-		for _, o := range opts {
-			o(cfg)
-		}
-
-		var stream = cfg.StreamNamer(ctx, command)
-
-		state := initialState
-		var revision uint64
+		// the stream ID for the given command
+		var streamID = options.StreamNamer(ctx, command)
+		// the state we will decide against
+		var state = initialState
+		// the stream state we will save against
+		var revision = options.Revision
+		// the revision we
+		var lastVersion uint64
 		// Retry loop for handling concurrency conflicts
 		result, err := backoff.RetryWithData(func() (AppendResult, error) {
 
-			// --- Load history ---
-			iter, err := store.LoadStreamFrom(ctx, stream, revision)
+			iter, err := store.LoadStreamFrom(ctx, streamID, revision)
+
 			if err != nil {
-				// when failing to load of the event stream. this is the error.
-				//TODO some errors are retryable, we should improve the decision here.
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): load failed: %w", command, command.AggregateID(), stream, err))
-			}
-
-			for iter.Next(ctx) {
-				envelope := iter.Value()
-				revision = envelope.Version
-				state = evolve(state, envelope)
-			}
-
-			if err := iter.Err(); err != nil {
-				return AppendResult{Successful: false, NextExpectedVersion: revision + 1},
-					fmt.Errorf("handle command %T for aggregate %q (stream %q): iter failed: %w", command, command.AggregateID(), stream, err)
+				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): load failed: %w", command, command.AggregateID(), streamID, err))
 			}
 
 			// --- Evolve state ---
+			for iter.Next(ctx) {
+				event := iter.Value()
+				revision = Revision(event.Version)
+				lastVersion = event.Version
+				state = evolve(state, event)
+			}
 
-			// Update revision if Revision is used
-			if _, ok := cfg.Revision.(Revision); ok {
-				cfg.Revision = Revision(revision)
+			if err := iter.Err(); err != nil {
+				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
+					fmt.Errorf("handle command %T for aggregate %q (streamID %q): iter failed: %w", command, command.AggregateID(), streamID, err)
 			}
 
 			// --- Decide events ---
 			events, err := decide(state, command)
 
 			if err != nil {
-				return AppendResult{Successful: false},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): business rule violation: %w", command, command.AggregateID(), stream, err)) // business rule violation
+				businessErr := errors.Join(err, ErrBusinessRuleViolation)
+				return AppendResult{Successful: false, StreamID: streamID},
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): business rule violation: %w", command, command.AggregateID(), streamID, businessErr)) // business rule violation
 			}
 
 			// If no events, return success without saving
 			if len(events) == 0 {
 				// Nothing to persist
-				return AppendResult{Successful: true, NextExpectedVersion: revision}, nil
+				return AppendResult{Successful: true, StreamID: streamID, NextExpectedVersion: lastVersion}, nil
 			}
 
 			// --- Wrap events in envelopes ---
 			envelopes := make([]Envelope, len(events))
 			baseMetadata := make(map[string]any)
-			for _, fn := range cfg.MetadataFuncs {
+			for _, fn := range options.MetadataFuncs {
 				for k, v := range fn(ctx) {
 					baseMetadata[k] = v
 				}
 			}
 
-			expectedVersion := revision
+			nextVersion := lastVersion + 1
+
 			for i, event := range events {
-				expectedVersion++
 				envelopes[i] = Envelope{
 					EventID:    uuid.New(),
-					StreamID:   stream,
+					StreamID:   streamID,
 					Event:      event,
 					Metadata:   baseMetadata,
-					Version:    expectedVersion,
+					Version:    nextVersion + uint64(i),
 					OccurredAt: time.Now(),
 				}
 			}
 
 			// --- Persist events ---
-			result, err := store.Save(ctx, envelopes, cfg.Revision)
+			result, err := store.Save(ctx, envelopes, options.Revision)
 
 			if err != nil {
 				var conflict *StreamRevisionConflictError
 				if errors.As(err, &conflict) {
 					// Retry on concurrency conflicts
-					return AppendResult{Successful: false, NextExpectedVersion: revision}, conflict
+					return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID}, conflict
 				}
-				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (stream %q): failed to save event: %w", command, command.AggregateID(), stream, err))
+				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): failed to save event: %w", command, command.AggregateID(), streamID, err))
 			}
 			return result, nil
-		}, cfg.RetryStrategy)
+		}, options.RetryStrategy)
 
 		return result, err
 
@@ -295,7 +293,7 @@ type handlerOptions struct {
 	StreamNamer StreamNamer
 }
 
-// WithRevision sets the expected stream revision for a NewCommandHandler.
+// WithStreamState sets the expected stream revision for a NewCommandHandler.
 //
 // The StreamState controls the concurrency check when persisting events. For example:
 //   - Any{}: no version check (default)
@@ -306,7 +304,7 @@ type handlerOptions struct {
 // Usage:
 //
 //	handler := NewCommandHandler(store, initialState, evolve, decide, WithRevision(NoStream))
-func WithRevision(rev StreamState) CommandHandlerOption {
+func WithStreamState(rev StreamState) CommandHandlerOption {
 	return func(cfg *handlerOptions) { cfg.Revision = rev }
 }
 

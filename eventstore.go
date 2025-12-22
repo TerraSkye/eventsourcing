@@ -29,7 +29,6 @@ type EventStore interface {
 	//       - Any: always append, do not check for conflicts.
 	//       - NoStream: stream must not exist; fail if it does.
 	//       - StreamExists: stream must exist; fail if it does not.
-	//		 -
 	//
 	// Errors:
 	//   - ErrConcurrency if the originalVersion does not match.
@@ -57,7 +56,7 @@ type EventStore interface {
 	//
 	// Returns:
 	//   - EnvelopeIterator: Lazy iterator over events from
-	LoadStreamFrom(ctx context.Context, id string, version uint64) (*Iterator[*Envelope], error)
+	LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error)
 
 	// LoadFromAll loads all events from all aggregates starting at the specified version index.
 	//
@@ -69,7 +68,7 @@ type EventStore interface {
 	// Events should be yielded in chronological order as stored by the backend.
 	// Consumers should not assume global ordering unless explicitly documented by
 	// the implementation.
-	LoadFromAll(ctx context.Context, version uint64) (*Iterator[*Envelope], error)
+	LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error)
 	// Close releases any resources held by the EventStore, such as network
 	// connections or file handles. After Close is called, the EventStore should
 	// not be used.
@@ -81,5 +80,6 @@ type EventStore interface {
 // AppendResult describes the outcome of an append operation.
 type AppendResult struct {
 	Successful          bool
+	StreamID            string
 	NextExpectedVersion uint64
 }

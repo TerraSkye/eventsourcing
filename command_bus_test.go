@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // ---- Test Stubs ----
@@ -152,9 +154,9 @@ func TestCommandBus_Stop(t *testing.T) {
 func TestCommandBus_ShardDeterministic(t *testing.T) {
 	bus := NewCommandBus(10, 3)
 
-	s1 := bus.getShard("abc")
-	s2 := bus.getShard("abc")
-	s3 := bus.getShard("xyz")
+	s1 := bus.selectShard("abc")
+	s2 := bus.selectShard("abc")
+	s3 := bus.selectShard("xyz")
 
 	if s1 != s2 {
 		t.Fatalf("shard hashing not deterministic")
@@ -164,4 +166,30 @@ func TestCommandBus_ShardDeterministic(t *testing.T) {
 	}
 
 	bus.Stop()
+}
+
+func TestNewCommandBus(t *testing.T) {
+	type args struct {
+		bufferSize int
+		shardCount int
+	}
+	tests := []struct {
+		name string
+		args args
+		want int
+	}{
+		{
+			name: "a minumum of 1 shard is present",
+			args: args{
+				bufferSize: 1,
+				shardCount: 0,
+			},
+			want: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equalf(t, tt.want, NewCommandBus(tt.args.bufferSize, tt.args.shardCount).shardCount, "NewCommandBus(%v, %v)", tt.args.bufferSize, tt.args.shardCount)
+		})
+	}
 }

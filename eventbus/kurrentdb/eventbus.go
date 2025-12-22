@@ -111,7 +111,12 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 
 		kEvent := subscriptionEvent.EventAppeared
 
-		// Convert KurrentDB event to cqrs.Envelope
+		if kEvent == nil {
+			// these are system events
+			// checkpoints/ catchups etc.
+			continue
+		}
+		// Convert KurrentDB event to cqrs.Event
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			select {
@@ -121,7 +126,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			continue
 		}
 
-		// Unmarshal KurrentDB event data into cqrs.Event
+		// Unmarshal KurrentDB event data into cqrs.EventData
 		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
 			select {
 			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal event %q: %w", s.name, kEvent.Event.EventType, err):
@@ -132,7 +137,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 
 		var metaData map[string]any
 
-		// Unmarshal KurrentDB event data into cqrs.Event
+		// Unmarshal KurrentDB event data into cqrs.EventData
 		if err := json.Unmarshal(kEvent.Event.UserMetadata, &metaData); err != nil {
 			select {
 			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.EventType, err):
@@ -150,14 +155,14 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			OccurredAt: kEvent.Event.CreatedDate,
 		}
 
-		if s.filter(envelope.Event) {
-			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
-				select {
-				case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
-				default:
-				}
+		//if s.filter(envelope.Event) {
+		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
+			select {
+			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
+			default:
 			}
 		}
+		//}
 	}
 }
 

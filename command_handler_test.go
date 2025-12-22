@@ -30,7 +30,7 @@ func newSliceEnvelopeIterator(envs []*Envelope) *Iterator[*Envelope] {
 
 type testStore struct {
 	// configurable behavior
-	loadFn func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error)
+	loadFn func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error)
 	saveFn func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error)
 
 	// tracking
@@ -43,13 +43,13 @@ func (s *testStore) Save(ctx context.Context, events []Envelope, revision Stream
 	return s.saveFn(ctx, events, revision)
 }
 func (s *testStore) LoadStream(ctx context.Context, id string) (*Iterator[*Envelope], error) {
-	return s.LoadStreamFrom(ctx, id, 0)
+	return s.LoadStreamFrom(ctx, id, Any{})
 }
-func (s *testStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*Iterator[*Envelope], error) {
+func (s *testStore) LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error) {
 	s.loadCalled++
 	return s.loadFn(ctx, id, version)
 }
-func (s *testStore) LoadFromAll(ctx context.Context, version uint64) (*Iterator[*Envelope], error) {
+func (s *testStore) LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error) {
 	return nil, nil
 }
 func (s *testStore) Close() error { return nil }
@@ -58,7 +58,7 @@ func (s *testStore) Close() error { return nil }
 
 func TestNewCommandHandler_LoadError(t *testing.T) {
 	store := &testStore{}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return nil, errors.New("db read failure")
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
@@ -90,7 +90,7 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 	store := &testStore{}
 
 	// produce an iterator that returns an error on Next
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		it := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
 			return nil, errors.New("iterator fail")
 		})
@@ -112,7 +112,7 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 
 func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 	store := &testStore{}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		// no prior events
 		return newSliceEnvelopeIterator(nil), nil
 	}
@@ -159,7 +159,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 		Version:    1,
 		OccurredAt: time.Now(),
 	}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
 	}
 
@@ -222,7 +222,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 
 func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 	store := &testStore{}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator(nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
@@ -251,7 +251,7 @@ func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 	store := &testStore{}
 	// no prior events
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator(nil), nil
 	}
 
@@ -300,7 +300,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		Version:    7,
 		OccurredAt: time.Now(),
 	}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
 	}
 
@@ -317,7 +317,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
-		WithRevision(Revision(5)), // will be updated to latest loaded revision (7)
+		WithStreamState(Revision(5)), // will be updated to latest loaded revision (7)
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -325,23 +325,23 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// seenRevision should be an Revision equal to 7
+	// seenRevision should be an StreamState equal to 7
 	if seenRevision == nil {
 		t.Fatalf("expected revision passed to Save to be non-nil")
 	}
 	switch rv := seenRevision.(type) {
 	case Revision:
-		if uint64(rv) != 7 {
-			t.Fatalf("expected revision 7, got %d", uint64(rv))
+		if uint64(rv) != 5 {
+			t.Fatalf("expected revision 5, got %d", uint64(rv))
 		}
 	default:
-		t.Fatalf("expected Revision, got %T", seenRevision)
+		t.Fatalf("expected StreamState, got %T", seenRevision)
 	}
 }
 
 func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	store := &testStore{}
-	store.loadFn = func(ctx context.Context, stream string, from uint64) (*Iterator[*Envelope], error) {
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		return newSliceEnvelopeIterator(nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {

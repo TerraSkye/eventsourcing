@@ -11,6 +11,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+var _ eventsourcing.EventStore = (*MemoryStore)(nil)
+
 type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
@@ -19,12 +21,31 @@ type MemoryStore struct {
 	events map[string][]*eventsourcing.Envelope
 }
 
-func (m *MemoryStore) LoadFromAll(ctx context.Context, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	allEvents := m.global // global slice of all events
 
-	iter := eventsourcing.NewSliceIterator(allEvents)
+	if int(version.ToRawInt64()) >= len(allEvents) {
+		return nil, fmt.Errorf(
+			"load stream %q: requested %d but stream has %d: %w",
+			"all", version, len(allEvents), eventsourcing.ErrInvalidRevision,
+		)
+	}
+
+	var offset = uint64(version.ToRawInt64())
+
+	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if int(offset) >= len(allEvents) {
+			return nil, io.EOF
+		}
+		ev := allEvents[offset]
+		offset++
+		return ev, nil
+	})
 
 	return iter, nil
 }
@@ -98,64 +119,52 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 }
 
 func (m *MemoryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-
-	m.mu.RLock()
-	events, exists := m.events[id]
-	m.mu.RUnlock()
-
-	if !exists {
-		return nil, fmt.Errorf(
-			"load stream %q: failed to check existence: %w",
-			id, eventsourcing.ErrStreamNotFound,
-		)
-	}
-
-	index := 0
-	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if index >= len(events) {
-			return nil, io.EOF
-		}
-		ev := events[index]
-		index++
-		return ev, nil
-	})
-	return iter, nil
+	return m.LoadStreamFrom(ctx, id, eventsourcing.StreamExists{})
 }
 
-func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
 	events, exists := m.events[id]
 	m.mu.RUnlock()
 
-	if !exists {
-		return nil, fmt.Errorf(
-			"load stream %q: failed to check existence: %w",
-			id, eventsourcing.ErrStreamNotFound,
-		)
-	}
+	var offset uint64
 
-	if int(version) >= len(events) {
-		return nil, fmt.Errorf(
-			"load stream %q: requested %d but stream has %d: %w",
-			id, version, len(events), eventsourcing.ErrInvalidRevision,
-		)
+	switch version.(type) {
+	case eventsourcing.NoStream:
+		if exists {
+			return nil, fmt.Errorf(
+				"load stream %q: expected empty stream: %w",
+				id, eventsourcing.ErrStreamExists,
+			)
+		}
+	case eventsourcing.StreamExists:
+		if !exists {
+			return nil, fmt.Errorf(
+				"load stream %q: expected existing stream: %w",
+				id, eventsourcing.ErrStreamNotFound,
+			)
+		}
+	case eventsourcing.Revision:
+		if int(version.ToRawInt64()) >= len(events) {
+			return nil, fmt.Errorf(
+				"load stream %q: requested %d but stream has %d: %w",
+				id, version, len(events), eventsourcing.ErrInvalidRevision,
+			)
+		}
+		offset = uint64(version.ToRawInt64())
+	default:
 	}
-
-	index := version
 
 	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if int(index) >= len(events) {
+		if int(offset) >= len(events) {
 			return nil, io.EOF
 		}
-		ev := events[index]
-		index++
+		ev := events[offset]
+		offset++
 		return ev, nil
 	})
 
