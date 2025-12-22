@@ -1,5 +1,5 @@
 package eventsourcing
 
 const (
-	instrumentationVersion = "v0.1.0"
+	InstrumentationVersion = "v0.1.0"
 )

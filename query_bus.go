@@ -1,11 +1,7 @@
 package eventsourcing
 
 import (
-	"context"
 	"fmt"
-	"time"
-
-	"go.opentelemetry.io/otel/metric"
 )
 
 // QueryBus acts as a central registry for query handlers. It stores
@@ -73,73 +69,11 @@ type handlerSettings struct {
 // Generic helper function
 func RegisterQueryHandler[T Query, R any | Iterator[any]](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
 	key := fmt.Sprintf("%T|%T", *new(T), *new(R))
-
-	// Wrap handler with OpenTelemetry instrumentation
-	wrappedHandler := func(ctx context.Context, qry T) (R, error) {
-		startTime := time.Now()
-
-		// Start query span
-		ctx, span := StartQuerySpan(ctx, qry)
-		defer span.End()
-
-		// Track in-flight queries
-		QueriesInFlight.Add(ctx, 1,
-			metric.WithAttributes(
-				AttrQueryType.String(TypeName(qry)),
-			),
-		)
-		defer QueriesInFlight.Add(ctx, -1,
-			metric.WithAttributes(
-				AttrQueryType.String(TypeName(qry)),
-			),
-		)
-
-		// Execute handler
-		result, err := handler.HandleQuery(ctx, qry)
-
-		// Record metrics
-		duration := float64(time.Since(startTime).Milliseconds())
-
-		if err != nil {
-			QueriesFailed.Add(ctx, 1,
-				metric.WithAttributes(
-					AttrQueryType.String(TypeName(qry)),
-					AttrErrorType.String("handler_error"),
-				),
-			)
-			EndQuerySpan(span, err)
-			return result, err
-		}
-
-		QueriesHandled.Add(ctx, 1,
-			metric.WithAttributes(
-				AttrQueryType.String(TypeName(qry)),
-			),
-		)
-
-		QueriesDuration.Record(ctx, duration,
-			metric.WithAttributes(
-				AttrQueryType.String(TypeName(qry)),
-			),
-		)
-
-		// Add result metadata to span if it's an iterator
-		if iter, ok := any(result).(*Iterator[any]); ok {
-			span.SetAttributes(AttrResultType.String("iterator"))
-			_ = iter // Use iter to avoid unused variable warning
-		} else {
-			span.SetAttributes(AttrResultType.String("scalar"))
-		}
-
-		EndQuerySpan(span, nil)
-		return result, nil
-	}
+	bus.handlers[key] = handler
 
 	meta := &handlerSettings{}
 	for _, opt := range opts {
 		opt(meta)
 	}
-
-	bus.handlers[key] = wrappedHandler
 	//bus.settings[key] = meta
 }

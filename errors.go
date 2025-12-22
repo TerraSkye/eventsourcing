@@ -6,15 +6,16 @@ import (
 )
 
 var (
-	ErrStreamNotFound       = errors.New("stream not found")
-	ErrStreamExists         = errors.New("stream already exists")
-	ErrInvalidEventBatch    = errors.New("invalid event batch")
-	ErrHandlerNotFound      = errors.New("handler not registered")
-	ErrInvalidRevision      = errors.New("invalid revision")
-	ErrHandlerNotRegistered = errors.New("no handler registered for type")
-	ErrDuplicateHandler     = errors.New("duplicate handler registered ")
-	ErrHandlerPanicked      = errors.New("handler panicked when handling command")
-	ErrCommandBusClosed     = errors.New("command bus is closed")
+	ErrStreamNotFound        = errors.New("stream not found")
+	ErrStreamExists          = errors.New("stream already exists")
+	ErrInvalidEventBatch     = errors.New("invalid event batch")
+	ErrHandlerNotFound       = errors.New("handler not registered")
+	ErrInvalidRevision       = errors.New("invalid revision")
+	ErrHandlerNotRegistered  = errors.New("no handler registered for type")
+	ErrDuplicateHandler      = errors.New("duplicate handler registered ")
+	ErrHandlerPanicked       = errors.New("handler panicked when handling command")
+	ErrCommandBusClosed      = errors.New("command bus is closed")
+	ErrBusinessRuleViolation = errors.New("business rule violation")
 )
 
 type StreamRevisionConflictError struct {

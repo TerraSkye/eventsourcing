@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"time"
-
-	"go.opentelemetry.io/otel/metric"
 )
 
 // EventHandler represents a generic event handler that can handle an Event.
@@ -64,64 +61,18 @@ type typedEventHandler[T Event] func(ctx context.Context, ev T) error
 // It is used internally by eventGroupProcessor for routing.
 func (h typedEventHandler[T]) EventName() string {
 	var zero T
-	return zero.EventType()
+	return TypeName(zero)
 }
 
 // Handle processes the event if it matches the type T.
 // Returns ErrSkippedEvent if the event is of the wrong type.
 func (h typedEventHandler[T]) Handle(ctx context.Context, event Event) error {
-	startTime := time.Now()
-	handlerName := h.EventName()
-
-	// Start event handler span
-	ctx, span := StartEventHandlerSpan(ctx, event, handlerName)
-	defer span.End()
-
 	ev, ok := event.(T)
 	if !ok {
 		// Return sentinel error instead of voiding it
-		err := &ErrSkippedEvent{Event: event}
-		EndEventHandlerSpan(span, err)
-		return err
+		return &ErrSkippedEvent{Event: event}
 	}
-	err := h(ctx, ev)
-
-	// Record metrics
-	duration := float64(time.Since(startTime).Milliseconds())
-
-	if err != nil {
-		// Check if error is ErrSkippedEvent
-		if _, isSkipped := err.(ErrSkippedEvent); !isSkipped {
-			EventBusErrors.Add(ctx, 1,
-				metric.WithAttributes(
-					AttrEventType.String(event.EventType()),
-					AttrHandlerName.String(handlerName),
-					AttrErrorType.String("handler_error"),
-				),
-			)
-		}
-		EndEventHandlerSpan(span, err)
-		return err
-	}
-
-	EventBusHandled.Add(ctx, 1,
-		metric.WithAttributes(
-			AttrEventType.String(event.EventType()),
-			AttrHandlerName.String(handlerName),
-		),
-	)
-
-	EventBusDuration.Record(ctx, duration,
-		metric.WithAttributes(
-			AttrEventType.String(event.EventType()),
-			AttrHandlerName.String(handlerName),
-		),
-	)
-
-	EndEventHandlerSpan(span, nil)
-
-	return nil
-
+	return h(ctx, ev)
 }
 
 // OnEvent creates a strongly-typed EventHandler for a specific event type.

@@ -27,14 +27,14 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
 
-	var streamId = events[0].StreamID
+	var streamID = events[0].StreamID
 
 	// Validate all events are for same stream
 	for i, env := range events {
-		if env.StreamID != streamId {
+		if env.StreamID != streamID {
 			return cqrs.AppendResult{}, fmt.Errorf(
 				"save events to stream %q: %w: event %d has different stream ID %q",
-				streamId, cqrs.ErrInvalidEventBatch, i, env.StreamID,
+				streamID, cqrs.ErrInvalidEventBatch, i, env.StreamID,
 			)
 		}
 	}
@@ -47,7 +47,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		if err != nil {
 			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal event data %s",
-				streamId, err, i, ev.Event.EventType(),
+				streamID, err, i, ev.Event.EventType(),
 			)
 		}
 
@@ -56,7 +56,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		if err != nil {
 			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal meta data %s",
-				streamId, err, i, ev.Event.EventType(),
+				streamID, err, i, ev.Event.EventType(),
 			)
 		}
 
@@ -81,12 +81,12 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	case cqrs.Revision:
 		streamState = kurrentdb.Revision(uint64(rev.ToRawInt64()))
 	default:
-		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamId, cqrs.ErrInvalidRevision)
+		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, cqrs.ErrInvalidRevision)
 		return cqrs.AppendResult{Successful: false}, err
 	}
 
 	//todo use the revision here
-	result, err := e.client.AppendToStream(ctx, events[0].StreamID, kurrentdb.AppendToStreamOptions{
+	result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
 		StreamState: streamState,
 	}, kEvents...)
 
@@ -104,7 +104,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		// this is an unexpected error when saving.
 		return cqrs.AppendResult{Successful: false}, fmt.Errorf(
 			"save events to stream %q: persist failed: %w",
-			streamId, err,
+			streamID, err,
 		)
 	}
 
@@ -147,7 +147,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 			return nil, io.EOF
 		}
 
-		// Convert KurrentDB event to cqrs.Event
+		// Convert KurrentDB event to cqrs.EventData
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
@@ -178,12 +178,12 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 	return iter, nil
 }
 
-func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction: kurrentdb.Forwards,
 		From: kurrentdb.StreamRevision{
-			Value: version,
+			Value: uint64(version.ToRawInt64()),
 		}, ResolveLinkTos: true,
 	}, -1)
 
@@ -207,7 +207,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 			return nil, err
 		}
 
-		// Convert KurrentDB event to cqrs.Event
+		// Convert KurrentDB event to cqrs.EventData
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
@@ -238,12 +238,12 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version uint6
 	return iter, nil
 }
 
-func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
 		Direction: kurrentdb.Forwards,
 		From: kurrentdb.Position{
-			Commit: version,
+			Commit: uint64(version.ToRawInt64()),
 		},
 		ResolveLinkTos: true,
 	}, -1)
@@ -265,7 +265,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version uint64) (*cqrs.Iter
 			return nil, err
 		}
 
-		// Convert KurrentDB event to cqrs.Event
+		// Convert KurrentDB event to cqrs.EventData
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
