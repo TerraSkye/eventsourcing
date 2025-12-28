@@ -6,7 +6,6 @@ type SubscriberOption func(cfg any)
 
 // EventBus is an EventHandler that distributes published events to all matching
 // handlers that are registered, but only one of each type will handle the event.
-// Events are not guaranteed to be handled in order.
 type EventBus interface {
 	// Subscribe adds a handler for an event. Returns an error if either the
 	// matcher or handler is nil, the handler is already added or there was some
