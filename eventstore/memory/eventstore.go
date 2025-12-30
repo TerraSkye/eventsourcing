@@ -62,10 +62,13 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	// Validate all events are for same stream
 	for i, env := range events {
 		if env.StreamID != streamId {
-			return eventsourcing.AppendResult{}, fmt.Errorf(
-				"save events to stream %q: %w: event %d has different stream ID %q",
-				streamId, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
-			)
+			return eventsourcing.AppendResult{
+					Successful: false,
+					StreamID:   streamId,
+				}, fmt.Errorf(
+					"save events to stream %q: %w: event %d has different stream ID %q",
+					streamId, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
+				)
 		}
 	}
 
@@ -78,12 +81,12 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	case eventsourcing.NoStream:
 		if currentVersion != 0 {
 			err := fmt.Errorf("stream %q: already exists: %w", streamId, eventsourcing.ErrStreamExists)
-			return eventsourcing.AppendResult{Successful: false}, err
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamId}, err
 		}
 	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
 			err := fmt.Errorf("stream %q: should exist: %w ", streamId, eventsourcing.ErrStreamNotFound)
-			return eventsourcing.AppendResult{Successful: false}, err
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamId}, err
 		}
 	case eventsourcing.Revision:
 		if currentVersion != uint64(rev) {
@@ -96,7 +99,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		}
 	default:
 		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamId, eventsourcing.ErrInvalidRevision)
-		return eventsourcing.AppendResult{Successful: false}, err
+		return eventsourcing.AppendResult{Successful: false, StreamID: streamId}, err
 	}
 
 	// Append events
@@ -113,6 +116,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	}
 
 	return eventsourcing.AppendResult{
+		StreamID:            streamId,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
 	}, nil

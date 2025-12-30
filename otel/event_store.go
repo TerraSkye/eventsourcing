@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -18,29 +19,36 @@ type TelemetryStore struct {
 
 // Save with metrics + span
 func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
-	ctx, span := tracer.Start(ctx, "EventStore.Save",
-		trace.WithAttributes(AttrOperation.String("save")),
-	)
-	defer span.End()
-
 	var streamID string
 	for _, event := range events {
 		streamID = event.StreamID
 		break
 	}
 
+	ctx, span := tracer.Start(ctx, "EventStore.Save",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			AttrOperation.String("save"),
+			AttrStreamID.String(streamID),
+			AttrEventStreamPos.String(fmt.Sprintf("%T", revision)),
+		),
+	)
+	defer span.End()
+
 	start := time.Now()
 	result, err := t.next.Save(ctx, events, revision)
 	duration := time.Since(start)
 
 	EventStoreDuration.Record(ctx, float64(duration.Milliseconds()),
-		metric.WithAttributes(AttrOperation.String("save"), AttrStreamID.String(streamID)),
+		metric.WithAttributes(
+			AttrOperation.String("save"),
+		),
 	)
-	EventStoreSaves.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(streamID)))
-	EventsAppended.Add(ctx, int64(len(events)), metric.WithAttributes(AttrStreamID.String(streamID)))
+	EventStoreSaves.Add(ctx, 1, metric.WithAttributes())
+	EventsAppended.Add(ctx, int64(len(events)), metric.WithAttributes())
 
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(streamID)))
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		span.RecordError(err)
 	}
 
@@ -51,7 +59,7 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	iter, err := t.next.LoadStream(ctx, id)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		return iter, err
 	}
 
@@ -64,6 +72,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 			started = true
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadStream",
+				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(AttrStreamID.String(id)),
 			)
 		}
@@ -71,13 +80,13 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 		if !iter.Next(ctx) {
 			err := iter.Err()
 			if err == nil || err == io.EOF {
-				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes(AttrStreamID.String(id)))
+				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
 				rebuildSpan.End()
 				if err == io.EOF {
 					return nil, io.EOF
 				}
 			} else {
-				EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.RecordError(err)
 					rebuildSpan.End()
@@ -88,12 +97,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 
 		val := iter.Value()
 		EventsLoaded.Add(ctx, 1,
-			metric.WithAttributes(
-				AttrStreamID.String(id),
-				AttrEventID.String(val.EventID.String()),
-				AttrEventType.String(val.Event.EventType()),
-				AttrEventStreamPos.Int64(int64(val.Version)),
-			),
+			metric.WithAttributes(),
 		)
 
 		return val, nil
@@ -104,7 +108,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	iter, err := t.next.LoadStreamFrom(ctx, id, version)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		return iter, err
 	}
 
@@ -118,6 +122,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 			started = true
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadStreamFrom",
+				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(AttrStreamID.String(id)),
 			)
 		}
@@ -125,9 +130,9 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 		if !iter.Next(ctx) {
 			rebuildSpan.SetAttributes(AttrEventCount.Int64(eventCount))
 			if err := iter.Err(); err == nil {
-				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes(AttrStreamID.String(id)))
+				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
 			} else {
-				EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				rebuildSpan.RecordError(err)
 
 			}
@@ -138,12 +143,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 		eventCount++
 		val := iter.Value()
 		EventsLoaded.Add(ctx, 1,
-			metric.WithAttributes(
-				AttrStreamID.String(id),
-				AttrEventID.String(val.EventID.String()),
-				AttrEventType.String(val.Event.EventType()),
-				AttrEventStreamPos.Int64(int64(val.Version)),
-			),
+			metric.WithAttributes(),
 		)
 
 		return val, nil
@@ -166,7 +166,9 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 		if !started {
 			started = true
 			startedAt = time.Now()
-			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadFromAll")
+			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadFromAll",
+				trace.WithSpanKind(trace.SpanKindClient),
+			)
 		}
 
 		if !iter.Next(ctx) {

@@ -32,10 +32,12 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	// Validate all events are for same stream
 	for i, env := range events {
 		if env.StreamID != streamID {
-			return cqrs.AppendResult{}, fmt.Errorf(
-				"save events to stream %q: %w: event %d has different stream ID %q",
-				streamID, cqrs.ErrInvalidEventBatch, i, env.StreamID,
-			)
+			return cqrs.AppendResult{
+					StreamID: streamID,
+				}, fmt.Errorf(
+					"save events to stream %q: %w: event %d has different stream ID %q",
+					streamID, cqrs.ErrInvalidEventBatch, i, env.StreamID,
+				)
 		}
 	}
 
@@ -45,7 +47,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		eventData, err := json.Marshal(ev.Event)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal event data %s",
 				streamID, err, i, ev.Event.EventType(),
 			)
@@ -54,7 +56,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		metaData, err := json.Marshal(ev.Metadata)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal meta data %s",
 				streamID, err, i, ev.Event.EventType(),
 			)
@@ -82,7 +84,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		streamState = kurrentdb.Revision(uint64(rev.ToRawInt64()))
 	default:
 		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, cqrs.ErrInvalidRevision)
-		return cqrs.AppendResult{Successful: false}, err
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
 	//todo use the revision here
@@ -94,15 +96,18 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		var conflictErr *kurrentdb.StreamRevisionConflictError
 		if errors.As(err, &conflictErr) {
 			//TODO extract the actual revisions..
-			return cqrs.AppendResult{}, &cqrs.StreamRevisionConflictError{
-				Stream: conflictErr.Stream,
-				//ExpectedRevision: conflictErr.ExpectedRevision,
-				//ActualRevision:   conflictErr.ActualRevision,
-			}
+			return cqrs.AppendResult{
+					Successful: false,
+					StreamID:   streamID,
+				}, &cqrs.StreamRevisionConflictError{
+					Stream: conflictErr.Stream,
+					//ExpectedRevision: conflictErr.ExpectedRevision,
+					//ActualRevision:   conflictErr.ActualRevision,
+				}
 		}
 
 		// this is an unexpected error when saving.
-		return cqrs.AppendResult{Successful: false}, fmt.Errorf(
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 			"save events to stream %q: persist failed: %w",
 			streamID, err,
 		)
@@ -121,7 +126,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		From: kurrentdb.StreamRevision{
 			Value: 0,
 		}, ResolveLinkTos: true,
-	}, -1)
+	}, 5000)
 
 	if err != nil {
 		//TODO enhance error variants
@@ -150,6 +155,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		// Convert KurrentDB event to cqrs.EventData
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
+			return nil, nil
 			// Wrap and propagate as EventStoreError
 			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
 		}
@@ -185,7 +191,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		From: kurrentdb.StreamRevision{
 			Value: uint64(version.ToRawInt64()),
 		}, ResolveLinkTos: true,
-	}, -1)
+	}, 5000)
 
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -246,7 +252,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 			Commit: uint64(version.ToRawInt64()),
 		},
 		ResolveLinkTos: true,
-	}, -1)
+	}, 5000)
 
 	if err != nil {
 		return nil, err

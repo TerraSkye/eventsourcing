@@ -44,8 +44,8 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		return cqrs.AppendResult{Successful: true}, nil
 	}
 
-	id := events[0].StreamID
-	sdir := f.streamDir(id)
+	var streamID = events[0].StreamID
+	sdir := f.streamDir(streamID)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -62,32 +62,33 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		// No concurrency check
 	case cqrs.NoStream:
 		if currentVersion != 0 {
-			err := fmt.Errorf("stream already exists for stream %s", id)
-			return cqrs.AppendResult{Successful: false}, err
+			err := fmt.Errorf("stream already exists for stream %s", streamID)
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 		}
 	case cqrs.StreamExists:
 		if currentVersion == 0 {
-			err := fmt.Errorf("stream does not exist for stream %s", id)
-			return cqrs.AppendResult{Successful: false}, err
+			err := fmt.Errorf("stream does not exist for stream %s", streamID)
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 		}
 	case cqrs.Revision:
 		if currentVersion != uint64(rev) {
-			return cqrs.AppendResult{Successful: false}, &cqrs.StreamRevisionConflictError{
-				Stream:           id,
-				ExpectedRevision: rev,
-				ActualRevision:   cqrs.Revision(currentVersion),
-			}
+			return cqrs.AppendResult{Successful: false, StreamID: streamID},
+				&cqrs.StreamRevisionConflictError{
+					Stream:           streamID,
+					ExpectedRevision: rev,
+					ActualRevision:   cqrs.Revision(currentVersion),
+				}
 		}
 	default:
-		err := fmt.Errorf("unsupported revision type for stream %s", id)
-		return cqrs.AppendResult{Successful: false}, err
+		err := fmt.Errorf("unsupported revision type for stream %s", streamID)
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
 	// Append events
 	for i := range events {
 		select {
 		case <-ctx.Done():
-			return cqrs.AppendResult{Successful: false}, ctx.Err()
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, ctx.Err()
 		default:
 		}
 		f.globalSeq++
@@ -113,7 +114,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		serialzedData, _ := json.Marshal(z)
 
 		if err := os.WriteFile(path, serialzedData, 0o644); err != nil {
-			return cqrs.AppendResult{}, err
+			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
 		// symlink to all/
 		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
@@ -121,7 +122,10 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		rel, _ := filepath.Rel(filepath.Join(f.baseDir, "all"), path)
 
 		if err := os.Symlink(rel, all); err != nil {
-			return cqrs.AppendResult{}, err
+			return cqrs.AppendResult{
+				StreamID:   streamID,
+				Successful: false,
+			}, err
 		}
 
 		select {
@@ -132,6 +136,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	}
 
 	return cqrs.AppendResult{
+		StreamID:            streamID,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
 	}, nil

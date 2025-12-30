@@ -103,6 +103,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 					AttrCommandType.String(commandType),
 					AttrAggregateID.String(cmd.AggregateID()),
 					AttrStreamID.String(result.StreamID),
+					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 				))
 				CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
 				return result, err
@@ -111,7 +112,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 			// Real system error
 			span.SetStatus(codes.Error, err.Error())
 			span.RecordError(err)
-			CommandsFailed.Add(ctx, 1, metric.WithAttributes(attr...))
+			CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
 			return result, err
 
 		} else {
