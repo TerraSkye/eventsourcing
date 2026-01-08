@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -50,6 +51,7 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 
 	return result, err
@@ -89,6 +91,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.RecordError(err)
+					rebuildSpan.SetStatus(codes.Error, err.Error())
 					rebuildSpan.End()
 				}
 			}
@@ -134,6 +137,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 			} else {
 				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				rebuildSpan.RecordError(err)
+				rebuildSpan.SetStatus(codes.Error, err.Error())
 
 			}
 			rebuildSpan.End()
@@ -185,6 +189,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 				EventStoreErrors.Add(ctx, 1)
 				if rebuildSpan != nil {
 					rebuildSpan.RecordError(err)
+					rebuildSpan.SetStatus(codes.Error, err.Error())
 					rebuildSpan.End()
 				}
 			}

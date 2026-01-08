@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	cqrs "github.com/terraskye/eventsourcing"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type eventstore struct {
@@ -87,10 +91,32 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
+	// Configure backoff with longer max elapsed time for leader elections
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.MaxElapsedTime = 30 * time.Second // Allow up to 30s for leader election
+	expBackoff.InitialInterval = 100 * time.Millisecond
+	expBackoff.MaxInterval = 2 * time.Second
+
+	result, err := backoff.RetryNotifyWithData(func() (*kurrentdb.WriteResult, error) {
+		result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
+			StreamState: streamState,
+		}, kEvents...)
+
+		if err != nil {
+			// Check if this is a retryable error
+			if isRetryableError(err) {
+				// Return error without wrapping - this signals backoff to retry
+				return nil, err
+			}
+			// Non-retryable error - mark as permanent
+			return nil, backoff.Permanent(err)
+		}
+		return result, err
+
+	}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 10), func(err error, duration time.Duration) {
+		fmt.Printf("Retry attempt failed for stream %s: %v, retrying in %s", streamID, err, duration)
+	})
 	//todo use the revision here
-	result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
-		StreamState: streamState,
-	}, kEvents...)
 
 	if err != nil {
 		var conflictErr *kurrentdb.StreamRevisionConflictError
@@ -122,10 +148,9 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 
 func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
-		Direction: kurrentdb.Forwards,
-		From: kurrentdb.StreamRevision{
-			Value: 0,
-		}, ResolveLinkTos: true,
+		Direction:      kurrentdb.Forwards,
+		From:           kurrentdb.Start{},
+		ResolveLinkTos: true,
 	}, 5000)
 
 	if err != nil {
@@ -155,7 +180,6 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		// Convert KurrentDB event to cqrs.EventData
 		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
-			return nil, nil
 			// Wrap and propagate as EventStoreError
 			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
 		}
@@ -185,13 +209,21 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 }
 
 func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-
-	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
-		Direction: kurrentdb.Forwards,
-		From: kurrentdb.StreamRevision{
+	var from kurrentdb.StreamPosition
+	if version.ToRawInt64() > 0 {
+		from = kurrentdb.StreamRevision{
 			Value: uint64(version.ToRawInt64()),
-		}, ResolveLinkTos: true,
-	}, 5000)
+		}
+	} else {
+		from = kurrentdb.Start{}
+	}
+
+	opt := kurrentdb.ReadStreamOptions{
+		Direction:      kurrentdb.Forwards,
+		From:           from,
+		ResolveLinkTos: true,
+	}
+	streamer, err := e.client.ReadStream(ctx, id, opt, 5000)
 
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -245,14 +277,13 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 }
 
 func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+	//TODO fix `from`
 
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
-		Direction: kurrentdb.Forwards,
-		From: kurrentdb.Position{
-			Commit: uint64(version.ToRawInt64()),
-		},
+		Direction:      kurrentdb.Forwards,
+		From:           kurrentdb.Start{},
 		ResolveLinkTos: true,
-	}, 5000)
+	}, 0)
 
 	if err != nil {
 		return nil, err
@@ -304,4 +335,28 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 
 func (e eventstore) Close() error {
 	return e.client.Close()
+}
+
+// isRetryableError determines if an error should trigger a retry
+func isRetryableError(err error) bool {
+	s, ok := status.FromError(err)
+	if !ok {
+		// Not a gRPC error - don't retry
+		return false
+	}
+
+	// Retry on transient gRPC errors
+	switch s.Code() {
+	case codes.Unavailable: // Service unavailable (leader election, network issues)
+		return true
+	case codes.DeadlineExceeded: // Timeout
+		return true
+	case codes.ResourceExhausted: // Temporary overload
+		return true
+	case codes.Aborted: // Transaction aborted, might be retryable
+		return true
+	default:
+		// Permanent errors like InvalidArgument, AlreadyExists, FailedPrecondition
+		return false
+	}
 }
