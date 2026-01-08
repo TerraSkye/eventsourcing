@@ -23,7 +23,7 @@ type EventBus struct {
 
 type subscriber struct {
 	name    string
-	opt     kurrentdb.SubscribeToAllOptions
+	opt     kurrentdb.SubscribeToPersistentSubscriptionOptions
 	filter  func(cqrs.Event) bool
 	handler cqrs.EventHandler
 	cancel  context.CancelFunc
@@ -56,7 +56,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 
 	workerCtx, cancel := context.WithCancel(context.Background())
 
-	opt := kurrentdb.SubscribeToAllOptions{}
+	opt := kurrentdb.SubscribeToPersistentSubscriptionOptions{}
 
 	for _, o := range opts {
 		o(&opt)
@@ -82,7 +82,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
-	stream, err := b.db.SubscribeToAll(ctx, s.opt)
+	stream, err := b.db.SubscribeToPersistentSubscriptionToAll(ctx, s.name, s.opt)
 	if err != nil {
 		select {
 		case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
@@ -117,19 +117,19 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			continue
 		}
 		// Convert KurrentDB event to cqrs.Event
-		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
+		ev, err := cqrs.NewEventByName(kEvent.Event.Event.EventType)
 		if err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot create event %q: %w", s.name, kEvent.Event.EventType, err):
+			case b.errs <- fmt.Errorf("subscriber %q: cannot create event %q: %w", s.name, kEvent.Event.Event.EventType, err):
 			default:
 			}
 			continue
 		}
 
 		// Unmarshal KurrentDB event data into cqrs.EventData
-		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
+		if err := json.Unmarshal(kEvent.Event.Event.Data, ev); err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal event %q: %w", s.name, kEvent.Event.EventType, err):
+			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal event %q: %w", s.name, kEvent.Event.Event.EventType, err):
 			default:
 			}
 			continue
@@ -138,21 +138,21 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		var metaData map[string]any
 
 		// Unmarshal KurrentDB event data into cqrs.EventData
-		if err := json.Unmarshal(kEvent.Event.UserMetadata, &metaData); err != nil {
+		if err := json.Unmarshal(kEvent.Event.Event.UserMetadata, &metaData); err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.EventType, err):
+			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.Event.EventType, err):
 			default:
 			}
 			continue
 		}
 
 		envelope := &cqrs.Envelope{
-			EventID:    kEvent.Event.EventID, // or use kEvent.ID if available
-			StreamID:   kEvent.Event.StreamID,
+			EventID:    kEvent.Event.Event.EventID, // or use kEvent.ID if available
+			StreamID:   kEvent.Event.Event.StreamID,
 			Metadata:   metaData,
 			Event:      ev,
-			Version:    kEvent.Event.Position.Commit,
-			OccurredAt: kEvent.Event.CreatedDate,
+			Version:    kEvent.Event.Event.Position.Commit,
+			OccurredAt: kEvent.Event.Event.CreatedDate,
 		}
 
 		//if s.filter(envelope.Event) {
