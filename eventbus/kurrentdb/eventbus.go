@@ -56,13 +56,17 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 
 	workerCtx, cancel := context.WithCancel(context.Background())
 
-	opt := kurrentdb.SubscribeToPersistentSubscriptionOptions{}
+	opt := kurrentdb.PersistentAllSubscriptionOptions{}
 
 	for _, o := range opts {
 		o(&opt)
 	}
 
-	sub := &subscriber{name: name, handler: handler, cancel: cancel, opt: opt}
+	if err := b.db.CreatePersistentSubscriptionToAll(ctx, name, opt); err != nil {
+		b.errs <- err
+	}
+
+	sub := &subscriber{name: name, handler: handler, cancel: cancel, opt: kurrentdb.SubscribeToPersistentSubscriptionOptions{}}
 	b.subs[name] = sub
 	b.mu.Unlock()
 
@@ -161,6 +165,8 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
 			default:
 			}
+		} else {
+			stream.Ack(kEvent.Event)
 		}
 		//}
 	}
@@ -199,19 +205,18 @@ func (b *EventBus) Close() error {
 	return nil
 }
 
-func WithFromStart() cqrs.SubscriberOption {
-	return func(cfg any) {
-		opts, ok := cfg.(*kurrentdb.SubscribeToAllOptions)
-		if !ok {
-			panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
-		}
-		opts.From = kurrentdb.Start{}
-	}
-}
-
+//	func WithFromStart() cqrs.SubscriberOption {
+//		return func(cfg any) {
+//			opts, ok := cfg.(*kurrentdb.SubscribeToPersistentSubscriptionOptions)
+//			if !ok {
+//				panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
+//			}
+//			opts.From = kurrentdb.Start{}
+//		}
+//	}
 func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	return func(cfg any) {
-		opts, ok := cfg.(*kurrentdb.SubscribeToAllOptions)
+		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
 		if !ok {
 			panic(fmt.Sprintf("WithFilterEvents: expected *SubscribeToAllOptions, got %T", cfg))
 		}
@@ -222,15 +227,16 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	}
 }
 
-func WithFilterStream(streams []string) cqrs.SubscriberOption {
-	return func(cfg any) {
-		opts, ok := cfg.(*kurrentdb.SubscribeToAllOptions)
-		if !ok {
-			panic(fmt.Sprintf("WithFilterStream: expected *SubscribeToAllOptions, got %T", cfg))
-		}
-		opts.Filter = &kurrentdb.SubscriptionFilter{
-			Type:     kurrentdb.StreamFilterType,
-			Prefixes: streams,
-		}
-	}
-}
+//
+//func WithFilterStream(streams []string) cqrs.SubscriberOption {
+//	return func(cfg any) {
+//		opts, ok := cfg.(*kurrentdb.SubscribeToPersistentSubscriptionOptions)
+//		if !ok {
+//			panic(fmt.Sprintf("WithFilterStream: expected *SubscribeToAllOptions, got %T", cfg))
+//		}
+//		opts.Filter = &kurrentdb.SubscriptionFilter{
+//			Type:     kurrentdb.StreamFilterType,
+//			Prefixes: streams,
+//		}
+//	}
+//}
