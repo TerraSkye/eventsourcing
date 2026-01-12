@@ -143,7 +143,7 @@ type EventGroupProcessor struct {
 //	)
 //	group.Handle(ctx, CartCreated{ID: "t1"})
 //	group.Handle(ctx, ItemAdded{ID: "c1"})
-func NewEventGroupProcessor(handlers ...EventHandler) EventGroupProcessor {
+func NewEventGroupProcessor(handlers ...EventHandler) *EventGroupProcessor {
 	m := make(map[string]EventHandler, len(handlers))
 	for _, h := range handlers {
 
@@ -159,7 +159,7 @@ func NewEventGroupProcessor(handlers ...EventHandler) EventGroupProcessor {
 		m[name] = h
 	}
 
-	return EventGroupProcessor{
+	return &EventGroupProcessor{
 		handlers: m,
 	}
 }

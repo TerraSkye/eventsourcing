@@ -241,6 +241,8 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 
 		kEvent, err := streamer.Recv()
 		if err != nil {
+
+			//if err
 			// Stream finished normally
 			return nil, err
 		}

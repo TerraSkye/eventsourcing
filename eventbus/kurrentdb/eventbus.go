@@ -120,6 +120,11 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			// checkpoints/ catchups etc.
 			continue
 		}
+
+		if kEvent.Event.Event.EventType[0] == '$' {
+			stream.Ack(kEvent.Event)
+			continue
+		}
 		// Convert KurrentDB event to cqrs.Event
 		ev, err := cqrs.NewEventByName(kEvent.Event.Event.EventType)
 		if err != nil {
