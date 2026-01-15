@@ -1,4 +1,4 @@
-package disk
+package file
 
 import (
 	"context"

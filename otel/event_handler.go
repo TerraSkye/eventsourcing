@@ -14,7 +14,7 @@ import (
 )
 
 // TODO extract the consumer group
-func WithEventTelemetry(next eventsourcing.EventHandler) eventsourcing.EventHandler {
+func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) eventsourcing.EventHandler {
 
 	return eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 

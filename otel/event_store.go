@@ -209,6 +209,6 @@ func (t TelemetryStore) Close() error {
 }
 
 // Constructor
-func WithEventStoreTelemetry(next eventsourcing.EventStore) eventsourcing.EventStore {
+func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) eventsourcing.EventStore {
 	return TelemetryStore{next: next}
 }

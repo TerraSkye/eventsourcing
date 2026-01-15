@@ -53,7 +53,13 @@ import (
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
 //	result, err := handler(ctx, myCommand)
-func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHandler[C]) eventsourcing.CommandHandler[C] {
+func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHandler[C], options ...Option) eventsourcing.CommandHandler[C] {
+	cfg := &config{}
+
+	for _, o := range options {
+		o.apply(cfg)
+	}
+
 	var zero C
 	commandType := fmt.Sprintf("%T", zero)
 
