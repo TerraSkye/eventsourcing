@@ -276,12 +276,3 @@ func WithFilterStream(streams []string) cqrs.SubscriberOption {
 		}
 	}
 }
-
-func WithLiveOnly() cqrs.SubscriberOption {
-	return func(cfg any) {
-		sub, ok := cfg.(*subscriber)
-		if ok {
-			sub.liveOnly = true
-		}
-	}
-}
