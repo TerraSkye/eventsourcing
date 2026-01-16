@@ -62,8 +62,9 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 		o(&opt)
 	}
 
-	if err := b.db.CreatePersistentSubscriptionToAll(ctx, name, opt); err != nil {
+	if err := b.EnsurePersistentSubscription(ctx, name, opt); err != nil {
 		b.errs <- err
+		return err
 	}
 
 	sub := &subscriber{name: name, handler: handler, cancel: cancel, opt: kurrentdb.SubscribeToPersistentSubscriptionOptions{}}
@@ -79,6 +80,31 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 		<-ctx.Done()
 		b.removeSubscriber(name)
 	}()
+
+	return nil
+}
+
+func (b *EventBus) EnsurePersistentSubscription(ctx context.Context, name string, opt kurrentdb.PersistentAllSubscriptionOptions) error {
+
+	var kurrentErr *kurrentdb.Error
+
+	if _, err := b.db.GetPersistentSubscriptionInfoToAll(ctx, name, kurrentdb.GetPersistentSubscriptionOptions{}); err != nil {
+
+		if errors.As(err, &kurrentErr) {
+
+			switch kurrentErr.Code() {
+
+			case kurrentdb.ErrorCodeResourceNotFound:
+
+				if err := b.db.CreatePersistentSubscriptionToAll(ctx, name, opt); err != nil {
+					return err
+				}
+
+			}
+
+		}
+
+	}
 
 	return nil
 }
@@ -104,14 +130,6 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		}
 
 		subscriptionEvent := stream.Recv()
-
-		if err != nil {
-			select {
-			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
-			default:
-			}
-			return
-		}
 
 		kEvent := subscriptionEvent.EventAppeared
 
@@ -210,15 +228,29 @@ func (b *EventBus) Close() error {
 	return nil
 }
 
-//	func WithFromStart() cqrs.SubscriberOption {
-//		return func(cfg any) {
-//			opts, ok := cfg.(*kurrentdb.SubscribeToPersistentSubscriptionOptions)
-//			if !ok {
-//				panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
-//			}
-//			opts.From = kurrentdb.Start{}
-//		}
-//	}
+func WithStartAtZero() cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
+		if !ok {
+			panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
+		}
+		opts.StartFrom = kurrentdb.Start{}
+	}
+}
+
+func WithStartAt(revision uint64) cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
+		if !ok {
+			panic(fmt.Sprintf("WithFrom: expected *SubscribeToAllOptions, got %T", cfg))
+		}
+		opts.StartFrom = kurrentdb.Position{
+			Commit:  revision,
+			Prepare: revision,
+		}
+	}
+}
+
 func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
@@ -232,16 +264,24 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	}
 }
 
-//
-//func WithFilterStream(streams []string) cqrs.SubscriberOption {
-//	return func(cfg any) {
-//		opts, ok := cfg.(*kurrentdb.SubscribeToPersistentSubscriptionOptions)
-//		if !ok {
-//			panic(fmt.Sprintf("WithFilterStream: expected *SubscribeToAllOptions, got %T", cfg))
-//		}
-//		opts.Filter = &kurrentdb.SubscriptionFilter{
-//			Type:     kurrentdb.StreamFilterType,
-//			Prefixes: streams,
-//		}
-//	}
-//}
+func WithFilterStream(streams []string) cqrs.SubscriberOption {
+	return func(cfg any) {
+		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
+		if !ok {
+			panic(fmt.Sprintf("WithFilterStream: expected *PersistentAllSubscriptionOptions, got %T", cfg))
+		}
+		opts.Filter = &kurrentdb.SubscriptionFilter{
+			Type:     kurrentdb.StreamFilterType,
+			Prefixes: streams,
+		}
+	}
+}
+
+func WithLiveOnly() cqrs.SubscriberOption {
+	return func(cfg any) {
+		sub, ok := cfg.(*subscriber)
+		if ok {
+			sub.liveOnly = true
+		}
+	}
+}
