@@ -61,7 +61,7 @@ type typedEventHandler[T Event] func(ctx context.Context, ev T) error
 // It is used internally by eventGroupProcessor for routing.
 func (h typedEventHandler[T]) EventName() string {
 	var zero T
-	return TypeName(zero)
+	return zero.EventType()
 }
 
 // Handle processes the event if it matches the type T.
