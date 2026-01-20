@@ -132,16 +132,20 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 
 		if !iter.Next(ctx) {
 			rebuildSpan.SetAttributes(AttrEventCount.Int64(eventCount))
-			if err := iter.Err(); err == nil {
-				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
-			} else {
-				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
-				rebuildSpan.RecordError(err)
-				rebuildSpan.SetStatus(codes.Error, err.Error())
 
+			err := iter.Err()
+
+			if err == nil {
+				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
+				rebuildSpan.End()
+				return nil, io.EOF
 			}
+
+			EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
+			rebuildSpan.RecordError(err)
+			rebuildSpan.SetStatus(codes.Error, err.Error())
 			rebuildSpan.End()
-			return nil, io.EOF
+			return nil, err
 		}
 
 		eventCount++

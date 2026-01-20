@@ -16,6 +16,7 @@ var (
 	ErrHandlerPanicked       = errors.New("handler panicked when handling command")
 	ErrCommandBusClosed      = errors.New("command bus is closed")
 	ErrBusinessRuleViolation = errors.New("business rule violation")
+	ErrEventNotRegistered    = errors.New("event not registered")
 )
 
 type StreamRevisionConflictError struct {

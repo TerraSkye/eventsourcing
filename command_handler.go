@@ -200,7 +200,7 @@ func NewCommandHandler[T any, C Command](
 
 			if err := iter.Err(); err != nil {
 				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
-					fmt.Errorf("handle command %T for aggregate %q (streamID %q): iter failed: %w", command, command.AggregateID(), streamID, err)
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): iter failed: %w", command, command.AggregateID(), streamID, err))
 			}
 
 			// --- Decide events ---

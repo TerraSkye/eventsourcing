@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -373,5 +374,72 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	_, err := handler(context.Background(), testEvent{agg: "m", typ: "c"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
+	// This test verifies that when an iterator encounters an unregistered event
+	// (e.g., from NewEventByName failing), the error is properly propagated
+	// through the command handler.
+
+	store := &testStore{}
+
+	// Simulate an iterator that returns one event successfully, then fails
+	// on the second event because it's not registered
+	callCount := 0
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		callCount = 0 // reset for each load call
+		iter := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
+			callCount++
+			if callCount == 1 {
+				// First event succeeds
+				return &Envelope{
+					EventID:  uuid.New(),
+					StreamID: stream,
+					Event:    testEvent{agg: stream, typ: "known", val: "v1"},
+					Version:  1,
+				}, nil
+			}
+			// Second event fails - simulating an unregistered event error
+			// This is the error that would come from NewEventByName in KurrentDB
+			return nil, fmt.Errorf("cannot create event %q: %w", "UnknownEvent", ErrEventNotRegistered)
+		})
+		return iter, nil
+	}
+
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		t.Fatalf("Save should not be called when iterator fails")
+		return AppendResult{}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		0,
+		func(s int, e *Envelope) int { return s + 1 },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "new"}}, nil
+		},
+		WithRetryStrategy(&backoff.StopBackOff{}),
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "test-stream", typ: "cmd"})
+
+	// Verify the error is propagated
+	if err == nil {
+		t.Fatalf("expected error when iterator encounters unregistered event")
+	}
+
+	// Verify the error contains the expected information
+	if !errors.Is(err, ErrEventNotRegistered) {
+		t.Fatalf("expected error to wrap ErrEventNotRegistered, got: %v", err)
+	}
+
+	// Verify the error message contains context about the failed event
+	errStr := err.Error()
+	if !strings.Contains(errStr, "UnknownEvent") {
+		t.Fatalf("expected error message to contain event name 'UnknownEvent', got: %v", errStr)
+	}
+	if !strings.Contains(errStr, "iter failed") {
+		t.Fatalf("expected error message to contain 'iter failed', got: %v", errStr)
 	}
 }

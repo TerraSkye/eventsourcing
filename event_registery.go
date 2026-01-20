@@ -138,7 +138,7 @@ func newEventByNameDefault(name string) (Event, error) {
 	registryMu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("event not registered: %s", name)
+		return nil, fmt.Errorf("%w: %s", ErrEventNotRegistered, name)
 	}
 	ev := factory()
 	if ev == nil {
