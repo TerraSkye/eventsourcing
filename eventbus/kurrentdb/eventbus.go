@@ -182,6 +182,10 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			OccurredAt: kEvent.Event.Event.CreatedDate,
 		}
 
+		// out of date
+
+		// readstream ( 0, 10)
+
 		//if s.filter(envelope.Event) {
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
 			select {

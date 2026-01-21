@@ -37,9 +37,9 @@ func (o OtherEvent) EventType() string   { return cqrs.TypeName(o) }
 
 type Projector struct{}
 
-func (p Projector) OnItemAdded(ctx context.Context, ev *OtherEvent) error    { return nil }
-func (p Projector) OnCartCreated(ctx context.Context, ev *CartCreated) error { return nil }
-func (p Projector) OnEvent(ctx context.Context, ev cqrs.Event) error         { return nil }
+func (p Projector) OnItemAdded(ctx context.Context, ev OtherEvent) error    { return nil }
+func (p Projector) OnCartCreated(ctx context.Context, ev CartCreated) error { return nil }
+func (p Projector) OnEvent(ctx context.Context, ev cqrs.Event) error        { return nil }
 
 func TestProjectorExample(t *testing.T) {
 
