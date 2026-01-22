@@ -102,14 +102,17 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 					AttrStreamID.String(result.StreamID),
 				))
 			}
+			var bussinessViolation *eventsourcing.ErrBusinessRuleViolation
+			if errors.As(err, &bussinessViolation) {
 
-			if errors.Is(err, eventsourcing.ErrBusinessRuleViolation) {
-				span.SetStatus(codes.Ok, fmt.Sprintf("business rule violation: %v", err))
+				span.SetAttributes(AttrErrorMessage.String(bussinessViolation.Cause().Error()))
+				span.SetStatus(codes.Ok, "")
 				span.AddEvent("business_rule_violation", trace.WithAttributes(
 					AttrCommandType.String(commandType),
 					AttrAggregateID.String(cmd.AggregateID()),
 					AttrStreamID.String(result.StreamID),
 					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
+					AttrErrorMessage.String(bussinessViolation.Cause().Error()),
 				))
 				CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
 				return result, err

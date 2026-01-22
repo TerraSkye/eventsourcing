@@ -6,17 +6,16 @@ import (
 )
 
 var (
-	ErrStreamNotFound        = errors.New("stream not found")
-	ErrStreamExists          = errors.New("stream already exists")
-	ErrInvalidEventBatch     = errors.New("invalid event batch")
-	ErrHandlerNotFound       = errors.New("handler not registered")
-	ErrInvalidRevision       = errors.New("invalid revision")
-	ErrHandlerNotRegistered  = errors.New("no handler registered for type")
-	ErrDuplicateHandler      = errors.New("duplicate handler registered ")
-	ErrHandlerPanicked       = errors.New("handler panicked when handling command")
-	ErrCommandBusClosed      = errors.New("command bus is closed")
-	ErrBusinessRuleViolation = errors.New("business rule violation")
-	ErrEventNotRegistered    = errors.New("event not registered")
+	ErrStreamNotFound       = errors.New("stream not found")
+	ErrStreamExists         = errors.New("stream already exists")
+	ErrInvalidEventBatch    = errors.New("invalid event batch")
+	ErrHandlerNotFound      = errors.New("handler not registered")
+	ErrInvalidRevision      = errors.New("invalid revision")
+	ErrHandlerNotRegistered = errors.New("no handler registered for type")
+	ErrDuplicateHandler     = errors.New("duplicate handler registered ")
+	ErrHandlerPanicked      = errors.New("handler panicked when handling command")
+	ErrCommandBusClosed     = errors.New("command bus is closed")
+	ErrEventNotRegistered   = errors.New("event not registered")
 )
 
 type StreamRevisionConflictError struct {
@@ -38,4 +37,17 @@ type ErrSkippedEvent struct {
 
 func (e ErrSkippedEvent) Error() string {
 	return fmt.Sprintf("skipped event of type %T", e.Event)
+}
+
+// ErrSkippedEvent is returned when a handler cannot handle the event type.
+type ErrBusinessRuleViolation struct {
+	Err error
+}
+
+func (e ErrBusinessRuleViolation) Error() string {
+	return fmt.Sprintf("business rule violation :%s", e.Err.Error())
+}
+
+func (e ErrBusinessRuleViolation) Cause() error {
+	return e.Err
 }

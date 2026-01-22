@@ -207,9 +207,9 @@ func NewCommandHandler[T any, C Command](
 			events, err := decide(state, command)
 
 			if err != nil {
-				businessErr := errors.Join(err, ErrBusinessRuleViolation)
+
 				return AppendResult{Successful: false, StreamID: streamID},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): business rule violation: %w", command, command.AggregateID(), streamID, businessErr)) // business rule violation
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): business rule violation: %w", command, command.AggregateID(), streamID, &ErrBusinessRuleViolation{err})) // business rule violation
 			}
 
 			// If no events, return success without saving
