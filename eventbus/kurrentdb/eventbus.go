@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	cqrs "github.com/terraskye/eventsourcing"
 )
@@ -113,26 +115,55 @@ func (b *EventBus) EnsurePersistentSubscription(ctx context.Context, name string
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
-	stream, err := b.db.SubscribeToPersistentSubscriptionToAll(ctx, s.name, s.opt)
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 100 * time.Millisecond
+	bo.MaxInterval = 10 * time.Second
+	bo.MaxElapsedTime = 0 // Never stop due to elapsed time
+
+	retryBackoff := backoff.WithMaxRetries(bo, 100)
+	retryBackoff = backoff.WithContext(retryBackoff, ctx)
+
+	err := backoff.Retry(func() error {
+		if err := b.runSubscription(ctx, s); err != nil {
+			select {
+			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
+			default:
+			}
+			return err
+		}
+		// Subscription ended without error (context cancelled)
+		return nil
+	}, retryBackoff)
+
 	if err != nil {
 		select {
-		case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
+		case b.errs <- fmt.Errorf("subscriber %q: max retries exceeded: %w", s.name, err):
 		default:
 		}
-		return
+	}
+}
+
+func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
+	stream, err := b.db.SubscribeToPersistentSubscriptionToAll(ctx, s.name, s.opt)
+	if err != nil {
+		return err
 	}
 	defer stream.Close()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 
 		subscriptionEvent := stream.Recv()
 
 		kEvent := subscriptionEvent.EventAppeared
+
+		if subscriptionEvent.SubscriptionDropped != nil {
+			return errors.New("subscription dropped, reconnecting")
+		}
 
 		if kEvent == nil {
 			// these are system events
@@ -185,7 +216,6 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 			OccurredAt: kEvent.Event.Event.CreatedDate,
 		}
 
-		//if s.filter(envelope.Event) {
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
 			select {
 			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
@@ -194,7 +224,6 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		} else {
 			stream.Ack(kEvent.Event)
 		}
-		//}
 	}
 }
 
