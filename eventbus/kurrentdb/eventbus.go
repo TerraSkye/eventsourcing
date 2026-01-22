@@ -165,12 +165,14 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		var metaData map[string]any
 
 		// Unmarshal KurrentDB event data into cqrs.EventData
-		if err := json.Unmarshal(kEvent.Event.Event.UserMetadata, &metaData); err != nil {
-			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.Event.EventType, err):
-			default:
+		if kEvent.Event.Event.UserMetadata != nil {
+			if err := json.Unmarshal(kEvent.Event.Event.UserMetadata, &metaData); err != nil {
+				select {
+				case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.Event.EventType, err):
+				default:
+				}
+				continue
 			}
-			continue
 		}
 
 		envelope := &cqrs.Envelope{
