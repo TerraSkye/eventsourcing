@@ -63,6 +63,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	}
 
 	if err := b.EnsurePersistentSubscription(ctx, name, opt); err != nil {
+		cancel()
 		b.errs <- err
 		return err
 	}
