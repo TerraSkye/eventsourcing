@@ -107,9 +107,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 			if err == nil || err == io.EOF {
 				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
 				rebuildSpan.End()
-				if err == io.EOF {
-					return nil, io.EOF
-				}
+				return nil, io.EOF
 			} else {
 				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				if rebuildSpan != nil {
