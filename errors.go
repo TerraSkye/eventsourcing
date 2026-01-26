@@ -51,3 +51,7 @@ func (e ErrBusinessRuleViolation) Error() string {
 func (e ErrBusinessRuleViolation) Cause() error {
 	return e.Err
 }
+
+func (e ErrBusinessRuleViolation) Unwrap() error {
+	return e.Err
+}
