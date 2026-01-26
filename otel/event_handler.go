@@ -25,7 +25,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 	return eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 
 		// Extract the original trace context from event metadata
-		var carrier propagation.MapCarrier
+		var carrier = make(propagation.MapCarrier)
 		if metadata := eventsourcing.MetadataFromContext(ctx); len(metadata) > 0 {
 			for k, v := range metadata {
 				if stringV, ok := v.(string); ok && len(stringV) > 0 {
