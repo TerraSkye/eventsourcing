@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -35,6 +37,27 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 		),
 	)
 	defer span.End()
+
+	{
+		carrier := propagation.MapCarrier{}
+
+		causationId := eventsourcing.CausationFromContext(ctx)
+
+		otel.GetTextMapPropagator().Inject(ctx, carrier)
+		for i := range events {
+			if causationId != "" {
+				events[i].Metadata["causationId"] = causationId
+			}
+
+			if span.SpanContext().HasTraceID() {
+				events[i].Metadata["correlationId"] = span.SpanContext().TraceID().String()
+			}
+
+			for key, value := range carrier {
+				events[i].Metadata[key] = value
+			}
+		}
+	}
 
 	start := time.Now()
 	result, err := t.next.Save(ctx, events, revision)

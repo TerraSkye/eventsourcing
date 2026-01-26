@@ -18,6 +18,7 @@ const (
 	globalVersionKey ctxKey = "global_version"
 	occurredAtKey    ctxKey = "occurredAt"
 	metadataKey      ctxKey = "metadata"
+	causationIDKey   ctxKey = "causationID"
 )
 
 // WithEnvelope adds the context of the Event to the context
@@ -100,4 +101,19 @@ func MetadataFromContext(ctx context.Context) map[string]any {
 		}
 	}
 	return nil
+}
+
+func WithCausation(ctx context.Context, causation string) context.Context {
+	ctx = context.WithValue(ctx, causationIDKey, causation)
+	return ctx
+}
+
+// CausationFromContext returns Metadata or nil if not present
+func CausationFromContext(ctx context.Context) string {
+	if v := ctx.Value(causationIDKey); v != nil {
+		if causation, ok := v.(string); ok {
+			return causation
+		}
+	}
+	return ""
 }

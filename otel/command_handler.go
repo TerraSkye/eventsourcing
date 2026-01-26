@@ -68,6 +68,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	}
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
+		ctx = eventsourcing.WithCausation(ctx, commandType)
 		attr := append(baseAttributes, AttrAggregateID.String(cmd.AggregateID()))
 
 		ctx, span := tracer.Start(ctx, fmt.Sprintf("command.handle %s", commandType),

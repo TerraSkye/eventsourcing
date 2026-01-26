@@ -25,13 +25,13 @@ type ItemAdded struct {
 	ID string
 }
 
-func (i ItemAdded) AggregateID() string { return i.ID }
-func (i ItemAdded) EventType() string   { return cqrs.TypeName(i) }
+func (i *ItemAdded) AggregateID() string { return i.ID }
+func (i *ItemAdded) EventType() string   { return cqrs.TypeName(i) }
 
 type OtherEvent struct{}
 
-func (o OtherEvent) AggregateID() string { return "" }
-func (o OtherEvent) EventType() string   { return cqrs.TypeName(o) }
+func (o *OtherEvent) AggregateID() string { return "" }
+func (o *OtherEvent) EventType() string   { return cqrs.TypeName(o) }
 
 // --- Tests ---
 
@@ -76,7 +76,7 @@ func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
 
 	var skipped *cqrs.ErrSkippedEvent
 
-	err := handler.Handle(context.Background(), ItemAdded{ID: "xyz"})
+	err := handler.Handle(context.Background(), &ItemAdded{ID: "xyz"})
 
 	if !errors.As(err, &skipped) {
 		t.Fatalf("expected skipped event, got %v", err)
@@ -89,11 +89,11 @@ func TestEventGroupProcessor_RoutesEvents(t *testing.T) {
 	calledItem := false
 
 	group := cqrs.NewEventGroupProcessor(
-		cqrs.OnEvent(func(ctx context.Context, ev CartCreated) error {
+		cqrs.OnEvent(func(ctx context.Context, ev *CartCreated) error {
 			calledCart = true
 			return nil
 		}),
-		cqrs.OnEvent(func(ctx context.Context, ev ItemAdded) error {
+		cqrs.OnEvent(func(ctx context.Context, ev *ItemAdded) error {
 			calledItem = true
 			return nil
 		}),
@@ -106,7 +106,7 @@ func TestEventGroupProcessor_RoutesEvents(t *testing.T) {
 	assert.False(t, calledItem)
 
 	// Trigger ItemAdded
-	err = group.Handle(context.Background(), ItemAdded{ID: "i1"})
+	err = group.Handle(context.Background(), &ItemAdded{ID: "i1"})
 	assert.NoError(t, err)
 	assert.True(t, calledItem)
 }
@@ -116,7 +116,7 @@ func TestEventGroupProcessor_SkippedEvent(t *testing.T) {
 		cqrs.OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
 	)
 
-	err := group.Handle(context.Background(), OtherEvent{})
+	err := group.Handle(context.Background(), &OtherEvent{})
 
 	var expected *cqrs.ErrSkippedEvent
 
@@ -136,8 +136,8 @@ func TestEventGroupProcessor_DuplicateHandlerPanics(t *testing.T) {
 
 func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
 	group := cqrs.NewEventGroupProcessor(
-		cqrs.OnEvent(func(ctx context.Context, ev ItemAdded) error { return nil }),
-		cqrs.OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
+		cqrs.OnEvent(func(ctx context.Context, ev *ItemAdded) error { return nil }),
+		cqrs.OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
 	)
 
 	names := group.StreamFilter()
