@@ -75,7 +75,7 @@ func VersionFromContext(ctx context.Context) uint64 {
 
 // VersionFromContext returns the Version or 0 if not present
 func GlobalVersionFromContext(ctx context.Context) uint64 {
-	if v := ctx.Value(versionKey); v != nil {
+	if v := ctx.Value(globalVersionKey); v != nil {
 		if ver, ok := v.(uint64); ok {
 			return ver
 		}
