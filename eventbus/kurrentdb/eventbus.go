@@ -208,12 +208,13 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 		}
 
 		envelope := &cqrs.Envelope{
-			EventID:    kEvent.Event.Event.EventID, // or use kEvent.ID if available
-			StreamID:   kEvent.Event.Event.StreamID,
-			Metadata:   metaData,
-			Event:      ev,
-			Version:    kEvent.Event.Event.Position.Commit,
-			OccurredAt: kEvent.Event.Event.CreatedDate,
+			EventID:       kEvent.Event.Event.EventID, // or use kEvent.ID if available
+			StreamID:      kEvent.Event.Event.StreamID,
+			Metadata:      metaData,
+			Event:         ev,
+			Version:       kEvent.Event.Event.EventNumber,
+			GlobalVersion: kEvent.Event.Event.Position.Commit,
+			OccurredAt:    kEvent.Event.Event.CreatedDate,
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
