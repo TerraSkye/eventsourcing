@@ -45,6 +45,11 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 
 		otel.GetTextMapPropagator().Inject(ctx, carrier)
 		for i := range events {
+
+			if events[i].Metadata == nil {
+				events[i].Metadata = map[string]any{}
+			}
+
 			if causationId != "" {
 				events[i].Metadata["causationId"] = causationId
 			}
