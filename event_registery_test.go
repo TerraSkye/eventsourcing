@@ -27,6 +27,7 @@ func TestRegisterEventByType(t *testing.T) {
 	// Reset registry
 	registryMu.Lock()
 	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
 	registryMu.Unlock()
 
 	t.Run("register and create new instance", func(t *testing.T) {
@@ -66,6 +67,7 @@ func TestRegisterEventByName(t *testing.T) {
 	// Reset registry
 	registryMu.Lock()
 	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
 	registryMu.Unlock()
 
 	t.Run("register by custom name", func(t *testing.T) {
@@ -99,6 +101,7 @@ func TestNewEventByNameErrors(t *testing.T) {
 	// Reset registry
 	registryMu.Lock()
 	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
 	registry["NilFactory"] = func() Event { return nil }
 	registryMu.Unlock()
 
@@ -118,6 +121,7 @@ func TestConcurrencySafety(t *testing.T) {
 	// Reset registry
 	registryMu.Lock()
 	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
 	registryMu.Unlock()
 
 	var wg sync.WaitGroup
@@ -146,10 +150,49 @@ func TestConcurrencySafety(t *testing.T) {
 	}
 }
 
+func TestEventNamesFor(t *testing.T) {
+	// Reset registry
+	registryMu.Lock()
+	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
+	registryMu.Unlock()
+
+	RegisterEventByName("Name1", func() Event { return &TestEvent{} })
+	RegisterEventByName("Name2", func() Event { return &TestEvent{} })
+	RegisterEventByName("Other", func() Event { return &OtherEvent{} })
+
+	names := EventNamesFor(&TestEvent{})
+	if len(names) != 2 {
+		t.Fatalf("expected 2 names, got %d", len(names))
+	}
+
+	found := map[string]bool{}
+	for _, n := range names {
+		found[n] = true
+	}
+	if !found["Name1"] || !found["Name2"] {
+		t.Fatalf("expected Name1 and Name2, got %v", names)
+	}
+
+	otherNames := EventNamesFor(&OtherEvent{})
+	if len(otherNames) != 1 || otherNames[0] != "Other" {
+		t.Fatalf("expected [Other], got %v", otherNames)
+	}
+
+	// Unregistered type returns nil
+	type UnknownEvent struct{}
+	unknownNames := EventNamesFor(&TestEvent{ID: "unused"})
+	// Same type, different value — should still match
+	if len(unknownNames) != 2 {
+		t.Fatalf("expected 2 names for same type with different value, got %d", len(unknownNames))
+	}
+}
+
 func TestFactoryReturnsNil(t *testing.T) {
 	// Reset registry
 	registryMu.Lock()
 	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
 	registryMu.Unlock()
 
 	defer func() {

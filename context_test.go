@@ -24,6 +24,7 @@ func TestContextGetters(t *testing.T) {
 
 	eventID := uuid.New()
 	occurredAt := time.Now()
+	causationID := "cause-123"
 	metadata := map[string]any{"key": "value"}
 
 	env := &Envelope{
@@ -37,6 +38,8 @@ func TestContextGetters(t *testing.T) {
 	}
 
 	ctxWithEnv := WithEnvelope(t.Context(), env)
+
+	ctxWithEnv = WithCausation(ctxWithEnv, causationID)
 	emptyCtx := t.Context()
 
 	tests := []struct {
@@ -61,7 +64,7 @@ func TestContextGetters(t *testing.T) {
 			name: "AggregateIDFromContext with value",
 			ctx:  ctxWithEnv,
 			fn:   func(ctx context.Context) any { return AggregateIDFromContext(ctx) },
-			want: "stream-123", // matches your current code (bug)
+			want: "agg-456",
 		},
 		{
 			name: "AggregateIDFromContext without value",
@@ -97,7 +100,7 @@ func TestContextGetters(t *testing.T) {
 			name: "GlobalVersionFromContext with value",
 			ctx:  ctxWithEnv,
 			fn:   func(ctx context.Context) any { return GlobalVersionFromContext(ctx) },
-			want: uint64(7), // matches your current code (bug)
+			want: uint64(42),
 		},
 		{
 			name: "GlobalVersionFromContext without value",
@@ -128,6 +131,18 @@ func TestContextGetters(t *testing.T) {
 			ctx:  emptyCtx,
 			fn:   func(ctx context.Context) any { return MetadataFromContext(ctx) },
 			want: map[string]any{},
+		},
+		{
+			name: "MetadataFromContext without value",
+			ctx:  emptyCtx,
+			fn:   func(ctx context.Context) any { return CausationFromContext(ctx) },
+			want: "",
+		},
+		{
+			name: "OccurredAtFromContext with value",
+			ctx:  ctxWithEnv,
+			fn:   func(ctx context.Context) any { return CausationFromContext(ctx) },
+			want: causationID,
 		},
 	}
 

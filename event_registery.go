@@ -10,6 +10,9 @@ var (
 	// Each factory must return a new instance of a concrete Event type.
 	registry = map[string]func() Event{}
 
+	// typeToNames maps a concrete Event type string to the names it is registered under.
+	typeToNames = map[string][]string{}
+
 	// registryMu protects access to the registry for concurrent operations.
 	registryMu sync.RWMutex
 
@@ -99,6 +102,14 @@ var (
 	// Example Usage:
 	//   ev, err := NewEventByName("InventoryChanged")
 	NewEventByName func(name string) (Event, error) = newEventByNameDefault
+
+	// EventNamesFor returns the registered names for a given Event type.
+	EventNamesFor func(event Event) []string = func(event Event) []string {
+		registryMu.RLock()
+		defer registryMu.RUnlock()
+
+		return typeToNames[fmt.Sprintf("%T", event)]
+	}
 )
 
 // registerEventNameDefault is the internal implementation for registering an event under a name.
@@ -126,6 +137,9 @@ func registerEventNameDefault(name string, fn func() Event) {
 	}
 
 	registry[name] = fn
+
+	key := fmt.Sprintf("%T", ev)
+	typeToNames[key] = append(typeToNames[key], name)
 }
 
 // newEventByNameDefault is the internal implementation of NewEventByName.

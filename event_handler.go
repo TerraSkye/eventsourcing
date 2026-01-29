@@ -61,7 +61,13 @@ type typedEventHandler[T Event] func(ctx context.Context, ev T) error
 // It is used internally by eventGroupProcessor for routing.
 func (h typedEventHandler[T]) EventName() string {
 	var zero T
-	return zero.EventType()
+	return fmt.Sprintf("%T", zero)
+}
+
+// EventInstance returns a zero-value instance of the event type T.
+func (h typedEventHandler[T]) EventInstance() Event {
+	var zero T
+	return zero
 }
 
 // Handle processes the event if it matches the type T.
@@ -167,7 +173,7 @@ func NewEventGroupProcessor(handlers ...EventHandler) *EventGroupProcessor {
 // Handle routes the given event to the correct typed handler.
 // Returns ErrSkippedEvent if no handler exists for the event type.
 func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
-	name := ev.EventType()
+	name := fmt.Sprintf("%T", ev)
 	h, ok := p.handlers[name]
 
 	if !ok {
@@ -180,8 +186,10 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 // Useful for subscribing to streams or listing registered handlers.
 func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
-	for name := range p.handlers {
-		out = append(out, name)
+	for _, h := range p.handlers {
+		if ei, ok := h.(interface{ EventInstance() Event }); ok {
+			out = append(out, EventNamesFor(ei.EventInstance())...)
+		}
 	}
 	sort.Strings(out) // deterministic order
 	return out

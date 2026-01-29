@@ -35,7 +35,7 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 
 // StreamIDFromContext returns the StreamID or "" if not present
 func AggregateIDFromContext(ctx context.Context) string {
-	if v := ctx.Value(streamIDKey); v != nil {
+	if v := ctx.Value(aggregateIDKey); v != nil {
 		if s, ok := v.(string); ok {
 			return s
 		}

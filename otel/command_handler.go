@@ -66,12 +66,29 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	baseAttributes := []attribute.KeyValue{
 		AttrCommandType.String(commandType),
 	}
+	baseAttributes = append(baseAttributes, cfg.Attributes...)
+
+	defaultOperation := fmt.Sprintf("command.handle %s", commandType)
+	if cfg.Operation != "" {
+		defaultOperation = cfg.Operation
+	}
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
 		ctx = eventsourcing.WithCausation(ctx, commandType)
 		attr := append(baseAttributes, AttrAggregateID.String(cmd.AggregateID()))
 
-		ctx, span := tracer.Start(ctx, fmt.Sprintf("command.handle %s", commandType),
+		if cfg.GetAttributes != nil {
+			attr = append(attr, cfg.GetAttributes(ctx)...)
+		}
+
+		operation := defaultOperation
+		if cfg.GetOperation != nil {
+			if op := cfg.GetOperation(ctx, defaultOperation); op != "" {
+				operation = op
+			}
+		}
+
+		ctx, span := tracer.Start(ctx, operation,
 			trace.WithSpanKind(trace.SpanKindInternal),
 			trace.WithAttributes(attr...),
 		)

@@ -77,7 +77,6 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		}
 
 		EventBusHandled.Add(ctx, 1, metric.WithAttributes(AttrEventType.String(event.EventType())))
-		defer EventBusHandled.Add(ctx, -1, metric.WithAttributes(AttrEventType.String(event.EventType())))
 
 		startTime := time.Now()
 		err := next.Handle(ctx, event)

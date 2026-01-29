@@ -5,8 +5,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/assert"
 )
 
 // ---- Test Stubs ----
@@ -189,7 +187,10 @@ func TestNewCommandBus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equalf(t, tt.want, NewCommandBus(tt.args.bufferSize, tt.args.shardCount).shardCount, "NewCommandBus(%v, %v)", tt.args.bufferSize, tt.args.shardCount)
+			got := NewCommandBus(tt.args.bufferSize, tt.args.shardCount).shardCount
+			if got != tt.want {
+				t.Errorf("NewCommandBus(%v, %v).shardCount = %v, want %v", tt.args.bufferSize, tt.args.shardCount, got, tt.want)
+			}
 		})
 	}
 }
