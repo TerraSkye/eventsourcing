@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
-	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -32,30 +32,55 @@ import (
 //
 //	handler := WithQueryTelemetry(myQueryHandler)
 //	result, err := handler.HandleQuery(ctx, myQuery)
-func WithQueryTelemetry[T eventsourcing.Query, R any](next eventsourcing.QueryHandler[T, R]) eventsourcing.QueryHandler[T, R] {
+func WithQueryTelemetry[T eventsourcing.Query, R any](next eventsourcing.QueryHandler[T, R], options ...Option) eventsourcing.QueryHandler[T, R] {
 	var zero T
 	queryType := fmt.Sprintf("%T", zero)
 
+	cfg := &config{}
+
+	for _, o := range options {
+		o.apply(cfg)
+	}
 	return &telemetryQueryHandler[T, R]{
 		next:      next,
 		queryType: queryType,
-		tracer:    otel.Tracer("eventsourcing"),
+		cfg:       cfg,
 	}
 }
 
 type telemetryQueryHandler[T eventsourcing.Query, R any] struct {
 	next      eventsourcing.QueryHandler[T, R]
 	queryType string
-	tracer    trace.Tracer
+	cfg       *config
 }
 
 func (h *telemetryQueryHandler[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
-	ctx, span := h.tracer.Start(ctx, fmt.Sprintf("query.handle %s", h.queryType),
+
+	baseAttributes := []attribute.KeyValue{
+		AttrQueryType.String(h.queryType),
+		AttrQueryID.String(string(qry.ID())),
+	}
+	baseAttributes = append(baseAttributes, h.cfg.Attributes...)
+
+	if h.cfg.GetAttributes != nil {
+		baseAttributes = append(baseAttributes, h.cfg.GetAttributes(ctx)...)
+	}
+
+	var defaultOperation = fmt.Sprintf("query.handle %s", h.queryType)
+
+	if h.cfg.Operation != "" {
+		defaultOperation = h.cfg.Operation
+	}
+
+	if h.cfg.GetOperation != nil {
+		if op := h.cfg.GetOperation(ctx, defaultOperation); op != "" {
+			defaultOperation = op
+		}
+	}
+
+	ctx, span := tracer.Start(ctx, defaultOperation,
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			AttrQueryType.String(h.queryType),
-			AttrQueryID.String(string(qry.ID())),
-		),
+		trace.WithAttributes(baseAttributes...),
 	)
 	defer span.End()
 
