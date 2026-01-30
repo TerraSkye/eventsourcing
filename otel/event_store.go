@@ -106,6 +106,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(
 					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
 					AttrStreamID.String(id),
 				),
 			)
@@ -158,6 +159,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(
 					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
 					AttrStreamID.String(id),
 				),
 			)
@@ -209,7 +211,10 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadFromAll",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(AttrDBSystem.String("eventstore")),
+				trace.WithAttributes(
+					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
+				),
 			)
 		}
 
