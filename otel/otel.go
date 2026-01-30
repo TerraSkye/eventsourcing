@@ -14,6 +14,9 @@ const (
 
 // Semantic attribute keys following OpenTelemetry conventions
 const (
+	// Database attributes (OpenTelemetry semantic conventions)
+	AttrDBSystem = attribute.Key("db.system")
+
 	// Command attributes
 	AttrCommandType = attribute.Key("eventsourcing.command.type")
 	AttrAggregateID = attribute.Key("eventsourcing.aggregate.id")

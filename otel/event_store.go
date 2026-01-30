@@ -31,6 +31,7 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 	ctx, span := tracer.Start(ctx, "EventStore.Save",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
+			AttrDBSystem.String("eventstore"),
 			AttrOperation.String("save"),
 			AttrStreamID.String(streamID),
 			AttrEventStreamPos.String(fmt.Sprintf("%T", revision)),
@@ -103,7 +104,10 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadStream",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(AttrStreamID.String(id)),
+				trace.WithAttributes(
+					AttrDBSystem.String("eventstore"),
+					AttrStreamID.String(id),
+				),
 			)
 		}
 
@@ -152,7 +156,10 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadStreamFrom",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(AttrStreamID.String(id)),
+				trace.WithAttributes(
+					AttrDBSystem.String("eventstore"),
+					AttrStreamID.String(id),
+				),
 			)
 		}
 
@@ -202,6 +209,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadFromAll",
 				trace.WithSpanKind(trace.SpanKindClient),
+				trace.WithAttributes(AttrDBSystem.String("eventstore")),
 			)
 		}
 
