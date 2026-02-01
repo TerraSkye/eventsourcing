@@ -98,7 +98,10 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 		path := filepath.Join(sdir, fname)
 
-		eventData, _ := json.Marshal(events[i].Event)
+		eventData, err := json.Marshal(events[i].Event)
+		if err != nil {
+			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event data: %w", err)
+		}
 
 		z := storedEvent{
 			EventID:       events[i].EventID,
@@ -111,9 +114,12 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			OccurredAt:    events[i].OccurredAt,
 		}
 
-		serialzedData, _ := json.Marshal(z)
+		serializedData, err := json.Marshal(z)
+		if err != nil {
+			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event: %w", err)
+		}
 
-		if err := os.WriteFile(path, serialzedData, 0o644); err != nil {
+		if err := os.WriteFile(path, serializedData, 0o644); err != nil {
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
 		// symlink to all/
@@ -133,6 +139,8 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		default:
 			// Drop error if channel full
 		}
+
+		currentVersion++
 	}
 
 	return cqrs.AppendResult{

@@ -197,7 +197,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	iter, err := t.next.LoadFromAll(ctx, version)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1)
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		return iter, err
 	}
 
@@ -221,7 +221,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 		if !iter.Next(ctx) {
 			err := iter.Err()
 			if err == nil || err == io.EOF {
-				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()))
+				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.End()
 				}
@@ -229,7 +229,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 					return nil, io.EOF
 				}
 			} else {
-				EventStoreErrors.Add(ctx, 1)
+				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.RecordError(err)
 					rebuildSpan.SetStatus(codes.Error, err.Error())
@@ -240,7 +240,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 		}
 
 		val := iter.Value()
-		EventsLoaded.Add(ctx, 1)
+		EventsLoaded.Add(ctx, 1, metric.WithAttributes())
 
 		return val, nil
 	}), nil
