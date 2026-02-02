@@ -35,6 +35,7 @@ import (
 //	fmt.Println(result.Value)
 type GenericQueryGateway[T Query, R any | Iterator[any]] struct {
 	bus *QueryBus
+	key string
 }
 
 // NewQueryGateway creates a typed gateway for a specific query type
@@ -43,7 +44,10 @@ type GenericQueryGateway[T Query, R any | Iterator[any]] struct {
 // Returns:
 //   - GenericQueryGateway[T,R]: a typed interface to execute queries.
 func NewQueryGateway[T Query, R any | Iterator[any]](bus *QueryBus) GenericQueryGateway[T, R] {
-	return GenericQueryGateway[T, R]{bus: bus}
+	var zero T
+	key := fmt.Sprintf("%T|%T", zero, *new(R))
+	bus.requestees[key] = struct{}{}
+	return GenericQueryGateway[T, R]{bus: bus, key: key}
 }
 
 // HandleQuery executes the registered handler for a given query.
@@ -56,9 +60,7 @@ func NewQueryGateway[T Query, R any | Iterator[any]](bus *QueryBus) GenericQuery
 //   - R: The result of the query.
 //   - error: Non-nil if no handler is registered or a type mismatch occurs.
 func (g GenericQueryGateway[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
-	key := fmt.Sprintf("%T|%T", qry, *new(R))
-
-	h, ok := g.bus.handlers[key]
+	h, ok := g.bus.handlers[g.key]
 	if !ok {
 		var zero R
 		return zero, fmt.Errorf("no handler registered for query %T -> %T %w", qry, *new(R), ErrHandlerNotFound)

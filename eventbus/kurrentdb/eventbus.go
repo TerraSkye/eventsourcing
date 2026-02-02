@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,13 +219,22 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
+			var skippedErr *cqrs.ErrSkippedEvent
+			if !errors.As(err, &skippedErr) {
+				select {
+				case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
+				default:
+				}
+				continue
+			}
+		}
+		if err := stream.Ack(kEvent.Event); err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
+			case b.errs <- fmt.Errorf("subscriber %q: failed to ack %s: %w", s.name, kEvent.Event.Event.EventID, err):
 			default:
 			}
-		} else {
-			stream.Ack(kEvent.Event)
 		}
+
 	}
 }
 
@@ -291,8 +301,8 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 			panic(fmt.Sprintf("WithFilterEvents: expected *SubscribeToAllOptions, got %T", cfg))
 		}
 		opts.Filter = &kurrentdb.SubscriptionFilter{
-			Type:     kurrentdb.EventFilterType,
-			Prefixes: filteredEvents,
+			Type:  kurrentdb.EventFilterType,
+			Regex: fmt.Sprintf("^%s$", strings.Join(filteredEvents, "|")),
 		}
 	}
 }

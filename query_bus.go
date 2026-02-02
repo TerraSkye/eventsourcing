@@ -1,6 +1,7 @@
 package eventsourcing
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -17,7 +18,8 @@ import (
 //	    return &MyResult{Value: 42}, nil
 //	}))
 type QueryBus struct {
-	handlers map[string]any
+	handlers   map[string]any
+	requestees map[string]struct{}
 }
 
 // NewQueryBus creates a new QueryBus instance.
@@ -26,7 +28,8 @@ type QueryBus struct {
 //   - *QueryBus: A new, empty bus ready for handler registration.
 func NewQueryBus() *QueryBus {
 	return &QueryBus{
-		handlers: make(map[string]any),
+		handlers:   make(map[string]any),
+		requestees: make(map[string]struct{}),
 	}
 }
 
@@ -76,4 +79,18 @@ func RegisterQueryHandler[T Query, R any | Iterator[any]](bus *QueryBus, handler
 		opt(meta)
 	}
 	//bus.settings[key] = meta
+}
+
+func (q QueryBus) Validate() error {
+	errs := make([]error, 0)
+	for requestee := range q.requestees {
+		if _, ok := q.handlers[requestee]; !ok {
+			errs = append(errs, fmt.Errorf("unknown query handler: %s", requestee))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
