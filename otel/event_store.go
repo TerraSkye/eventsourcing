@@ -106,6 +106,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(
 					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
 					AttrStreamID.String(id),
 				),
 			)
@@ -158,6 +159,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 				trace.WithSpanKind(trace.SpanKindClient),
 				trace.WithAttributes(
 					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
 					AttrStreamID.String(id),
 				),
 			)
@@ -195,7 +197,7 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	iter, err := t.next.LoadFromAll(ctx, version)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1)
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 		return iter, err
 	}
 
@@ -209,14 +211,17 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 			startedAt = time.Now()
 			ctx, rebuildSpan = tracer.Start(ctx, "EventStore.LoadFromAll",
 				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(AttrDBSystem.String("eventstore")),
+				trace.WithAttributes(
+					AttrDBSystem.String("eventstore"),
+					AttrOperation.String("load"),
+				),
 			)
 		}
 
 		if !iter.Next(ctx) {
 			err := iter.Err()
 			if err == nil || err == io.EOF {
-				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()))
+				EventStoreDuration.Record(ctx, float64(time.Since(startedAt).Milliseconds()), metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.End()
 				}
@@ -224,7 +229,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 					return nil, io.EOF
 				}
 			} else {
-				EventStoreErrors.Add(ctx, 1)
+				EventStoreErrors.Add(ctx, 1, metric.WithAttributes())
 				if rebuildSpan != nil {
 					rebuildSpan.RecordError(err)
 					rebuildSpan.SetStatus(codes.Error, err.Error())
@@ -235,7 +240,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 		}
 
 		val := iter.Value()
-		EventsLoaded.Add(ctx, 1)
+		EventsLoaded.Add(ctx, 1, metric.WithAttributes())
 
 		return val, nil
 	}), nil

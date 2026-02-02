@@ -86,7 +86,8 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		)
 
 		if err != nil {
-			if errors.Is(err, &eventsourcing.ErrSkippedEvent{}) {
+			var skipped *eventsourcing.ErrSkippedEvent
+			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {
 				span.SetStatus(codes.Error, err.Error())
