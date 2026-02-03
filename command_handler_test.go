@@ -69,7 +69,7 @@ func TestNewCommandHandler_LoadError(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, c testEvent) ([]Event, error) { return nil, nil },
 		WithRetryStrategy(&backoff.StopBackOff{}),
@@ -100,7 +100,7 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, c testEvent) ([]Event, error) { return nil, nil },
 	)
@@ -128,7 +128,7 @@ func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		decide,
 	)
@@ -194,7 +194,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s + 1 }, // evolve increments state
 		decide,
 		WithMetadataExtractor(func(ctx context.Context) map[string]any {
@@ -232,7 +232,7 @@ func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: "a", typ: "e", val: "v"}}, nil
@@ -270,7 +270,7 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e", val: "v"}}, nil
@@ -313,7 +313,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
@@ -358,7 +358,7 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
@@ -414,7 +414,7 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 
 	handler := NewCommandHandler(
 		store,
-		0,
+		func() int { return 0 },
 		func(s int, e *Envelope) int { return s + 1 },
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "new"}}, nil

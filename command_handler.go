@@ -73,6 +73,17 @@ var DefaultStreamNamer StreamNamer = func(ctx context.Context, cmd Command) stri
 //	}
 type CommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
 
+// InitialState returns an initial state of type T
+//
+// T represents the aggregate state type.
+//
+// Returns:go
+//   - The initial aggregate state of type T.
+//
+// Notes:
+//   - The InitialState is responsible for returning an initial state
+type InitialState[T any] func() T
+
 // Evolver evolves the given state into a new state with the event applied.
 //
 // T represents the aggregate state type.
@@ -127,6 +138,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //
 // Parameters:
 //   - store: The EventStore used to load and persist events.
+//   - initialState: a function of type InitialState[T] that created the initial state for the command.
 //   - evolve: A function of type Evolver[T] that reconstructs aggregate state from a sequence of events.
 //   - decide: A function of type Decider[T, C] that produces events based on the current state and command.
 //   - opts: Optional CommandHandlerOption values for customizing behavior, such as:
@@ -155,7 +167,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //	result, err := handler(ctx, myCommand)
 func NewCommandHandler[T any, C Command](
 	store EventStore,
-	initialState T,
+	initialState InitialState[T],
 	evolve Evolver[T],
 	decide Decider[T, C],
 	opts ...CommandHandlerOption,
@@ -175,7 +187,7 @@ func NewCommandHandler[T any, C Command](
 		// the stream ID for the given command
 		var streamID = options.StreamNamer(ctx, command)
 		// the state we will decide against
-		var state = initialState
+		var state = initialState()
 		// the stream state we will save against
 		var revision = options.Revision
 		// the revision we
