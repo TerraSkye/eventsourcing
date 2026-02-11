@@ -302,7 +302,7 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 		}
 		opts.Filter = &kurrentdb.SubscriptionFilter{
 			Type:  kurrentdb.EventFilterType,
-			Regex: fmt.Sprintf("^%s$", strings.Join(filteredEvents, "|")),
+			Regex: fmt.Sprintf("^(%s)$", strings.Join(filteredEvents, "|")),
 		}
 	}
 }
