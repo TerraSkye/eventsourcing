@@ -194,12 +194,13 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		}
 
 		envelope := &cqrs.Envelope{
-			EventID:    kEvent.Event.EventID,
-			StreamID:   kEvent.Event.StreamID,
-			Event:      ev,
-			Metadata:   metadata,
-			Version:    kEvent.Event.Position.Commit,
-			OccurredAt: kEvent.Event.CreatedDate,
+			EventID:       kEvent.Event.EventID,
+			StreamID:      kEvent.Event.StreamID,
+			Event:         ev,
+			Metadata:      metadata,
+			Version:       kEvent.Event.EventNumber,
+			GlobalVersion: kEvent.Event.Position.Commit,
+			OccurredAt:    kEvent.Event.CreatedDate,
 		}
 
 		return envelope, nil
@@ -262,12 +263,13 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		}
 
 		envelope := &cqrs.Envelope{
-			EventID:    kEvent.Event.EventID,
-			StreamID:   kEvent.Event.StreamID,
-			Event:      ev,
-			Metadata:   metadata,
-			Version:    kEvent.Event.Position.Commit,
-			OccurredAt: kEvent.Event.CreatedDate,
+			EventID:       kEvent.Event.EventID,
+			StreamID:      kEvent.Event.StreamID,
+			Event:         ev,
+			Metadata:      metadata,
+			Version:       kEvent.Event.EventNumber,
+			GlobalVersion: kEvent.Event.Position.Commit,
+			OccurredAt:    kEvent.Event.CreatedDate,
 		}
 
 		return envelope, nil
@@ -319,12 +321,13 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		}
 
 		envelope := &cqrs.Envelope{
-			EventID:    kEvent.Event.EventID,
-			StreamID:   kEvent.Event.StreamID,
-			Event:      ev,
-			Metadata:   metadata,
-			Version:    kEvent.Event.Position.Commit,
-			OccurredAt: kEvent.Event.CreatedDate,
+			EventID:       kEvent.Event.EventID,
+			StreamID:      kEvent.Event.StreamID,
+			Event:         ev,
+			Metadata:      metadata,
+			Version:       kEvent.Event.EventNumber,
+			GlobalVersion: kEvent.Event.Position.Commit,
+			OccurredAt:    kEvent.Event.CreatedDate,
 		}
 
 		return envelope, nil
