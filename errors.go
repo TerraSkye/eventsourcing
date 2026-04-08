@@ -39,7 +39,9 @@ func (e ErrSkippedEvent) Error() string {
 	return fmt.Sprintf("skipped event of type %T", e.Event)
 }
 
-// ErrSkippedEvent is returned when a handler cannot handle the event type.
+// ErrBusinessRuleViolation is returned when a command violates a business rule.
+// Use this to signal domain-level rejections that are expected and recoverable,
+// as opposed to infrastructure or persistence errors.
 type ErrBusinessRuleViolation struct {
 	Err error
 }

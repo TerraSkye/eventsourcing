@@ -89,14 +89,15 @@ type InitialState[T any] func() T
 // T represents the aggregate state type.
 //
 // Parameters:
-//   - envelope: A  Envelope object representing an historical event
-//     of an aggregate. The Envelope is consumed by the Evolver.
+//   - currentState: The current aggregate state.
+//   - envelope: A Envelope object representing an historical event
+//     of an aggregate.
 //
-// Returns:go
+// Returns:
 //   - The reconstructed aggregate state of type T.
 //
 // Notes:
-//   - The Evolver is responsible for applying the event  to the
+//   - The Evolver is responsible for applying the event to the
 //     current state, producing the latest state.
 type Evolver[T any] func(currentState T, envelope *Envelope) T
 
@@ -347,15 +348,15 @@ func WithMetadataExtractor(fn func(ctx context.Context) map[string]any) CommandH
 	}
 }
 
-// WithStreamNamer adds stream namer to a NewCommandHandler.
+// WithStreamNamer sets a custom stream naming function on a NewCommandHandler.
 //
-// Each metadata function is called for every command handling execution and can
-// inject additional key-value pairs into the event envelopes. Multiple metadata
-// extractors can be combined; they are applied in order of registration.
+// The StreamNamer is called for every command handling execution and determines
+// the stream name used to load and persist events. This allows customization
+// beyond the default behavior of using the command's AggregateID as the stream name.
 //
 // Usage:
 //
-//	handler := NewCommandHandler(store, initialState, evolve, decide, WithMetadataExtractor(myMetadataFunc))
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithStreamNamer(myStreamNamer))
 func WithStreamNamer(namer StreamNamer) CommandHandlerOption {
 	return func(h *handlerOptions) {
 		h.StreamNamer = namer
