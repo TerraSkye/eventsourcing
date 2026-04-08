@@ -42,6 +42,7 @@ Practical recipes for specific tasks.
 
 **Infrastructure**
 - [Use KurrentDB as the event store](./how-to/use-kurrentdb.md)
+- [Use MongoDB as the event store](./how-to/use-mongodb.md)
 - [Add OpenTelemetry tracing](./how-to/add-opentelemetry.md)
 - [Add structured logging](./how-to/add-logging.md)
 - [Test event-sourced code](./how-to/test-event-sourced-code.md)
