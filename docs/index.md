@@ -43,6 +43,7 @@ Practical recipes for specific tasks.
 **Events**
 - [Register events for serialization](./how-to/register-events.md)
 - [Subscribe to events with the event bus](./how-to/subscribe-to-events.md)
+- [Version events when the schema changes](./how-to/version-events.md)
 
 **Queries**
 - [Build a live read model](./how-to/live-read-model.md)
