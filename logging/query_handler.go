@@ -2,8 +2,8 @@ package logging
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"reflect"
 
 	"github.com/terraskye/eventsourcing"
 )
@@ -14,7 +14,7 @@ type queryHandlerLogger[T eventsourcing.Query, R any] struct {
 }
 
 func (q *queryHandlerLogger[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
-	qryType := reflect.TypeOf(qry).String()
+	qryType := fmt.Sprintf("%T", qry)
 	q.logger.InfoContext(ctx, "Query", "query", qryType)
 
 	result, err := q.next.HandleQuery(ctx, qry)

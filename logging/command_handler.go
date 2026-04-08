@@ -2,8 +2,8 @@ package logging
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"reflect"
 
 	"github.com/terraskye/eventsourcing"
 )
@@ -12,8 +12,9 @@ import (
 // It logs the command type and aggregate ID before execution, and logs
 // errors if the command fails.
 func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next eventsourcing.CommandHandler[C]) eventsourcing.CommandHandler[C] {
+
 	return func(ctx context.Context, command C) (eventsourcing.AppendResult, error) {
-		cmdType := reflect.TypeOf(command).String()
+		cmdType := fmt.Sprintf("%T", command)
 		logger.InfoContext(ctx, "Dispatch", "command", cmdType, "aggregateID", command.AggregateID())
 
 		result, err := next(ctx, command)
