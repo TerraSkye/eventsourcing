@@ -6,16 +6,6 @@ A Go library for building event-sourced systems with CQRS support.
 go get github.com/terraskye/eventsourcing
 ```
 
-## Documentation Map
-
-This documentation follows the [Diátaxis](https://diataxis.fr/) framework, organized into four types:
-
-| | Practical | Theoretical |
-|---|---|---|
-| **Learning** | [Tutorials](#tutorials) — follow along to learn | [Explanation](#explanation) — understand why |
-| **Working** | [How-to guides](#how-to-guides) — solve a specific problem | [Reference](#reference) — look up details |
-
----
 
 ## Tutorials
 
@@ -39,6 +29,7 @@ Practical recipes for specific tasks.
 - [Add metadata to events](./how-to/add-event-metadata.md)
 - [Customise stream names (multi-tenancy)](./how-to/custom-stream-names.md)
 - [Retry commands on conflict](./how-to/retry-on-conflict.md)
+- [The aggregate variant — when to use it and when not to](./how-to/share-state-with-aggregate.md)
 
 **Events**
 - [Register events for serialization](./how-to/register-events.md)
