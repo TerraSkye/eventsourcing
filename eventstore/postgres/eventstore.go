@@ -213,7 +213,10 @@ func (s *eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) 
 	fromID := version.ToRawInt64()
 	return s.queryRows(ctx, `
 		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
-		FROM events WHERE id > $1 ORDER BY id ASC`, fromID)
+		FROM events
+		WHERE id > $1
+		  AND xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
+		ORDER BY id ASC`, fromID)
 }
 
 func (s *eventstore) Close() error {
