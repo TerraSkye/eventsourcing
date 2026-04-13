@@ -176,7 +176,8 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber, fromPos int64) (int6
 	query := `
 		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
 		FROM events
-		WHERE id > $1`
+		WHERE id > $1
+		  AND xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint`
 	args := []any{fromPos}
 
 	if len(s.opts.filterEvents) > 0 {
@@ -207,16 +208,14 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber, fromPos int64) (int6
 		}
 
 		pos = int64(env.GlobalVersion)
+
+		if err := b.updatePosition(ctx, s.name, pos); err != nil {
+			return pos, fmt.Errorf("update position: %w", err)
+		}
 	}
 
 	if err := rows.Err(); err != nil {
 		return fromPos, err
-	}
-
-	if pos != fromPos {
-		if err := b.updatePosition(ctx, s.name, pos); err != nil {
-			return pos, fmt.Errorf("update position: %w", err)
-		}
 	}
 
 	return pos, nil
