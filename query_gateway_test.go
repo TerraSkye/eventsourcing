@@ -14,7 +14,7 @@ func TestQueryGateway_HandleQuery(t *testing.T) {
 	}))
 
 	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
-	result, err := gateway.HandleQuery(context.Background(), GetTaskQuery{TaskID: "42"})
+	result, err := gateway(context.Background(), GetTaskQuery{TaskID: "42"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestQueryGateway_UnregisteredHandler(t *testing.T) {
 	bus := NewQueryBus()
 	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
 
-	_, err := gateway.HandleQuery(context.Background(), GetTaskQuery{TaskID: "1"})
+	_, err := gateway(context.Background(), GetTaskQuery{TaskID: "1"})
 	if err == nil {
 		t.Fatal("expected error for unregistered handler")
 	}
@@ -50,7 +50,7 @@ func TestQueryGateway_MultipleGateways(t *testing.T) {
 	taskGateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
 	listGateway := NewQueryGateway[ListTasksQuery, *TaskListResult](bus)
 
-	r1, err := taskGateway.HandleQuery(context.Background(), GetTaskQuery{TaskID: "7"})
+	r1, err := taskGateway(context.Background(), GetTaskQuery{TaskID: "7"})
 	if err != nil {
 		t.Fatalf("taskGateway: unexpected error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestQueryGateway_MultipleGateways(t *testing.T) {
 		t.Errorf("taskGateway Title = %q, want %q", r1.Title, "single:7")
 	}
 
-	r2, err := listGateway.HandleQuery(context.Background(), ListTasksQuery{Owner: "bob"})
+	r2, err := listGateway(context.Background(), ListTasksQuery{Owner: "bob"})
 	if err != nil {
 		t.Fatalf("listGateway: unexpected error: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestQueryGateway_PropagatesHandlerError(t *testing.T) {
 	}))
 
 	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
-	_, err := gateway.HandleQuery(context.Background(), GetTaskQuery{TaskID: "1"})
+	_, err := gateway(context.Background(), GetTaskQuery{TaskID: "1"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -97,7 +97,7 @@ func TestQueryGateway_CancelledContext(t *testing.T) {
 	cancel()
 
 	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
-	_, err := gateway.HandleQuery(ctx, GetTaskQuery{TaskID: "1"})
+	_, err := gateway(ctx, GetTaskQuery{TaskID: "1"})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want %v", err, context.Canceled)
 	}

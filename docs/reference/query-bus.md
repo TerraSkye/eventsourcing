@@ -13,7 +13,7 @@ Central registry for query handlers. Handlers are keyed by the pair `(QueryType,
 ### RegisterQueryHandler
 
 ```go
-func RegisterQueryHandler[T Query, R any | Iterator[any]](
+func RegisterQueryHandler[T Query, R any](
     bus     *QueryBus,
     handler QueryHandler[T, R],
     opts    ...HandlerOption,
@@ -46,7 +46,7 @@ if err := bus.Validate(); err != nil {
 ## QueryHandler
 
 ```go
-type QueryHandler[T Query, R any | Iterator[any]] interface {
+type QueryHandler[T Query, R any] interface {
     HandleQuery(ctx context.Context, qry T) (R, error)
 }
 ```
@@ -56,7 +56,7 @@ Generic interface for query handlers. Implement this on your read model structs,
 ### NewQueryHandlerFunc
 
 ```go
-func NewQueryHandlerFunc[T Query, R any | Iterator[any]](
+func NewQueryHandlerFunc[T Query, R any](
     fn func(ctx context.Context, qry T) (R, error),
 ) QueryHandler[T, R]
 ```
@@ -72,31 +72,32 @@ eventsourcing.RegisterQueryHandler(bus, handler)
 
 ---
 
-## GenericQueryGateway
+## QueryGateway
 
 ```go
-type GenericQueryGateway[T Query, R any | Iterator[any]] struct { ... }
+type QueryGateway[T Query, R any] func(ctx context.Context, qry T) (R, error)
 
-func NewQueryGateway[T Query, R any | Iterator[any]](bus *QueryBus) GenericQueryGateway[T, R]
+func NewQueryGateway[T Query, R any](bus *QueryBus) QueryGateway[T, R]
 ```
 
-Typed facade over `QueryBus`. Use this to execute queries without relying on interface assertions.
+Typed, callable facade over `QueryBus`. Call it directly like a function. It also implements `QueryHandler[T, R]`, so it can be passed to decorators such as `WithQueryTelemetry` or `WithQueryLogging`.
 
 ```go
 gateway := eventsourcing.NewQueryGateway[GetTask, *Task](bus)
 
-task, err := gateway.HandleQuery(ctx, GetTask{TaskID: id})
+task, err := gateway(ctx, GetTask{TaskID: id})
 ```
 
 Creating a gateway registers the `(T, R)` key as a "requestee", which is checked by `bus.Validate()`.
 
-### HandleQuery
+Because `QueryGateway` is a function type, a service struct can hold multiple gateways for the same query type with different result shapes — each independently registered on the bus:
 
 ```go
-func (g GenericQueryGateway[T, R]) HandleQuery(ctx context.Context, qry T) (R, error)
+type service struct {
+    listTasks eventsourcing.QueryGateway[TaskQuery, *Iterator[*Task]]
+    findTask  eventsourcing.QueryGateway[TaskQuery, *Task]
+}
 ```
-
-Looks up the handler in the bus and calls it. Returns `ErrHandlerNotFound` if no handler is registered.
 
 ---
 
@@ -118,4 +119,8 @@ if err := bus.Validate(); err != nil {
 // 4. Create gateways for use in HTTP handlers
 listGateway := eventsourcing.NewQueryGateway[ListTasks, *TaskList](bus)
 getGateway  := eventsourcing.NewQueryGateway[GetTask, *Task](bus)
+
+// Call directly — no .HandleQuery needed
+tasks, err := listGateway(ctx, ListTasks{})
+task,  err := getGateway(ctx, GetTask{TaskID: id})
 ```
