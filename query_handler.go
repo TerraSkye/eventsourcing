@@ -27,7 +27,7 @@ type Query interface {
 //	})
 //
 //	var _ QueryHandler[MyQuery, *MyResult] = handler
-type QueryHandler[T Query, R any | Iterator[any]] interface {
+type QueryHandler[T Query, R any] interface {
 	HandleQuery(ctx context.Context, qry T) (R, error)
 }
 
@@ -39,7 +39,7 @@ type QueryHandler[T Query, R any | Iterator[any]] interface {
 //	handler := NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
 //	    return &MyResult{Value: 42}, nil
 //	})
-type queryHandlerFunc[T Query, R any | Iterator[any]] func(ctx context.Context, qry T) (R, error)
+type queryHandlerFunc[T Query, R any] func(ctx context.Context, qry T) (R, error)
 
 // HandleQuery calls the underlying function.
 func (f queryHandlerFunc[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
@@ -59,6 +59,6 @@ func (f queryHandlerFunc[T, R]) HandleQuery(ctx context.Context, qry T) (R, erro
 //	handler := NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
 //	    return &MyResult{Value: 42}, nil
 //	})
-func NewQueryHandlerFunc[T Query, R any | Iterator[any]](fn func(ctx context.Context, qry T) (R, error)) QueryHandler[T, R] {
+func NewQueryHandlerFunc[T Query, R any](fn func(ctx context.Context, qry T) (R, error)) QueryHandler[T, R] {
 	return queryHandlerFunc[T, R](fn)
 }
