@@ -3,6 +3,7 @@ package eventsourcing
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // QueryBus acts as a central registry for query handlers. It stores
@@ -18,6 +19,7 @@ import (
 //	    return &MyResult{Value: 42}, nil
 //	}))
 type QueryBus struct {
+	mu         sync.RWMutex
 	handlers   map[string]any
 	requestees map[string]struct{}
 }
@@ -28,6 +30,7 @@ type QueryBus struct {
 //   - *QueryBus: A new, empty bus ready for handler registration.
 func NewQueryBus() *QueryBus {
 	return &QueryBus{
+		mu:         sync.RWMutex{},
 		handlers:   make(map[string]any),
 		requestees: make(map[string]struct{}),
 	}
@@ -51,7 +54,7 @@ type handlerSettings struct {
 //
 // Type Parameters:
 //   - T: The query type implementing query.Query.
-//   - R: The result type (ReadModel or Iterator).
+//   - R: The result type .
 //
 // Parameters:
 //   - bus: The QueryBus instance where the handler should be registered.
@@ -70,8 +73,16 @@ type handlerSettings struct {
 //	}))
 //
 // Generic helper function
-func RegisterQueryHandler[T Query, R any | Iterator[any]](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
+func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
 	key := fmt.Sprintf("%T|%T", *new(T), *new(R))
+
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+
+	if _, exists := bus.handlers[key]; exists {
+		panic(ErrDuplicateHandler)
+	}
+
 	bus.handlers[key] = handler
 
 	meta := &handlerSettings{}
