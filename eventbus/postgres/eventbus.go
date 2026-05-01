@@ -204,6 +204,7 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber, fromPos int64) (int6
 			var skipped *cqrs.ErrSkippedEvent
 			if !errors.As(err, &skipped) {
 				b.sendErr(fmt.Errorf("subscriber %q: handle %s: %w", s.name, env.Event.EventType(), err))
+				return pos, err
 			}
 		}
 
