@@ -120,8 +120,7 @@ func (b *EventBus) Close() error {
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
-	pos, err := b.getOrInitPosition(ctx, s)
-	if err != nil {
+	if err := b.ensureSubscription(ctx, s); err != nil {
 		b.sendErr(fmt.Errorf("subscriber %q: init position: %w", s.name, err))
 		return
 	}
@@ -134,100 +133,96 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			newPos, err := b.poll(ctx, s, pos)
-			if err != nil {
+			if err := b.poll(ctx, s); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
 				b.sendErr(fmt.Errorf("subscriber %q: poll: %w", s.name, err))
-				continue
 			}
-			pos = newPos
 		}
 	}
 }
 
-// getOrInitPosition inserts a new subscription record with the configured start
-// position if one does not already exist, then returns the current position.
-func (b *EventBus) getOrInitPosition(ctx context.Context, s *subscriber) (int64, error) {
+// ensureSubscription inserts a subscription record if one does not already exist.
+func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error {
 	defaultPos := int64(0)
 	if s.opts.startFrom != nil {
 		defaultPos = *s.opts.startFrom
 	}
-
 	_, err := b.pool.Exec(ctx,
 		"INSERT INTO event_subscriptions (name, position) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
 		s.name, defaultPos,
 	)
-	if err != nil {
-		return 0, err
-	}
-
-	var pos int64
-	if err := b.pool.QueryRow(ctx, "SELECT position FROM event_subscriptions WHERE name = $1", s.name).Scan(&pos); err != nil {
-		return 0, err
-	}
-	return pos, nil
+	return err
 }
 
-// poll fetches up to 100 events after fromPos, dispatches them to the subscriber,
-// then persists the new position. Returns the updated position.
-func (b *EventBus) poll(ctx context.Context, s *subscriber, fromPos int64) (int64, error) {
+// poll locks the subscription row so that only one instance processes events at a time
+func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var pos int64
+	err = tx.QueryRow(ctx,
+		"SELECT position FROM event_subscriptions WHERE name = $1 FOR UPDATE SKIP LOCKED",
+		s.name,
+	).Scan(&pos)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // another instance holds the lock; skip this cycle
+	}
+	if err != nil {
+		return err
+	}
+
 	query := `
 		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
 		FROM events
 		WHERE id > $1
 		  AND xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint`
-	args := []any{fromPos}
+	args := []any{pos}
 
 	if len(s.opts.filterEvents) > 0 {
 		query += " AND event_type = ANY($2)"
 		args = append(args, s.opts.filterEvents)
 	}
-
 	query += " ORDER BY id ASC LIMIT 100"
 
-	rows, err := b.pool.Query(ctx, query, args...)
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return fromPos, err
+		return err
 	}
 	defer rows.Close()
 
-	pos := fromPos
 	for rows.Next() {
 		env, err := scanEnvelope(rows)
 		if err != nil {
-			return pos, err
+			return err
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, env), env.Event); err != nil {
 			var skipped *cqrs.ErrSkippedEvent
 			if !errors.As(err, &skipped) {
-				b.sendErr(fmt.Errorf("subscriber %q: handle %s: %w", s.name, env.Event.EventType(), err))
-				return pos, err
+				return fmt.Errorf("handle %s: %w", env.Event.EventType(), err)
 			}
 		}
 
 		pos = int64(env.GlobalVersion)
-
-		if err := b.updatePosition(ctx, s.name, pos); err != nil {
-			return pos, fmt.Errorf("update position: %w", err)
-		}
 	}
 
 	if err := rows.Err(); err != nil {
-		return fromPos, err
+		return err
 	}
 
-	return pos, nil
-}
-
-func (b *EventBus) updatePosition(ctx context.Context, name string, pos int64) error {
-	_, err := b.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		"UPDATE event_subscriptions SET position = $1 WHERE name = $2",
-		pos, name,
-	)
-	return err
+		pos, s.name,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (b *EventBus) removeSubscriber(name string) {
