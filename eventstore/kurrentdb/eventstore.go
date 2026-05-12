@@ -141,6 +141,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 
 	return cqrs.AppendResult{
 		Successful:          true,
+		StreamID:            streamID,
 		NextExpectedVersion: result.NextExpectedVersion,
 	}, nil
 
