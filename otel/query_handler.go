@@ -66,7 +66,7 @@ func (h *telemetryQueryHandler[T, R]) HandleQuery(ctx context.Context, qry T) (R
 		baseAttributes = append(baseAttributes, h.cfg.GetAttributes(ctx)...)
 	}
 
-	var defaultOperation = fmt.Sprintf("query.handle %s", h.queryType)
+	defaultOperation := "handle query"
 
 	if h.cfg.Operation != "" {
 		defaultOperation = h.cfg.Operation
@@ -84,24 +84,24 @@ func (h *telemetryQueryHandler[T, R]) HandleQuery(ctx context.Context, qry T) (R
 	)
 	defer span.End()
 
-	QueriesInFlight.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
-	defer QueriesInFlight.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
+	QueriesProcessing.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
+	defer QueriesProcessing.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
 
 	startTime := time.Now()
 	result, err := h.next.HandleQuery(ctx, qry)
 
 	// Record duration metric
-	QueriesDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrQueryType.String(h.queryType)))
+	QueriesDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrQueryType.String(h.queryType)))
 
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		QueriesFailed.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
+		QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType), AttrResult.String("failure")))
 		return result, err
 	}
 
 	span.SetStatus(codes.Ok, "")
-	QueriesHandled.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
+	QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType), AttrResult.String("success")))
 
 	return result, nil
 }

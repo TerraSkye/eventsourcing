@@ -3,7 +3,6 @@ package otel
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -21,12 +20,9 @@ var _ eventsourcing.EventBus = (*TelemetryEventBus)(nil)
 //
 // This decorator intercepts event subscriptions to automatically instrument
 // event handlers with distributed tracing and metrics collection. It creates
-// a two-level span hierarchy for each event: an outer consumer span for the
-// subscription and an inner span for the actual event handling logic.
-//
-// The wrapper maintains trace context propagation by extracting trace information
-// from event metadata and linking it to the consumer span, enabling end-to-end
-// distributed tracing from command execution through event processing.
+// a consumer span per received event that links back to the original producer
+// trace, enabling end-to-end distributed tracing from command execution through
+// event processing.
 type TelemetryEventBus struct {
 	next eventsourcing.EventBus
 	cfg  *config
@@ -34,22 +30,21 @@ type TelemetryEventBus struct {
 
 // Subscribe registers an event handler wrapped with telemetry instrumentation.
 //
-// The subscription wrapper performs the following steps for each received event:
+// For each received event the wrapper:
 //  1. Extracts trace context from event metadata to establish distributed trace links.
-//  2. Creates an outer consumer span named "subscription.receive {name}" with event attributes.
-//  3. Links the consumer span to the original producer trace for correlation.
+//  2. Creates a consumer span named "receive subscription" with event attributes.
+//  3. Links the span to the original producer trace for correlation.
 //  4. Increments the EventBusHandled metric.
-//  5. Creates an inner span named "events.handle {eventType}" for the handler execution.
-//  6. Invokes the underlying event handler.
-//  7. Records the EventBusDuration metric with processing time.
-//  8. Updates span status based on handler result:
+//  5. Invokes the underlying event handler.
+//  6. Records the EventBusDuration metric with processing time.
+//  7. Updates span status based on handler result:
 //     - ErrSkippedEvent: span status OK (intentional skip)
 //     - Other errors: span status Error, increments EventBusErrors metric
 //     - Success: span status OK
 //
 // Parameters:
 //   - ctx: Context for the subscription setup.
-//   - name: Unique identifier for this subscription, used in span names and attributes.
+//   - name: Unique identifier for this subscription, used in span attributes.
 //   - next: The event handler to be wrapped with telemetry instrumentation.
 //   - options: Optional subscriber configuration options passed to the underlying bus.
 //
@@ -57,12 +52,11 @@ type TelemetryEventBus struct {
 //   - An error if the subscription registration fails.
 //
 // Behavior Details:
-//   - The outer span uses SpanKindConsumer to indicate event consumption.
-//   - The inner span uses SpanKindInternal for the handler logic.
+//   - The span uses SpanKindConsumer to indicate event consumption.
 //   - Trace links connect the consumer span to the original command/producer trace.
 //   - Metrics recorded:
 //   - EventBusHandled: count of events received by this subscription.
-//   - EventBusDuration: handler execution time in milliseconds.
+//   - EventBusDuration: handler execution time in seconds.
 //   - EventBusErrors: count of handler errors (excludes ErrSkippedEvent).
 //   - Span attributes include event type, event ID, global position, stream position,
 //     stream ID, and subscriber name.
@@ -72,29 +66,6 @@ type TelemetryEventBus struct {
 //	bus := otel.WithEventBusTelemetry(eventBus)
 //	err := bus.Subscribe(ctx, "order-projector", orderProjector)
 func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eventsourcing.EventHandler, options ...eventsourcing.SubscriberOption) error {
-
-	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
-
-		attr := []attribute.KeyValue{
-			AttrEventType.String(event.EventType()),
-			AttrEventID.String(eventsourcing.EventIDFromContext(ctx).String()),
-			AttrEventGlobalPos.String(fmt.Sprintf("%d", eventsourcing.GlobalVersionFromContext(ctx))),
-			AttrEventStreamPos.String(fmt.Sprintf("%d", eventsourcing.VersionFromContext(ctx))),
-			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
-			AttrSubscriberName.String(name),
-		}
-
-		operationName := fmt.Sprintf("events.handle %s", event.EventType())
-
-		var span trace.Span
-		ctx, span = tracer.Start(ctx, operationName,
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(attr...),
-		)
-		defer span.End()
-
-		return next.Handle(ctx, event)
-	})
 
 	return t.next.Subscribe(ctx, name, eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		// Extract the original trace context from event metadata
@@ -110,8 +81,8 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 		attr := []attribute.KeyValue{
 			AttrEventType.String(event.EventType()),
 			AttrEventID.String(eventsourcing.EventIDFromContext(ctx).String()),
-			AttrEventGlobalPos.String(fmt.Sprintf("%d", eventsourcing.GlobalVersionFromContext(ctx))),
-			AttrEventStreamPos.String(fmt.Sprintf("%d", eventsourcing.VersionFromContext(ctx))),
+			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalVersionFromContext(ctx))),
+			AttrEventStreamPos.Int64(int64(eventsourcing.VersionFromContext(ctx))),
 			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
 			AttrSubscriberName.String(name),
 		}
@@ -126,14 +97,12 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 		originalCtx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
 		originalSpanContext := trace.SpanContextFromContext(originalCtx)
 
-		operationName := fmt.Sprintf("subscription.receive %s", name)
-
-		ctx, span := tracer.Start(ctx, operationName,
+		ctx, span := tracer.Start(ctx, "receive subscription",
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithLinks(trace.Link{
 				SpanContext: originalSpanContext,
 				Attributes: []attribute.KeyValue{
-					attribute.String("link.reason", "event.consumed.from.stream"),
+					attribute.String("eventsourcing.link.reason", "event.consumed.from.stream"),
 				},
 			}),
 			trace.WithAttributes(attr...),
@@ -143,9 +112,9 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 		EventBusHandled.Add(ctx, 1, metric.WithAttributes(AttrEventType.String(event.EventType())))
 
 		startTime := time.Now()
-		err := handler.Handle(ctx, event)
+		err := next.Handle(ctx, event)
 		EventBusDuration.Record(ctx,
-			float64(time.Since(startTime).Milliseconds()),
+			time.Since(startTime).Seconds(),
 			metric.WithAttributes(AttrEventType.String(event.EventType())),
 		)
 

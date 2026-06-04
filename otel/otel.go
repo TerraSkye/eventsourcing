@@ -39,9 +39,11 @@ const (
 	AttrResultCount = attribute.Key("eventsourcing.query.result_count")
 
 	// EventBus attributes
-	AttrSubscriberName  = attribute.Key("eventsourcing.subscriber.name")
-	AttrSubscriberCount = attribute.Key("eventsourcing.subscriber.count")
-	AttrHandlerName     = attribute.Key("eventsourcing.handler.name")
+	AttrSubscriberName = attribute.Key("eventsourcing.subscriber.name")
+	AttrHandlerName    = attribute.Key("eventsourcing.handler.name")
+
+	// Result attribute for outcome labelling on counters
+	AttrResult = attribute.Key("eventsourcing.result") // "success" | "failure"
 
 	// Error attributes
 	AttrErrorType    = attribute.Key("eventsourcing.error.type")
@@ -61,28 +63,22 @@ var (
 	tracer = otel.Tracer(instrumentationName, trace.WithInstrumentationVersion(eventsourcing.InstrumentationVersion))
 
 	// Command metrics
-	CommandsHandled, _ = meter.Int64Counter(
-		"eventsourcing.commands.handled",
-		metric.WithDescription("Total number of commands handled"),
+	CommandsCount, _ = meter.Int64Counter(
+		"eventsourcing.commands.count",
+		metric.WithDescription("Total number of commands handled, labelled by eventsourcing.result"),
 		metric.WithUnit("{command}"),
 	)
 
 	CommandsDuration, _ = meter.Float64Histogram(
 		"eventsourcing.commands.duration",
 		metric.WithDescription("Command handling duration"),
-		metric.WithUnit("ms"),
-		metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 	)
 
-	CommandsInFlight, _ = meter.Int64UpDownCounter(
-		"eventsourcing.commands.in_flight",
+	CommandsProcessing, _ = meter.Int64UpDownCounter(
+		"eventsourcing.command.processing",
 		metric.WithDescription("Number of commands currently being processed"),
-		metric.WithUnit("{command}"),
-	)
-
-	CommandsFailed, _ = meter.Int64Counter(
-		"eventsourcing.commands.failed",
-		metric.WithDescription("Number of failed commands"),
 		metric.WithUnit("{command}"),
 	)
 
@@ -99,19 +95,7 @@ var (
 		metric.WithUnit("{event}"),
 	)
 
-	EventsPublished, _ = meter.Int64Counter(
-		"eventsourcing.events.published",
-		metric.WithDescription("Number of events published to event bus"),
-		metric.WithUnit("{event}"),
-	)
-
 	// EventBus metrics
-	EventBusPublished, _ = meter.Int64Counter(
-		"eventsourcing.eventbus.published",
-		metric.WithDescription("Number of events published to event bus"),
-		metric.WithUnit("{event}"),
-	)
-
 	EventBusHandled, _ = meter.Int64Counter(
 		"eventsourcing.eventbus.handled",
 		metric.WithDescription("Number of events handled by subscribers"),
@@ -124,42 +108,30 @@ var (
 		metric.WithUnit("{error}"),
 	)
 
-	EventBusSubscribers, _ = meter.Int64UpDownCounter(
-		"eventsourcing.eventbus.subscribers",
-		metric.WithDescription("Number of active event bus subscribers"),
-		metric.WithUnit("{subscriber}"),
-	)
-
 	EventBusDuration, _ = meter.Float64Histogram(
 		"eventsourcing.eventbus.duration",
-		metric.WithDescription("EventData bus handler duration"),
-		metric.WithUnit("ms"),
-		metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+		metric.WithDescription("Event bus handler duration"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
 	// Query metrics
-	QueriesHandled, _ = meter.Int64Counter(
-		"eventsourcing.queries.handled",
-		metric.WithDescription("Total number of queries handled"),
+	QueriesCount, _ = meter.Int64Counter(
+		"eventsourcing.queries.count",
+		metric.WithDescription("Total number of queries handled, labelled by eventsourcing.result"),
 		metric.WithUnit("{query}"),
 	)
 
 	QueriesDuration, _ = meter.Float64Histogram(
 		"eventsourcing.queries.duration",
 		metric.WithDescription("Query handling duration"),
-		metric.WithUnit("ms"),
-		metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
-	QueriesInFlight, _ = meter.Int64UpDownCounter(
-		"eventsourcing.queries.in_flight",
+	QueriesProcessing, _ = meter.Int64UpDownCounter(
+		"eventsourcing.query.processing",
 		metric.WithDescription("Number of queries currently being processed"),
-		metric.WithUnit("{query}"),
-	)
-
-	QueriesFailed, _ = meter.Int64Counter(
-		"eventsourcing.queries.failed",
-		metric.WithDescription("Number of failed queries"),
 		metric.WithUnit("{query}"),
 	)
 
@@ -170,17 +142,11 @@ var (
 		metric.WithUnit("{operation}"),
 	)
 
-	EventStoreLoads, _ = meter.Int64Counter(
-		"eventsourcing.eventstore.loads",
-		metric.WithDescription("Number of load operations"),
-		metric.WithUnit("{operation}"),
-	)
-
 	EventStoreDuration, _ = meter.Float64Histogram(
 		"eventsourcing.eventstore.duration",
-		metric.WithDescription("EventData store operation duration"),
-		metric.WithUnit("ms"),
-		metric.WithExplicitBucketBoundaries(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
+		metric.WithDescription("Event store operation duration"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
 	EventStoreErrors, _ = meter.Int64Counter(
@@ -194,17 +160,5 @@ var (
 		"eventsourcing.concurrency.conflicts",
 		metric.WithDescription("Number of concurrency conflicts"),
 		metric.WithUnit("{conflict}"),
-	)
-
-	StreamVersionGauge, _ = meter.Int64Gauge(
-		"eventsourcing.stream.version",
-		metric.WithDescription("Current version of streams"),
-		metric.WithUnit("{version}"),
-	)
-
-	CommandBusQueueDepth, _ = meter.Int64UpDownCounter(
-		"eventsourcing.commandbus.queue_depth",
-		metric.WithDescription("Current depth of command bus queues"),
-		metric.WithUnit("{command}"),
 	)
 )

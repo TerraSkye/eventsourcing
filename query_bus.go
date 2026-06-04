@@ -6,28 +6,21 @@ import (
 	"sync"
 )
 
-// QueryBus acts as a central registry for query handlers. It stores
-// handlers keyed by their query and result types, allowing multiple
-// query types to be registered in a single bus.
-//
-// Handlers can later be executed via a typed GenericQueryGateway.
+// QueryBus is a central registry for query handlers, keyed by query and result
+// type. Handlers are executed via a typed QueryGateway.
 //
 // Example Usage:
 //
 //	bus := NewQueryBus()
-//	RegisterQueryHandler[MyQuery, *MyResult](bus, NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
-//	    return &MyResult{Value: 42}, nil
-//	}))
+//	RegisterQueryHandlerFunc(bus, store.GetTask)
+//	RegisterQueryHandlerFunc(bus, store.ListTasks)
 type QueryBus struct {
 	mu         sync.RWMutex
 	handlers   map[string]any
 	requestees map[string]struct{}
 }
 
-// NewQueryBus creates a new QueryBus instance.
-//
-// Returns:
-//   - *QueryBus: A new, empty bus ready for handler registration.
+// NewQueryBus creates a new, empty QueryBus ready for handler registration.
 func NewQueryBus() *QueryBus {
 	return &QueryBus{
 		mu:         sync.RWMutex{},
@@ -46,33 +39,29 @@ type HandlerOption func(*handlerSettings)
 type handlerSettings struct {
 }
 
-// RegisterQueryHandler registers a QueryHandler for a specific query
-// and result type on the provided QueryBus.
+// RegisterQueryHandlerFunc registers a plain function as a query handler.
+// Type parameters are inferred from the function signature. Prefer this over
+// RegisterQueryHandler when registering method values from a provider struct.
 //
-// This function generates a unique key from the types of T and R,
-// stores the handler in the bus, and applies any optional configuration.
-//
-// Type Parameters:
-//   - T: The query type implementing query.Query.
-//   - R: The result type .
-//
-// Parameters:
-//   - bus: The QueryBus instance where the handler should be registered.
-//   - handler: The QueryHandler to register.
-//   - opts: Optional HandlerOption values for future customization.
-//
-// Behavior Details:
-//   - The key for storage is generated via fmt.Sprintf("%T|%T").
-//   - Currently, handler settings are collected but not persisted.
+// Panics if a handler for the same query and result types is already registered.
 //
 // Example Usage:
 //
-//	bus := NewQueryBus()
-//	RegisterQueryHandler[MyQuery, *MyResult](bus, NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
-//	    return &MyResult{Value: 42}, nil
-//	}))
+//	RegisterQueryHandlerFunc(bus, store.GetTask)
+//	RegisterQueryHandlerFunc(bus, store.ListTasks)
+func RegisterQueryHandlerFunc[T Query, R any](bus *QueryBus, fn queryHandlerFunc[T, R], opts ...HandlerOption) {
+	RegisterQueryHandler(bus, fn, opts...)
+}
+
+// RegisterQueryHandler registers a QueryHandler[T, R] on the bus. Use this
+// when registering a type that explicitly implements the QueryHandler interface.
+// For plain functions or method values, prefer RegisterQueryHandlerFunc.
 //
-// Generic helper function
+// Panics if a handler for the same query and result types is already registered.
+//
+// Example Usage:
+//
+//	RegisterQueryHandler(bus, myHandler)
 func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
 	key := fmt.Sprintf("%T|%T", *new(T), *new(R))
 
