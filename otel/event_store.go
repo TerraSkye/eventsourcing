@@ -251,7 +251,16 @@ func (t TelemetryStore) Close() error {
 	return t.next.Close()
 }
 
-// Constructor
+// WithEventStoreTelemetry wraps an EventStore with OpenTelemetry tracing and metrics.
 func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) eventsourcing.EventStore {
 	return TelemetryStore{next: next}
+}
+
+// EventStoreTelemetry returns an EventStoreMiddleware that instruments the store
+// with OpenTelemetry tracing and metrics.
+// Use with ApplyEventStoreMiddleware() to compose store middleware declaratively.
+func EventStoreTelemetry(options ...Option) eventsourcing.EventStoreMiddleware {
+	return func(next eventsourcing.EventStore) eventsourcing.EventStore {
+		return WithEventStoreTelemetry(next, options...)
+	}
 }

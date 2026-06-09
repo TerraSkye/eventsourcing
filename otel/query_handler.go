@@ -12,6 +12,72 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// QueryTelemetry returns a QueryBusMiddleware that instruments every query dispatched
+// through the bus with OpenTelemetry tracing and metrics.
+// Use with bus.Use() to apply telemetry to all registered handlers.
+// The query type name is resolved at dispatch time from the concrete type.
+func QueryTelemetry(options ...Option) eventsourcing.QueryBusMiddleware {
+	cfg := &config{}
+	for _, o := range options {
+		o.apply(cfg)
+	}
+
+	return func(next func(ctx context.Context, qry any) (any, error)) func(ctx context.Context, qry any) (any, error) {
+		return func(ctx context.Context, qry any) (any, error) {
+			queryType := fmt.Sprintf("%T", qry)
+
+			var queryID string
+			if q, ok := qry.(eventsourcing.Query); ok {
+				queryID = string(q.ID())
+			}
+
+			baseAttributes := []attribute.KeyValue{
+				AttrQueryType.String(queryType),
+				AttrQueryID.String(queryID),
+			}
+			baseAttributes = append(baseAttributes, cfg.Attributes...)
+			if cfg.GetAttributes != nil {
+				baseAttributes = append(baseAttributes, cfg.GetAttributes(ctx)...)
+			}
+
+			operation := fmt.Sprintf("query.handle %s", queryType)
+			if cfg.Operation != "" {
+				operation = cfg.Operation
+			}
+			if cfg.GetOperation != nil {
+				if op := cfg.GetOperation(ctx, operation); op != "" {
+					operation = op
+				}
+			}
+
+			ctx, span := tracer.Start(ctx, operation,
+				trace.WithSpanKind(trace.SpanKindInternal),
+				trace.WithAttributes(baseAttributes...),
+			)
+			defer span.End()
+
+			QueriesInFlight.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+			defer QueriesInFlight.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(queryType)))
+
+			startTime := time.Now()
+			result, err := next(ctx, qry)
+
+			QueriesDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrQueryType.String(queryType)))
+
+			if err != nil {
+				span.SetStatus(codes.Error, err.Error())
+				span.RecordError(err)
+				QueriesFailed.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+				return result, err
+			}
+
+			span.SetStatus(codes.Ok, "")
+			QueriesHandled.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+			return result, nil
+		}
+	}
+}
+
 // WithQueryTelemetry wraps a QueryHandler with OpenTelemetry tracing and metrics.
 //
 // This decorator observes the execution of a query handler, producing both

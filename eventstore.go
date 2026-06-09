@@ -83,3 +83,26 @@ type AppendResult struct {
 	StreamID            string
 	NextExpectedVersion uint64
 }
+
+// eventStoreMiddlewareHandler is the interface for internal storage of event
+// store middlewares. Both EventStoreMiddleware and struct-based wrappers satisfy it.
+type eventStoreMiddlewareHandler interface {
+	Middleware(next EventStore) EventStore
+}
+
+// EventStoreMiddleware wraps an EventStore, allowing decoration of all operations.
+type EventStoreMiddleware func(next EventStore) EventStore
+
+// Middleware implements eventStoreMiddlewareHandler.
+func (mw EventStoreMiddleware) Middleware(next EventStore) EventStore {
+	return mw(next)
+}
+
+// ApplyEventStoreMiddleware applies a chain of middlewares to a store.
+// The first middleware in the list is the outermost wrapper (executes first).
+func ApplyEventStoreMiddleware(store EventStore, middlewares ...EventStoreMiddleware) EventStore {
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		store = middlewares[i].Middleware(store)
+	}
+	return store
+}

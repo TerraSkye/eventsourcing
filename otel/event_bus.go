@@ -218,3 +218,12 @@ func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *Tele
 		cfg:  cfg,
 	}
 }
+
+// EventBusTelemetry returns an EventHandlerMiddleware that instruments event
+// handlers subscribed through the bus with OpenTelemetry tracing and metrics.
+// Use with NewEventBusWithMiddleware() to apply telemetry to all subscribers.
+func EventBusTelemetry(options ...Option) eventsourcing.EventHandlerMiddleware {
+	return func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
+		return WithEventTelemetry(next, options...)
+	}
+}
