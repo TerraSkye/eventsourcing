@@ -7,6 +7,14 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
+// EventLogging returns an EventHandlerMiddleware that logs event processing.
+// Use with NewEventBusWithMiddleware() to apply logging to all subscribers.
+func EventLogging(logger *slog.Logger) cqrs.EventHandlerMiddleware {
+	return func(next cqrs.EventHandler) cqrs.EventHandler {
+		return WithLoggingMiddleware(logger, next)
+	}
+}
+
 func WithLoggingMiddleware(logger *slog.Logger, next cqrs.EventHandler) cqrs.EventHandler {
 	return cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
 		l := logger.With(

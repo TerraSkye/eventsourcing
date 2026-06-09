@@ -3,6 +3,7 @@ package eventsourcing
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -192,5 +193,224 @@ func TestNewCommandBus(t *testing.T) {
 				t.Errorf("NewCommandBus(%v, %v).shardCount = %v, want %v", tt.args.bufferSize, tt.args.shardCount, got, tt.want)
 			}
 		})
+	}
+}
+
+// ---- Middleware tests ----
+
+type mwTestCommandMiddleware struct {
+	timesCalled uint
+}
+
+func (m *mwTestCommandMiddleware) Middleware(
+	next func(ctx context.Context, cmd Command) (AppendResult, error),
+) func(ctx context.Context, cmd Command) (AppendResult, error) {
+	return func(ctx context.Context, cmd Command) (AppendResult, error) {
+		m.timesCalled++
+		return next(ctx, cmd)
+	}
+}
+
+func TestCommandBusMiddlewareAdd(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	mw := &mwTestCommandMiddleware{}
+
+	bus.useMiddleware(mw)
+	if len(bus.middlewares) != 1 {
+		t.Fatalf("expected 1 middleware after useMiddleware, got %d", len(bus.middlewares))
+	}
+
+	bus.Use(mw.Middleware)
+	if len(bus.middlewares) != 2 {
+		t.Fatalf("expected 2 middlewares after Use(method), got %d", len(bus.middlewares))
+	}
+
+	noop := CommandBusMiddleware(func(next func(ctx context.Context, cmd Command) (AppendResult, error)) func(ctx context.Context, cmd Command) (AppendResult, error) {
+		return next
+	})
+	bus.Use(noop)
+	if len(bus.middlewares) != 3 {
+		t.Fatalf("expected 3 middlewares after Use(func literal), got %d", len(bus.middlewares))
+	}
+}
+
+func TestCommandBusMiddleware(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	mw := &mwTestCommandMiddleware{}
+	bus.useMiddleware(mw)
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	t.Run("called on successful dispatch", func(t *testing.T) {
+		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if mw.timesCalled != 1 {
+			t.Fatalf("expected 1 call, got %d", mw.timesCalled)
+		}
+	})
+
+	t.Run("not called for unregistered command type", func(t *testing.T) {
+		if _, err := bus.Dispatch(context.Background(), testCmd2{ID: "b"}); err == nil {
+			t.Fatal("expected error for missing handler")
+		}
+		if mw.timesCalled != 1 {
+			t.Fatalf("middleware should not be called for unregistered type; still %d", mw.timesCalled)
+		}
+	})
+
+	t.Run("Use re-wraps already-registered handlers", func(t *testing.T) {
+		bus.Use(mw.Middleware)
+
+		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "c"}); err != nil {
+			t.Fatal(err)
+		}
+		// struct mw + func mw both run: +2 calls → total 3
+		if mw.timesCalled != 3 {
+			t.Fatalf("expected 3 total calls, got %d", mw.timesCalled)
+		}
+	})
+}
+
+func TestCommandBusMiddlewareExecution(t *testing.T) {
+	mwLabel := "middleware"
+	handlerLabel := "handler"
+
+	t.Run("handler called without middleware", func(t *testing.T) {
+		bus := NewCommandBus(10, 1)
+		defer bus.Stop()
+
+		var out []string
+		Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+			out = append(out, handlerLabel)
+			return AppendResult{Successful: true}, nil
+		})
+
+		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(out, ",") != handlerLabel {
+			t.Fatalf("unexpected output: %v", out)
+		}
+	})
+
+	t.Run("middleware output precedes handler output", func(t *testing.T) {
+		bus := NewCommandBus(10, 1)
+		defer bus.Stop()
+
+		var out []string
+		bus.Use(func(next func(ctx context.Context, cmd Command) (AppendResult, error)) func(ctx context.Context, cmd Command) (AppendResult, error) {
+			return func(ctx context.Context, cmd Command) (AppendResult, error) {
+				out = append(out, mwLabel)
+				return next(ctx, cmd)
+			}
+		})
+
+		Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+			out = append(out, handlerLabel)
+			return AppendResult{Successful: true}, nil
+		})
+
+		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		want := strings.Join([]string{mwLabel, handlerLabel}, ",")
+		if strings.Join(out, ",") != want {
+			t.Fatalf("expected %q, got %q", want, strings.Join(out, ","))
+		}
+	})
+}
+
+func TestCommandBusMiddlewareOrder(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	var order []string
+
+	bus.Use(
+		func(next func(ctx context.Context, cmd Command) (AppendResult, error)) func(ctx context.Context, cmd Command) (AppendResult, error) {
+			return func(ctx context.Context, cmd Command) (AppendResult, error) {
+				order = append(order, "first")
+				return next(ctx, cmd)
+			}
+		},
+		func(next func(ctx context.Context, cmd Command) (AppendResult, error)) func(ctx context.Context, cmd Command) (AppendResult, error) {
+			return func(ctx context.Context, cmd Command) (AppendResult, error) {
+				order = append(order, "second")
+				return next(ctx, cmd)
+			}
+		},
+	)
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		order = append(order, "handler")
+		return AppendResult{Successful: true}, nil
+	})
+
+	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"first", "second", "handler"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected order %v, got %v", want, order)
+	}
+}
+
+func TestCommandBusMiddlewareAppliedRetroactively(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	mw := &mwTestCommandMiddleware{}
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	bus.useMiddleware(mw)
+
+	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if mw.timesCalled != 1 {
+		t.Fatalf("expected 1 call, got %d", mw.timesCalled)
+	}
+}
+
+func TestCommandBusFuncAndStructMiddleware(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	structMw := &mwTestCommandMiddleware{}
+	funcCalls := 0
+
+	bus.useMiddleware(structMw)
+	bus.Use(func(next func(ctx context.Context, cmd Command) (AppendResult, error)) func(ctx context.Context, cmd Command) (AppendResult, error) {
+		return func(ctx context.Context, cmd Command) (AppendResult, error) {
+			funcCalls++
+			return next(ctx, cmd)
+		}
+	})
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if structMw.timesCalled != 1 {
+		t.Fatalf("struct middleware: expected 1 call, got %d", structMw.timesCalled)
+	}
+	if funcCalls != 1 {
+		t.Fatalf("func middleware: expected 1 call, got %d", funcCalls)
 	}
 }

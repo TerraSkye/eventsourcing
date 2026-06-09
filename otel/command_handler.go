@@ -13,6 +13,92 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// CommandTelemetry returns a CommandBusMiddleware that instruments every command
+// dispatched through the bus with OpenTelemetry tracing and metrics.
+// Use with bus.Use() to apply telemetry to all registered handlers.
+// The command type name is resolved at dispatch time from the concrete type.
+func CommandTelemetry(options ...Option) eventsourcing.CommandBusMiddleware {
+	cfg := &config{}
+	for _, o := range options {
+		o.apply(cfg)
+	}
+
+	return func(next func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error)) func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+			commandType := fmt.Sprintf("%T", cmd)
+			ctx = eventsourcing.WithCausation(ctx, commandType)
+
+			attr := []attribute.KeyValue{
+				AttrCommandType.String(commandType),
+				AttrAggregateID.String(cmd.AggregateID()),
+			}
+			attr = append(attr, cfg.Attributes...)
+
+			if cfg.GetAttributes != nil {
+				attr = append(attr, cfg.GetAttributes(ctx)...)
+			}
+
+			operation := fmt.Sprintf("command.handle %s", commandType)
+			if cfg.Operation != "" {
+				operation = cfg.Operation
+			}
+			if cfg.GetOperation != nil {
+				if op := cfg.GetOperation(ctx, operation); op != "" {
+					operation = op
+				}
+			}
+
+			ctx, span := tracer.Start(ctx, operation,
+				trace.WithSpanKind(trace.SpanKindInternal),
+				trace.WithAttributes(attr...),
+			)
+			defer span.End()
+
+			CommandsInFlight.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			defer CommandsInFlight.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			startTime := time.Now()
+			result, err := next(ctx, cmd)
+
+			attr = append(attr,
+				AttrStreamID.String(result.StreamID),
+				AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
+			)
+			CommandsDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrCommandType.String(commandType)))
+			span.SetAttributes(attr...)
+
+			if err != nil {
+				var conflict *eventsourcing.StreamRevisionConflictError
+				if errors.As(err, &conflict) {
+					ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+					span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
+				}
+				var businessViolation *eventsourcing.ErrBusinessRuleViolation
+				if errors.As(err, &businessViolation) {
+					span.SetAttributes(AttrErrorMessage.String(businessViolation.Cause().Error()))
+					span.SetStatus(codes.Ok, "")
+					span.AddEvent("business_rule_violation", trace.WithAttributes(
+						AttrCommandType.String(commandType),
+						AttrAggregateID.String(cmd.AggregateID()),
+						AttrStreamID.String(result.StreamID),
+						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
+						AttrErrorMessage.String(businessViolation.Cause().Error()),
+					))
+					CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+					return result, err
+				}
+				span.SetStatus(codes.Error, err.Error())
+				span.RecordError(err)
+				CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+				return result, err
+			}
+
+			span.SetStatus(codes.Ok, "")
+			CommandsHandled.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			return result, err
+		}
+	}
+}
+
 // WithCommandTelemetry wraps a CommandHandler with OpenTelemetry tracing and metrics.
 //
 // This decorator observes the execution of a command handler, producing both

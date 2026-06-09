@@ -12,6 +12,30 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, cmd Command) (AppendResult, error)
 }
 
+// commandBusMiddlewareHandler is the interface that both CommandBusMiddleware
+// and any struct-based middleware must satisfy for internal storage.
+type commandBusMiddlewareHandler interface {
+	Middleware(
+		next func(ctx context.Context, cmd Command) (AppendResult, error),
+	) func(ctx context.Context, cmd Command) (AppendResult, error)
+}
+
+// CommandBusMiddleware is a type-erased middleware for the CommandBus.
+// It wraps the internal handler func used by the bus; both logging and
+// telemetry middlewares only need cmd.AggregateID() and fmt.Sprintf("%T", cmd),
+// both available on the Command interface, so no concrete type information is lost.
+type CommandBusMiddleware func(
+	next func(ctx context.Context, cmd Command) (AppendResult, error),
+) func(ctx context.Context, cmd Command) (AppendResult, error)
+
+// Middleware implements commandBusMiddlewareHandler so that CommandBusMiddleware
+// satisfies the interface alongside any struct-based implementations.
+func (mw CommandBusMiddleware) Middleware(
+	next func(ctx context.Context, cmd Command) (AppendResult, error),
+) func(ctx context.Context, cmd Command) (AppendResult, error) {
+	return mw(next)
+}
+
 // queuedCommand represents a command enqueued in the command bus for processing.
 // Each queuedCommand includes the context for cancellation, the command itself,
 // and a response channel to return the processing result.
@@ -39,12 +63,14 @@ type commandResult struct {
 //   - Safe shutdown that waits for in-flight commands to complete
 //   - Panic recovery in handlers to prevent the bus from crashing
 type CommandBus struct {
-	handlers   map[string]func(ctx context.Context, command Command) (AppendResult, error)
-	queues     []chan queuedCommand
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
-	mu         sync.RWMutex
-	shardCount int
+	rawHandlers map[string]func(ctx context.Context, command Command) (AppendResult, error)
+	handlers    map[string]func(ctx context.Context, command Command) (AppendResult, error)
+	queues      []chan queuedCommand
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+	mu          sync.RWMutex
+	shardCount  int
+	middlewares []commandBusMiddlewareHandler
 }
 
 // NewCommandBus creates a new instance of CommandBus with a buffered queues.
@@ -66,10 +92,11 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 	}
 
 	bus := &CommandBus{
-		queues:     make([]chan queuedCommand, shardCount),
-		handlers:   make(map[string]func(ctx context.Context, command Command) (AppendResult, error)),
-		stopCh:     make(chan struct{}),
-		shardCount: shardCount,
+		queues:      make([]chan queuedCommand, shardCount),
+		rawHandlers: make(map[string]func(ctx context.Context, command Command) (AppendResult, error)),
+		handlers:    make(map[string]func(ctx context.Context, command Command) (AppendResult, error)),
+		stopCh:      make(chan struct{}),
+		shardCount:  shardCount,
 	}
 
 	for i := 0; i < shardCount; i++ {
@@ -183,6 +210,41 @@ func (b *CommandBus) selectShard(aggregateID string) int {
 	return int(hash.Sum32()) % b.shardCount
 }
 
+// Use appends one or more middlewares to the chain and immediately re-wraps every
+// already-registered handler. The first middleware in the list is the outermost
+// wrapper (executes first on each dispatch).
+//
+// Re-wrapping happens once inside Use, under the write lock, so Dispatch pays zero
+// extra cost on the hot path.
+func (b *CommandBus) Use(middlewares ...CommandBusMiddleware) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, mw := range middlewares {
+		b.middlewares = append(b.middlewares, mw)
+	}
+	b.rebuildHandlers()
+}
+
+// useMiddleware adds a struct-based middleware to the chain and re-wraps all handlers.
+func (b *CommandBus) useMiddleware(mw commandBusMiddlewareHandler) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.middlewares = append(b.middlewares, mw)
+	b.rebuildHandlers()
+}
+
+// rebuildHandlers re-applies the full middleware chain to every raw handler.
+// Must be called with b.mu held for writing.
+func (b *CommandBus) rebuildHandlers() {
+	for name, raw := range b.rawHandlers {
+		h := raw
+		for i := len(b.middlewares) - 1; i >= 0; i-- {
+			h = b.middlewares[i].Middleware(h)
+		}
+		b.handlers[name] = h
+	}
+}
+
 // Register adds a new typed command handler to the bus.
 //
 // Parameters:
@@ -193,6 +255,8 @@ func (b *CommandBus) selectShard(aggregateID string) int {
 //   - Derives the command type name automatically using fmt.Sprintf("%T") to avoid
 //     manual registration strings.
 //   - Panics if a handler is already registered for the same command type.
+//   - The current middleware chain is applied immediately; further Use() calls will
+//     also re-wrap this handler.
 //
 // Example:
 //
@@ -203,17 +267,24 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if _, exists := b.handlers[cmdName]; exists {
+	if _, exists := b.rawHandlers[cmdName]; exists {
 		panic(fmt.Errorf("handler already registered for command type %s %w", cmdName, ErrDuplicateHandler))
 	}
 
-	b.handlers[cmdName] = func(ctx context.Context, cmd Command) (AppendResult, error) {
+	raw := func(ctx context.Context, cmd Command) (AppendResult, error) {
 		c, ok := cmd.(C)
 		if !ok {
 			return AppendResult{Successful: false}, fmt.Errorf("expected command type %s but got %T", cmdName, cmd)
 		}
 		return handler(ctx, c)
 	}
+	b.rawHandlers[cmdName] = raw
+
+	h := raw
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		h = b.middlewares[i].Middleware(h)
+	}
+	b.handlers[cmdName] = h
 }
 
 // Stop shuts down the CommandBus safely.
