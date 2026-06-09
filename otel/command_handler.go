@@ -41,10 +41,9 @@ import (
 //   - The span is started with SpanKindInternal.
 //   - Base attributes include the command type and aggregate ID; the stream ID is appended after handler execution.
 //   - Metrics recorded:
-//   - CommandsInFlight: increments/decrements in-flight commands.
-//   - CommandsDuration: duration of command handling in milliseconds.
-//   - CommandsHandled: successful commands.
-//   - CommandsFailed: failed commands.
+//   - CommandsProcessing: increments/decrements in-flight commands.
+//   - CommandsDuration: duration of command handling in seconds.
+//   - CommandsCount: total commands, labelled with eventsourcing.result=success|failure.
 //   - ConcurrencyConflicts: detected StreamRevisionConflictError occurrences.
 //   - Span attributes updated after execution include stream ID and stream version.
 //   - Span status is set to codes.Ok if the command succeeded, or codes.Error if an error occurred.
@@ -68,7 +67,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	}
 	baseAttributes = append(baseAttributes, cfg.Attributes...)
 
-	defaultOperation := fmt.Sprintf("command.handle %s", commandType)
+	defaultOperation := "handle command"
 	if cfg.Operation != "" {
 		defaultOperation = cfg.Operation
 	}
@@ -94,8 +93,8 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 		)
 		defer span.End()
 
-		CommandsInFlight.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-		defer CommandsInFlight.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
+		CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+		defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
 		startTime := time.Now()
 		result, err := next(ctx, cmd)
 
@@ -106,7 +105,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 		)
 
 		// Record duration metric
-		CommandsDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrCommandType.String(commandType)))
+		CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(commandType)))
 
 		// Update span attributes
 		span.SetAttributes(attr...)
@@ -132,21 +131,21 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 					AttrErrorMessage.String(bussinessViolation.Cause().Error()),
 				))
-				CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 				return result, err
 			}
 
 			// Real system error
 			span.SetStatus(codes.Error, err.Error())
 			span.RecordError(err)
-			CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 			return result, err
 
 		} else {
 			span.SetStatus(codes.Ok, "")
 		}
 
-		CommandsHandled.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+		CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("success")))
 
 		return result, err
 	}

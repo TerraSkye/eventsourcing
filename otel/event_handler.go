@@ -3,7 +3,6 @@ package otel
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -39,8 +38,8 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		attr := []attribute.KeyValue{
 			AttrEventType.String(event.EventType()),
 			AttrEventID.String(eventsourcing.EventIDFromContext(ctx).String()),
-			AttrEventGlobalPos.String(fmt.Sprintf("%d", eventsourcing.GlobalVersionFromContext(ctx))),
-			AttrEventStreamPos.String(fmt.Sprintf("%d", eventsourcing.VersionFromContext(ctx))),
+			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalVersionFromContext(ctx))),
+			AttrEventStreamPos.Int64(int64(eventsourcing.VersionFromContext(ctx))),
 			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
 		}
 
@@ -54,34 +53,24 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		originalCtx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
 		originalSpanContext := trace.SpanContextFromContext(originalCtx)
 
-		operationName := fmt.Sprintf("events.handle %s", event.EventType())
-
-		ctx, span := tracer.Start(ctx, operationName,
+		ctx, span := tracer.Start(ctx, "process event",
 			trace.WithSpanKind(trace.SpanKindInternal),
 			trace.WithLinks(trace.Link{
 				SpanContext: originalSpanContext,
 				Attributes: []attribute.KeyValue{
-					attribute.String("link.reason", "event.consumed.from.stream"),
+					attribute.String("eventsourcing.link.reason", "event.consumed.from.stream"),
 				},
 			}),
 			trace.WithAttributes(attr...),
 		)
 		defer span.End()
 
-		// Add the original trace ID as an attribute for easier correlation
-		if originalSpanContext.IsValid() {
-			span.SetAttributes(
-				attribute.String("original.trace.id", originalSpanContext.TraceID().String()),
-				attribute.String("original.span.id", originalSpanContext.SpanID().String()),
-			)
-		}
-
 		EventBusHandled.Add(ctx, 1, metric.WithAttributes(AttrEventType.String(event.EventType())))
 
 		startTime := time.Now()
 		err := next.Handle(ctx, event)
 		EventBusDuration.Record(ctx,
-			float64(time.Since(startTime).Milliseconds()),
+			time.Since(startTime).Seconds(),
 			metric.WithAttributes(AttrEventType.String(event.EventType())),
 		)
 
