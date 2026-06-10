@@ -34,11 +34,11 @@ func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next ev
 	}
 }
 
-// QueryLogging returns a QueryBusMiddleware that logs every query dispatched
+// QueryLogging returns a QueryHandlerMiddleware that logs every query dispatched
 // through the bus. Use with bus.Use() to apply logging to all registered handlers.
-func QueryLogging(logger *slog.Logger) eventsourcing.QueryBusMiddleware {
-	return func(next func(ctx context.Context, qry any) (any, error)) func(ctx context.Context, qry any) (any, error) {
-		return func(ctx context.Context, qry any) (any, error) {
+func QueryLogging(logger *slog.Logger) eventsourcing.QueryHandlerMiddleware {
+	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
+		return func(ctx context.Context, qry eventsourcing.Query) (any, error) {
 			qryType := fmt.Sprintf("%T", qry)
 			logger.InfoContext(ctx, "Query", "query", qryType)
 			result, err := next(ctx, qry)

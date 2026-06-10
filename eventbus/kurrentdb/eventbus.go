@@ -15,13 +15,14 @@ import (
 )
 
 type EventBus struct {
-	db     *kurrentdb.Client
-	subs   map[string]*subscriber
-	mu     sync.RWMutex
-	closed bool
-	errs   chan error
-	wg     sync.WaitGroup
-	buffer uint64
+	db          *kurrentdb.Client
+	subs        map[string]*subscriber
+	mu          sync.RWMutex
+	closed      bool
+	errs        chan error
+	wg          sync.WaitGroup
+	buffer      uint64
+	middlewares []cqrs.EventHandlerMiddleware
 }
 
 type subscriber struct {
@@ -42,10 +43,20 @@ func NewEventBus(db *kurrentdb.Client, buffer uint64) *EventBus {
 	}
 }
 
+func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+	b.middlewares = append(b.middlewares, middlewares...)
+}
+
 func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
 	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
+	}
+	handler = wrapped
 
 	b.mu.Lock()
 	if b.closed {

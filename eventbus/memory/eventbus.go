@@ -23,12 +23,13 @@ type filter struct {
 }
 
 type EventBus struct {
-	mu         sync.RWMutex
-	subs       map[string]*subscriber
-	closed     bool
-	errs       chan error
-	wg         sync.WaitGroup
-	bufferSize int
+	mu          sync.RWMutex
+	subs        map[string]*subscriber
+	closed      bool
+	errs        chan error
+	wg          sync.WaitGroup
+	bufferSize  int
+	middlewares []cqrs.EventHandlerMiddleware
 }
 
 // NewEventBus constructs a new bus with a given subscriber buffer size.
@@ -38,6 +39,10 @@ func NewEventBus(bufferSize int) *EventBus {
 		errs:       make(chan error, 64),
 		bufferSize: bufferSize,
 	}
+}
+
+func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+	b.middlewares = append(b.middlewares, middlewares...)
 }
 
 // Subscribe registers a handler with a filter and name.
@@ -50,6 +55,12 @@ func (b *EventBus) Subscribe(
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
 	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
+	}
+	handler = wrapped
 
 	b.mu.Lock()
 	defer b.mu.Unlock()

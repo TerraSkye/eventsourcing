@@ -12,24 +12,20 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// QueryTelemetry returns a QueryBusMiddleware that instruments every query dispatched
+// QueryTelemetry returns a QueryHandlerMiddleware that instruments every query dispatched
 // through the bus with OpenTelemetry tracing and metrics.
 // Use with bus.Use() to apply telemetry to all registered handlers.
 // The query type name is resolved at dispatch time from the concrete type.
-func QueryTelemetry(options ...Option) eventsourcing.QueryBusMiddleware {
+func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
 		o.apply(cfg)
 	}
 
-	return func(next func(ctx context.Context, qry any) (any, error)) func(ctx context.Context, qry any) (any, error) {
-		return func(ctx context.Context, qry any) (any, error) {
+	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
+		return func(ctx context.Context, qry eventsourcing.Query) (any, error) {
 			queryType := fmt.Sprintf("%T", qry)
-
-			var queryID string
-			if q, ok := qry.(eventsourcing.Query); ok {
-				queryID = string(q.ID())
-			}
+			queryID := string(qry.ID())
 
 			baseAttributes := []attribute.KeyValue{
 				AttrQueryType.String(queryType),
