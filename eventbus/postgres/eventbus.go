@@ -28,6 +28,7 @@ type EventBus struct {
 	errs         chan error
 	wg           sync.WaitGroup
 	pollInterval time.Duration
+	middlewares  []cqrs.EventHandlerMiddleware
 }
 
 type subscriber struct {
@@ -54,10 +55,20 @@ func NewEventBus(pool *pgxpool.Pool, pollInterval time.Duration) *EventBus {
 	}
 }
 
+func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+	b.middlewares = append(b.middlewares, middlewares...)
+}
+
 func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("handler cannot be nil")
 	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
+	}
+	handler = wrapped
 
 	b.mu.Lock()
 	defer b.mu.Unlock()

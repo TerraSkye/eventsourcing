@@ -8,7 +8,7 @@ import (
 )
 
 // EventLogging returns an EventHandlerMiddleware that logs event processing.
-// Use with NewEventBusWithMiddleware() to apply logging to all subscribers.
+// Use with NewMiddlewareEventBus().Use() to apply logging to all subscribers.
 func EventLogging(logger *slog.Logger) cqrs.EventHandlerMiddleware {
 	return func(next cqrs.EventHandler) cqrs.EventHandler {
 		return WithLoggingMiddleware(logger, next)

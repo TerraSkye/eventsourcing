@@ -94,7 +94,7 @@ eventsourcing.RegisterQueryHandler[ListOrders, *OrderList](bus, listOrdersHandle
 ### Writing a query bus middleware
 
 ```go
-var myMiddleware eventsourcing.QueryBusMiddleware = func(
+var myMiddleware eventsourcing.QueryHandlerMiddleware = func(
     next func(ctx context.Context, qry any) (any, error),
 ) func(ctx context.Context, qry any) (any, error) {
     return func(ctx context.Context, qry any) (any, error) {
@@ -165,8 +165,8 @@ var metered eventsourcing.EventStoreMiddleware = func(next eventsourcing.EventSt
 |---|---|---|
 | `logging.CommandLogging(logger)` | `CommandBusMiddleware` | `bus.Use(...)` |
 | `otel.CommandTelemetry(...)` | `CommandBusMiddleware` | `bus.Use(...)` |
-| `logging.QueryLogging(logger)` | `QueryBusMiddleware` | `bus.Use(...)` |
-| `otel.QueryTelemetry(...)` | `QueryBusMiddleware` | `bus.Use(...)` |
+| `logging.QueryLogging(logger)` | `QueryHandlerMiddleware` | `bus.Use(...)` |
+| `otel.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` |
 | `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `NewEventBusWithMiddleware(...)` |
 | `otel.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `NewEventBusWithMiddleware(...)` |
 | `otel.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `ApplyEventStoreMiddleware(...)` |

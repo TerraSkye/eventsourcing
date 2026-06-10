@@ -23,16 +23,35 @@ type subscriber struct {
 	cancel  context.CancelFunc
 }
 
-// ---- File-based EventBus ----
-type FileEventBus struct {
-	mu     sync.RWMutex
-	subs   map[string]*subscriber
-	root   string
-	closed bool
-	wg     sync.WaitGroup
+var _ eventsourcing.EventBus = (*FileEventBus)(nil)
+
+type fileSubscriberOptions struct {
+	filter map[string]struct{}
 }
 
-// NewFileEventBus constructs the bus in root dir
+// WithFilterEvents returns a SubscriberOption that limits delivery to the given event types.
+func WithFilterEvents(events ...string) eventsourcing.SubscriberOption {
+	return func(cfg any) {
+		if c, ok := cfg.(*fileSubscriberOptions); ok {
+			for _, ev := range events {
+				c.filter[ev] = struct{}{}
+			}
+		}
+	}
+}
+
+// ---- File-based EventBus ----
+type FileEventBus struct {
+	mu          sync.RWMutex
+	subs        map[string]*subscriber
+	root        string
+	closed      bool
+	wg          sync.WaitGroup
+	errs        chan error
+	middlewares []eventsourcing.EventHandlerMiddleware
+}
+
+// NewFileEventBus constructs the bus in root dir.
 func NewFileEventBus(root string) (*FileEventBus, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
@@ -41,18 +60,33 @@ func NewFileEventBus(root string) (*FileEventBus, error) {
 	return &FileEventBus{
 		root: root,
 		subs: make(map[string]*subscriber),
+		errs: make(chan error, 64),
 	}, nil
 }
 
-// Subscribe registers a subscriber with optional event filters
+func (b *FileEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
+	b.middlewares = append(b.middlewares, middlewares...)
+}
+
+// Subscribe registers a subscriber with optional event filters.
 func (b *FileEventBus) Subscribe(
 	ctx context.Context,
 	name string,
 	handler eventsourcing.EventHandler,
-	filteredEvents ...string,
+	opts ...eventsourcing.SubscriberOption,
 ) error {
 	if handler == nil {
 		return errors.New("handler cannot be nil")
+	}
+
+	cfg := &fileSubscriberOptions{filter: make(map[string]struct{})}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
 	}
 
 	b.mu.Lock()
@@ -66,11 +100,6 @@ func (b *FileEventBus) Subscribe(
 		return fmt.Errorf("subscriber %q already exists", name)
 	}
 
-	filter := make(map[string]struct{})
-	for _, ev := range filteredEvents {
-		filter[ev] = struct{}{}
-	}
-
 	subDir := filepath.Join(b.root, name)
 	if err := os.MkdirAll(subDir, 0o755); err != nil {
 		return err
@@ -80,8 +109,8 @@ func (b *FileEventBus) Subscribe(
 
 	s := &subscriber{
 		name:    name,
-		handler: handler,
-		filter:  filter,
+		handler: wrapped,
+		filter:  cfg.filter,
 		cancel:  cancel,
 	}
 
@@ -96,6 +125,10 @@ func (b *FileEventBus) Subscribe(
 	}()
 
 	return nil
+}
+
+func (b *FileEventBus) Errors() <-chan error {
+	return b.errs
 }
 
 // Dispatch writes the event to all matching subscriber directories
@@ -214,7 +247,7 @@ func (b *FileEventBus) removeSubscriber(name string) {
 	}
 }
 
-// Close shuts down the bus and waits for workers
+// Close shuts down the bus and waits for workers.
 func (b *FileEventBus) Close() error {
 	b.mu.Lock()
 	b.closed = true
@@ -225,5 +258,6 @@ func (b *FileEventBus) Close() error {
 	b.mu.Unlock()
 
 	b.wg.Wait()
+	close(b.errs)
 	return nil
 }

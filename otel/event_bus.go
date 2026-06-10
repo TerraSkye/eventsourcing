@@ -171,6 +171,10 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 //
 // This method delegates directly to the wrapped EventBus without additional
 // instrumentation, as errors are already tracked at the handler level.
+func (t *TelemetryEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
+	t.next.Use(middlewares...)
+}
+
 func (t *TelemetryEventBus) Errors() <-chan error {
 	return t.next.Errors()
 }
@@ -221,7 +225,7 @@ func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *Tele
 
 // EventBusTelemetry returns an EventHandlerMiddleware that instruments event
 // handlers subscribed through the bus with OpenTelemetry tracing and metrics.
-// Use with NewEventBusWithMiddleware() to apply telemetry to all subscribers.
+// Use with NewMiddlewareEventBus().Use() to apply telemetry to all subscribers.
 func EventBusTelemetry(options ...Option) eventsourcing.EventHandlerMiddleware {
 	return func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 		return WithEventTelemetry(next, options...)

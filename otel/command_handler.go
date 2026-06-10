@@ -13,17 +13,17 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// CommandTelemetry returns a CommandBusMiddleware that instruments every command
+// CommandTelemetry returns a CommandHandlerMiddleware that instruments every command
 // dispatched through the bus with OpenTelemetry tracing and metrics.
 // Use with bus.Use() to apply telemetry to all registered handlers.
 // The command type name is resolved at dispatch time from the concrete type.
-func CommandTelemetry(options ...Option) eventsourcing.CommandBusMiddleware {
+func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
 		o.apply(cfg)
 	}
 
-	return func(next func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error)) func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
 		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
 			commandType := fmt.Sprintf("%T", cmd)
 			ctx = eventsourcing.WithCausation(ctx, commandType)

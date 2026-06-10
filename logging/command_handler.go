@@ -26,10 +26,10 @@ func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next event
 	}
 }
 
-// CommandLogging returns a CommandBusMiddleware that logs every command dispatched
+// CommandLogging returns a CommandHandlerMiddleware that logs every command dispatched
 // through the bus. Use with bus.Use() to apply logging to all registered handlers.
-func CommandLogging(logger *slog.Logger) eventsourcing.CommandBusMiddleware {
-	return func(next func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error)) func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+func CommandLogging(logger *slog.Logger) eventsourcing.CommandHandlerMiddleware {
+	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
 		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
 			cmdType := fmt.Sprintf("%T", cmd)
 			logger.InfoContext(ctx, "Dispatch", "command", cmdType, "aggregateID", cmd.AggregateID())
