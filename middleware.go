@@ -159,7 +159,7 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 type EventHandlerMiddleware func(next EventHandler) EventHandler
 
 // EventStoreMiddleware defines a function type for decorating an EventStore.
-// Use MiddlewareEventStore.Use() to compose a chain of middlewares around a store.
+// Apply one by wrapping a store directly: store = mw(store).
 //
 // Parameters:
 //   - next: The next EventStore in the chain. Delegate calls to it to preserve the
@@ -169,8 +169,6 @@ type EventHandlerMiddleware func(next EventHandler) EventHandler
 //   - A decorated EventStore that intercepts one or more store operations.
 //
 // Notes:
-//   - The first middleware passed to Use() is the outermost wrapper and executes first
-//     for each store operation.
 //   - A common implementation embeds EventStore and overrides only the methods of interest.
 //
 // Example Usage:
@@ -178,57 +176,5 @@ type EventHandlerMiddleware func(next EventHandler) EventHandler
 //	var metered eventsourcing.EventStoreMiddleware = func(next eventsourcing.EventStore) eventsourcing.EventStore {
 //	    return &meteredStore{next: next, counter: myCounter}
 //	}
-//	store := eventsourcing.NewMiddlewareEventStore(baseStore)
-//	store.Use(metered)
+//	store = metered(baseStore)
 type EventStoreMiddleware func(next EventStore) EventStore
-
-// MiddlewareEventStore wraps an EventStore and applies the registered middleware chain
-// to every operation. Use() rebuilds the chain, so all subsequent calls go through the
-// updated decorators.
-type MiddlewareEventStore struct {
-	base        EventStore
-	wrapped     EventStore
-	middlewares []EventStoreMiddleware
-}
-
-// NewMiddlewareEventStore creates a MiddlewareEventStore wrapping the given EventStore.
-// Add middlewares via Use() before using the store.
-//
-// Example Usage:
-//
-//	store := eventsourcing.NewMiddlewareEventStore(baseStore)
-//	store.Use(otel.EventStoreTelemetry())
-func NewMiddlewareEventStore(store EventStore) *MiddlewareEventStore {
-	return &MiddlewareEventStore{base: store, wrapped: store}
-}
-
-// Use adds one or more middlewares and rebuilds the decoration chain immediately.
-// Must be called before the store is used; middleware is baked in at Use() time.
-func (m *MiddlewareEventStore) Use(middlewares ...EventStoreMiddleware) {
-	m.middlewares = append(m.middlewares, middlewares...)
-	wrapped := m.base
-	for i := len(m.middlewares) - 1; i >= 0; i-- {
-		wrapped = m.middlewares[i](wrapped)
-	}
-	m.wrapped = wrapped
-}
-
-func (m *MiddlewareEventStore) Save(ctx context.Context, events []Envelope, revision StreamState) (AppendResult, error) {
-	return m.wrapped.Save(ctx, events, revision)
-}
-
-func (m *MiddlewareEventStore) LoadStream(ctx context.Context, id string) (*Iterator[*Envelope], error) {
-	return m.wrapped.LoadStream(ctx, id)
-}
-
-func (m *MiddlewareEventStore) LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error) {
-	return m.wrapped.LoadStreamFrom(ctx, id, version)
-}
-
-func (m *MiddlewareEventStore) LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error) {
-	return m.wrapped.LoadFromAll(ctx, version)
-}
-
-func (m *MiddlewareEventStore) Close() error {
-	return m.wrapped.Close()
-}
