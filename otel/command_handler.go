@@ -54,8 +54,8 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 			)
 			defer span.End()
 
-			CommandsInFlight.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-			defer CommandsInFlight.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
 			startTime := time.Now()
 			result, err := next(ctx, cmd)
 
@@ -83,17 +83,17 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 						AttrErrorMessage.String(businessViolation.Cause().Error()),
 					))
-					CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 					return result, err
 				}
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
-				CommandsFailed.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 				return result, err
 			}
 
 			span.SetStatus(codes.Ok, "")
-			CommandsHandled.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("success")))
 			return result, err
 		}
 	}

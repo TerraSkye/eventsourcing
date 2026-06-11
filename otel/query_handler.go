@@ -52,8 +52,8 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 			)
 			defer span.End()
 
-			QueriesInFlight.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
-			defer QueriesInFlight.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(queryType)))
+			QueriesProcessing.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+			defer QueriesProcessing.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(queryType)))
 
 			startTime := time.Now()
 			result, err := next(ctx, qry)
@@ -63,12 +63,12 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 			if err != nil {
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
-				QueriesFailed.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+				QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType), AttrResult.String("failure")))
 				return result, err
 			}
 
 			span.SetStatus(codes.Ok, "")
-			QueriesHandled.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
+			QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType), AttrResult.String("success")))
 			return result, nil
 		}
 	}
