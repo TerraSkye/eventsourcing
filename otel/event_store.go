@@ -279,7 +279,7 @@ func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) e
 
 // EventStoreTelemetry returns an EventStoreMiddleware that instruments the store
 // with OpenTelemetry tracing and metrics.
-// Use with NewMiddlewareEventStore().Use() to compose store middleware declaratively.
+// Apply it by wrapping a store directly: store = EventStoreTelemetry()(store).
 func EventStoreTelemetry(options ...Option) eventsourcing.EventStoreMiddleware {
 	return func(next eventsourcing.EventStore) eventsourcing.EventStore {
 		return WithEventStoreTelemetry(next, options...)
