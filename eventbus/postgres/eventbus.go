@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,11 +18,20 @@ import (
 
 var _ cqrs.EventBus = (*EventBus)(nil)
 
+// lockPoolMaxConns bounds the size of the dedicated pool used for poll()'s
+// subscription-locking transaction.
+const lockPoolMaxConns = 4
+
+// notifyChannel is the Postgres NOTIFY channel that the trigger installed by
+// schema.sql sends on after every insert into events.
+const notifyChannel = "eventsourcing_events_inserted"
+
 // EventBus is a PostgreSQL-backed event bus that uses polling to deliver events
 // to subscribers. Each subscriber's position is persisted in the event_subscriptions
 // table, allowing subscriptions to resume after a restart.
 type EventBus struct {
 	pool         *pgxpool.Pool
+	lockPool     *pgxpool.Pool
 	subs         map[string]*subscriber
 	mu           sync.RWMutex
 	closed       bool
@@ -29,6 +39,9 @@ type EventBus struct {
 	wg           sync.WaitGroup
 	pollInterval time.Duration
 	middlewares  []cqrs.EventHandlerMiddleware
+	listenCancel context.CancelFunc
+	listenReady  chan struct{}
+	listenOnce   sync.Once
 }
 
 type subscriber struct {
@@ -36,6 +49,7 @@ type subscriber struct {
 	opts    subscriberOptions
 	handler cqrs.EventHandler
 	cancel  context.CancelFunc
+	wake    chan struct{}
 }
 
 type subscriberOptions struct {
@@ -44,15 +58,45 @@ type subscriberOptions struct {
 }
 
 // NewEventBus creates a PostgreSQL-backed EventBus.
-// pollInterval controls how frequently each subscriber polls for new events.
-// A value of 500ms is a reasonable default for most workloads.
+// pollInterval controls how frequently each subscriber polls for new events
+// as a fallback; in normal operation, LISTEN/NOTIFY wakes subscribers
+// immediately after a commit. A value of a few seconds is reasonable for
+// most workloads.
 func NewEventBus(pool *pgxpool.Pool, pollInterval time.Duration) *EventBus {
-	return &EventBus{
+	listenCtx, cancel := context.WithCancel(context.Background())
+	b := &EventBus{
 		pool:         pool,
+		lockPool:     newLockPool(pool),
 		subs:         make(map[string]*subscriber),
 		errs:         make(chan error, 64),
 		pollInterval: pollInterval,
+		listenCancel: cancel,
+		listenReady:  make(chan struct{}),
 	}
+
+	b.wg.Add(1)
+	go b.listen(listenCtx)
+
+	return b
+}
+
+// newLockPool creates a small pool dedicated to poll()'s subscription-locking
+// transaction
+func newLockPool(pool *pgxpool.Pool) *pgxpool.Pool {
+	cfg := pool.Config().Copy()
+	cfg.MaxConns = lockPoolMaxConns
+	cfg.MinConns = 0
+	cfg.MinIdleConns = 0
+
+	lockPool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		// cfg is derived from an already-validated pool config, so this
+		// should be unreachable; fall back to sharing pool, which
+		// re-introduces the deadlock risk poll() is designed to avoid.
+		slog.Warn("eventbus: failed to create dedicated lock pool, poll() will share the main pool", "error", err)
+		return pool
+	}
+	return lockPool
 }
 
 func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
@@ -91,6 +135,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 		opts:    *subOpts,
 		handler: handler,
 		cancel:  cancel,
+		wake:    make(chan struct{}, 1),
 	}
 	b.subs[name] = sub
 
@@ -116,6 +161,7 @@ func (b *EventBus) Close() error {
 		return nil
 	}
 	b.closed = true
+	b.listenCancel()
 
 	for _, sub := range b.subs {
 		sub.cancel()
@@ -125,6 +171,10 @@ func (b *EventBus) Close() error {
 
 	b.wg.Wait()
 	close(b.errs)
+
+	if b.lockPool != b.pool {
+		b.lockPool.Close()
+	}
 	return nil
 }
 
@@ -150,6 +200,14 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 				}
 				b.sendErr(fmt.Errorf("subscriber %q: poll: %w", s.name, err))
 			}
+		case <-s.wake:
+			if err := b.poll(ctx, s); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				b.sendErr(fmt.Errorf("subscriber %q: poll: %w", s.name, err))
+			}
+			ticker.Reset(b.pollInterval)
 		}
 	}
 }
@@ -167,9 +225,13 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error 
 	return err
 }
 
-// poll locks the subscription row so that only one instance processes events at a time
+// poll locks the subscription row so that only one instance processes events at a time.
+// The locking transaction runs on b.lockPool, not b.pool: it is held open for the
+// entire call, including every s.handler.Handle() invocation, and Handle() typically
+// needs its own connection from b.pool. Keeping the two pools separate avoids a
+// deadlock between poll()'s held connections and handlers' connections.
 func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
-	tx, err := b.pool.Begin(ctx)
+	tx, err := b.lockPool.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -234,6 +296,87 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 	}
 
 	return tx.Commit(ctx)
+}
+
+// listenReconnectDelay is how long listen waits before retrying after the
+// LISTEN connection is lost or fails to establish.
+const listenReconnectDelay = 5 * time.Second
+
+// listen holds a dedicated connection LISTENing on notifyChannel and wakes
+// every subscriber whenever a notification arrives. It is purely an
+// optimization: if the connection cannot be established or drops, poll()'s
+// pollInterval ticker continues to deliver events on its own, just less
+// promptly. listen reconnects automatically until ctx is cancelled.
+func (b *EventBus) listen(ctx context.Context) {
+	defer b.wg.Done()
+
+	for ctx.Err() == nil {
+		conn, err := pgx.ConnectConfig(ctx, b.pool.Config().ConnConfig)
+		if err != nil {
+			b.sendErr(fmt.Errorf("eventbus: listen connect: %w", err))
+			if !sleepCtx(ctx, listenReconnectDelay) {
+				return
+			}
+			continue
+		}
+
+		if _, err := conn.Exec(ctx, "LISTEN "+notifyChannel); err != nil {
+			conn.Close(context.Background()) //nolint:errcheck
+			b.sendErr(fmt.Errorf("eventbus: listen %s: %w", notifyChannel, err))
+			if !sleepCtx(ctx, listenReconnectDelay) {
+				return
+			}
+			continue
+		}
+
+		b.listenOnce.Do(func() { close(b.listenReady) })
+
+		for {
+			if _, err := conn.WaitForNotification(ctx); err != nil {
+				conn.Close(context.Background()) //nolint:errcheck
+				if ctx.Err() != nil {
+					return
+				}
+				b.sendErr(fmt.Errorf("eventbus: wait for notification: %w", err))
+				break
+			}
+			b.wakeAll()
+		}
+
+		if !sleepCtx(ctx, listenReconnectDelay) {
+			return
+		}
+	}
+}
+
+// Listening returns a channel that is closed once the bus's dedicated
+// LISTEN connection has been established and is actively waiting for
+// notifications. It is primarily useful in tests that need to avoid a race
+// where a NOTIFY fires before the listen goroutine has started listening.
+func (b *EventBus) Listening() <-chan struct{} {
+	return b.listenReady
+}
+
+// wakeAll signals every active subscriber to poll immediately.
+func (b *EventBus) wakeAll() {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, s := range b.subs {
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// sleepCtx waits for d, returning false early if ctx is done.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
 }
 
 func (b *EventBus) removeSubscriber(name string) {

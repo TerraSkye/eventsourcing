@@ -4,9 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,5 +310,106 @@ func TestSubscribe_IgnoresInFlightTransactions(t *testing.T) {
 	}
 	if events[1].(*OrderCreated).OrderID != "B" {
 		t.Errorf("expected stream-B event second, got OrderID=%s", events[1].(*OrderCreated).OrderID)
+	}
+}
+
+// TestSubscribe_NotifyWakesImmediately verifies that a subscriber receives a
+// newly saved event almost immediately via LISTEN/NOTIFY, without waiting for
+// its (here, deliberately very long) pollInterval ticker.
+func TestSubscribe_NotifyWakesImmediately(t *testing.T) {
+	pool := newPool(t)
+	store := pgstore.NewEventStore(pool)
+	bus := pgbus.NewEventBus(pool, 10*time.Second)
+	defer bus.Close() //nolint:errcheck
+
+	handler, snapshot := collectHandler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := bus.Subscribe(ctx, "notify-sub", handler); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	// Wait for the bus's LISTEN goroutine to establish its connection
+	// before the insert, so the NOTIFY isn't missed.
+	select {
+	case <-bus.Listening():
+	case <-time.After(2 * time.Second):
+		t.Fatal("listen connection was not established in time")
+	}
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+	}, cqrs.Any{}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// With a 10s pollInterval, this can only pass via NOTIFY.
+	if !waitFor(t, 2*time.Second, func() bool { return len(snapshot()) == 1 }) {
+		t.Errorf("expected 1 event delivered via NOTIFY within 2s, got %d", len(snapshot()))
+	}
+}
+
+// TestSubscribe_ManySubscribersSmallPool_NoDeadlock reproduces a deadlock
+// where poll() held a connection from the same pool used for handler writes:
+// once 2*activeSubscribers > pool.MaxConns, every poll() and every Handle()
+// call permanently blocked waiting for a connection. With 13 subscribers and
+// MaxConns=4, the first tick after Subscribe used to wedge the bus forever.
+func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
+	ctx := context.Background()
+
+	cfg, err := pgxpool.ParseConfig(testDSN)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.MaxConns = 4
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect pool: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "TRUNCATE events RESTART IDENTITY; TRUNCATE event_subscriptions"); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	store := pgstore.NewEventStore(pool)
+	bus := pgbus.NewEventBus(pool, 10*time.Millisecond)
+	defer bus.Close() //nolint:errcheck
+
+	const numSubscribers = 20
+	var received [numSubscribers]atomic.Int32
+
+	for i := range numSubscribers {
+		idx := i
+		// Simulate a projection write: Handle() acquires its own connection
+		// from the same pool poll() uses.
+		handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+			if _, err := pool.Exec(ctx, "SELECT pg_sleep(0.01)"); err != nil {
+				return err
+			}
+			received[idx].Add(1)
+			return nil
+		})
+		if err := bus.Subscribe(ctx, fmt.Sprintf("sub-%d", idx), handler); err != nil {
+			t.Fatalf("subscribe %d: %v", idx, err)
+		}
+	}
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+	}, cqrs.Any{}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		for i := range numSubscribers {
+			if received[i].Load() == 0 {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatalf("not all %d subscribers received the event within timeout (deadlock?)", numSubscribers)
 	}
 }
