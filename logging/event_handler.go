@@ -23,6 +23,7 @@ func WithLoggingMiddleware(logger *slog.Logger, next cqrs.EventHandler) cqrs.Eve
 			"version", cqrs.VersionFromContext(ctx),
 			"global-version", cqrs.GlobalVersionFromContext(ctx),
 			"aggregateId", cqrs.AggregateIDFromContext(ctx),
+			"event", event.EventType(),
 		)
 
 		l.DebugContext(ctx, "event processing started")
