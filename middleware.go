@@ -2,19 +2,15 @@ package eventsourcing
 
 import "context"
 
-// CommandHandlerMiddleware defines a function type for decorating command handlers on the CommandBus.
-// Registering one or more middlewares via Use() causes every command handler — regardless of
-// when it was registered — to be wrapped with the full middleware chain.
+// CommandHandlerMiddleware decorates a command handler on a [CommandBus] with a
+// cross-cutting concern such as logging, telemetry, or rate limiting. It receives
+// the next handler in the chain and returns a handler that wraps it; call next to
+// pass the command along, or return without calling it to short-circuit.
 //
-// Parameters:
-//   - next: The next handler in the chain. Call it to pass the command to the following
-//     middleware or the final registered handler.
-//
-// Returns:
-//   - A wrapped handler that intercepts command execution.
-//
-// Notes:
-//   - The first middleware passed to Use() is the outermost wrapper and executes first on each dispatch.
+// The chain is baked into a handler once, by [Register], from the middlewares
+// added via [CommandBus.Use] up to that moment. Add all middleware during startup
+// wiring, before registering any handler. The first middleware passed to Use is
+// the outermost wrapper and runs first on each dispatch.
 //
 // Example Usage:
 //
@@ -31,15 +27,13 @@ import "context"
 //	bus.Use(rateLimiter)
 type CommandHandlerMiddleware func(next CommandHandler[Command]) CommandHandler[Command]
 
-// Use adds one or more middlewares to the CommandBus and immediately re-wraps every
-// registered command handler with the updated chain.
+// Use appends middlewares to the chain applied to command handlers. The first
+// one appended is the outermost wrapper and runs first on each dispatch.
 //
-// Parameters:
-//   - middlewares: One or more CommandHandlerMiddleware values to append to the chain.
-//
-// Notes:
-//   - The first middleware in the list is the outermost wrapper and executes first on each dispatch.
-//   - Must be called before Register; middleware is baked into the handler at registration time.
+// Use must be called before [Register]: the chain is baked into each handler at
+// registration time, so handlers already registered are not re-wrapped and a
+// later Use call has no effect on them. Configure the full chain during startup
+// wiring.
 //
 // Example Usage:
 //
@@ -55,23 +49,18 @@ func (b *CommandBus) Use(middlewares ...CommandHandlerMiddleware) {
 	}
 }
 
-// QueryHandlerMiddleware defines a function type for decorating query handlers on the QueryBus.
-// Registering one or more middlewares via Use() causes every query handler — regardless of
-// when it was registered — to be wrapped with the full middleware chain.
+// QueryHandlerMiddleware decorates a query handler on a [QueryBus]. It receives
+// the next handler in the chain and returns a handler that wraps it; call next to
+// pass the query along, or return without calling it to short-circuit.
 //
-// The query is received as a Query interface, so qry.ID() is available directly.
-// Use fmt.Sprintf("%T", qry) to retrieve the concrete query type name.
-// The result is received as any and holds the concrete result value.
+// The query arrives as a [Query], so qry.ID is available directly; use
+// fmt.Sprintf("%T", qry) for the concrete type name. The result arrives as an any
+// holding the concrete result value.
 //
-// Parameters:
-//   - next: The next handler in the chain. Call it to pass the query to the following
-//     middleware or the final registered handler.
-//
-// Returns:
-//   - A wrapped handler that intercepts query execution.
-//
-// Notes:
-//   - The first middleware passed to Use() is the outermost wrapper and executes first on each query.
+// The chain is baked into a handler once, by [RegisterQueryHandler], from the
+// middlewares added via [QueryBus.Use] up to that moment. Add all middleware
+// during startup wiring, before registering any handler. The first middleware
+// passed to Use is the outermost wrapper and runs first on each query.
 //
 // Example Usage:
 //

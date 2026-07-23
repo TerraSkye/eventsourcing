@@ -181,6 +181,30 @@ func TestCommandBusMiddlewareAppliedAtRegister(t *testing.T) {
 	}
 }
 
+// TestCommandBusMiddlewareNotAppliedAfterRegister pins the other half of the
+// contract documented on Use: the chain is baked into a handler at Register
+// time, so Use is startup wiring only and middleware added afterwards
+// deliberately does not wrap handlers that are already registered.
+func TestCommandBusMiddlewareNotAppliedAfterRegister(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	late := &mwTestCommandMiddleware{}
+	bus.Use(late.Middleware)
+
+	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if late.timesCalled != 0 {
+		t.Fatalf("middleware added after Register must not wrap that handler; got %d calls", late.timesCalled)
+	}
+}
+
 func TestCommandBusFuncAndStructMiddleware(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 	defer bus.Stop()
