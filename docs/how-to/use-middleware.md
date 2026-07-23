@@ -5,7 +5,9 @@ without wrapping each handler individually at registration.
 
 ## CommandBus
 
-Call `Use()` to register middleware on the bus. All handlers — registered before or after the call — are wrapped with the full middleware chain. The first argument is the outermost wrapper and executes first on each dispatch.
+Call `Use()` to register middleware on the bus. The first argument is the outermost wrapper and executes first on each dispatch.
+
+**Call `Use()` before `Register()`.** The middleware chain is baked into each handler at registration time, from the middlewares present at that moment. Handlers already registered are *not* re-wrapped, so middleware added later never runs for them. Treat `Use()` as startup wiring:
 
 ```go
 bus := eventsourcing.NewCommandBus(100, 4)
@@ -19,22 +21,24 @@ eventsourcing.Register(bus, placeOrderHandler)
 eventsourcing.Register(bus, confirmOrderHandler)
 ```
 
-Calling `Use()` multiple times appends to the chain:
+Calling `Use()` multiple times appends to the chain, but only affects handlers registered *after* each call:
 
 ```go
 bus.Use(logging.CommandLogging(logger))
-eventsourcing.Register(bus, placeOrderHandler)
+eventsourcing.Register(bus, placeOrderHandler)  // logging only
 
-bus.Use(otel.CommandTelemetry()) // re-wraps placeOrderHandler and all future handlers
-eventsourcing.Register(bus, confirmOrderHandler)
+bus.Use(otel.CommandTelemetry())
+eventsourcing.Register(bus, confirmOrderHandler) // logging + telemetry
 ```
+
+Here `placeOrderHandler` never gets telemetry. Register every middleware first to avoid this.
 
 ### Writing a function middleware
 
 ```go
-var rateLimiter eventsourcing.CommandBusMiddleware = func(
-    next func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error),
-) func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+var rateLimiter eventsourcing.CommandHandlerMiddleware = func(
+    next eventsourcing.CommandHandler[eventsourcing.Command],
+) eventsourcing.CommandHandler[eventsourcing.Command] {
     return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
         if !myLimiter.Allow() {
             return eventsourcing.AppendResult{}, errors.New("rate limit exceeded")
@@ -46,9 +50,11 @@ var rateLimiter eventsourcing.CommandBusMiddleware = func(
 bus.Use(rateLimiter)
 ```
 
+`next` is a `CommandHandler[Command]`, not a bare `func(...)`. Because `CommandHandler` is a named type, spelling the parameter out as a raw function signature will not compile.
+
 ### Writing a struct middleware
 
-Implement a `Middleware()` method with the same signature as `CommandBusMiddleware`. This is useful when the middleware carries state or configuration.
+Implement a `Middleware()` method with the same signature as `CommandHandlerMiddleware`. This is useful when the middleware carries state or configuration.
 
 ```go
 type AuditMiddleware struct {
@@ -57,8 +63,8 @@ type AuditMiddleware struct {
 }
 
 func (a *AuditMiddleware) Middleware(
-    next func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error),
-) func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+    next eventsourcing.CommandHandler[eventsourcing.Command],
+) eventsourcing.CommandHandler[eventsourcing.Command] {
     return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
         a.logger.Info("audit", "topic", a.topic, "command", fmt.Sprintf("%T", cmd))
         return next(ctx, cmd)
@@ -77,7 +83,7 @@ bus.Use(audit.Middleware)
 
 ## QueryBus
 
-Call `Use()` to register middleware on the bus. All handlers — registered before or after the call — are wrapped with the full middleware chain. Middleware receives the query as `any`; use `fmt.Sprintf("%T", qry)` to get the type name.
+Call `Use()` to register middleware on the bus. As with the `CommandBus`, the chain is baked in at registration time — **call `Use()` before `RegisterQueryHandler()`**, since handlers already registered are not re-wrapped. Middleware receives the query as a `Query`; use `fmt.Sprintf("%T", qry)` to get the concrete type name.
 
 ```go
 bus := eventsourcing.NewQueryBus()
@@ -95,9 +101,9 @@ eventsourcing.RegisterQueryHandler[ListOrders, *OrderList](bus, listOrdersHandle
 
 ```go
 var myMiddleware eventsourcing.QueryHandlerMiddleware = func(
-    next func(ctx context.Context, qry any) (any, error),
-) func(ctx context.Context, qry any) (any, error) {
-    return func(ctx context.Context, qry any) (any, error) {
+    next eventsourcing.QueryGateway[eventsourcing.Query, any],
+) eventsourcing.QueryGateway[eventsourcing.Query, any] {
+    return func(ctx context.Context, qry eventsourcing.Query) (any, error) {
         // before
         result, err := next(ctx, qry)
         // after
@@ -112,10 +118,12 @@ bus.Use(myMiddleware)
 
 ## EventBus
 
-`EventBus` is an interface. Wrap it with `NewEventBusWithMiddleware` so that every handler passed to `Subscribe` is automatically wrapped.
+`EventBus` is an interface, and each implementation carries its own `Use()` method. Call it before subscribing: middleware is applied to a handler when it is passed to `Subscribe`, so subscriptions made earlier are not re-wrapped.
 
 ```go
-bus = eventsourcing.NewEventBusWithMiddleware(bus,
+bus := memory.NewEventBus(100)
+
+bus.Use(
     logging.EventLogging(logger),
     otel.EventBusTelemetry(),
 )
@@ -141,12 +149,17 @@ var myMiddleware eventsourcing.EventHandlerMiddleware = func(next eventsourcing.
 
 ## EventStore
 
-`EventStore` is an interface. Use `ApplyEventStoreMiddleware` to compose a chain of `EventStoreMiddleware` values around a store.
+`EventStore` is an interface. An `EventStoreMiddleware` is applied by wrapping the store directly — call it and reassign:
 
 ```go
-store = eventsourcing.ApplyEventStoreMiddleware(store,
-    otel.EventStoreTelemetry(),
-)
+store = otel.EventStoreTelemetry()(store)
+```
+
+To compose several, wrap outward from the innermost:
+
+```go
+store = otel.EventStoreTelemetry()(store)
+store = myAuditMiddleware(store)  // outermost, runs first
 ```
 
 ### Writing an event store middleware
@@ -163,10 +176,10 @@ var metered eventsourcing.EventStoreMiddleware = func(next eventsourcing.EventSt
 
 | Factory | Type returned | Apply with |
 |---|---|---|
-| `logging.CommandLogging(logger)` | `CommandBusMiddleware` | `bus.Use(...)` |
-| `otel.CommandTelemetry(...)` | `CommandBusMiddleware` | `bus.Use(...)` |
-| `logging.QueryLogging(logger)` | `QueryHandlerMiddleware` | `bus.Use(...)` |
-| `otel.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` |
-| `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `NewEventBusWithMiddleware(...)` |
-| `otel.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `NewEventBusWithMiddleware(...)` |
-| `otel.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `ApplyEventStoreMiddleware(...)` |
+| `logging.CommandLogging(logger)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
+| `otel.CommandTelemetry(...)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
+| `logging.QueryLogging(logger)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
+| `otel.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
+| `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
+| `otel.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
+| `otel.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `store = mw(store)` |
