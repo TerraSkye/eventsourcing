@@ -22,7 +22,7 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus
 | Parameter | Description |
 |---|---|
 | `bufferSize` | Size of the internal buffered channel per shard. |
-| `shardCount` | Number of shards (workers). Must be > 0. Commands for the same `AggregateID` always go to the same shard (FNV hash). |
+| `shardCount` | Number of shards (workers). Values `<= 0` are coerced to `1`. Commands for the same `AggregateID` always go to the same shard (FNV hash). |
 
 ```go
 bus := eventsourcing.NewCommandBus(100, 4)
@@ -37,6 +37,8 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C])
 ```
 
 Registers a typed handler. **Panics** if a handler is already registered for the same command type.
+
+The middleware chain is applied here, at registration time — so call [`Use()`](../how-to/use-middleware.md) before `Register`. `Register` is safe to call on a bus that is already dispatching, though wiring every handler during startup is the expected pattern.
 
 ```go
 eventsourcing.Register(bus, createTaskHandler)
@@ -67,11 +69,15 @@ result, err := bus.Dispatch(ctx, CreateTask{...})
 func (b *CommandBus) Stop()
 ```
 
-Stops accepting new commands, closes all internal queues, and waits for all in-flight commands to complete. Call this during graceful shutdown.
+Stops accepting new commands, lets the workers finish whatever is already queued, and waits for all in-flight commands to complete before returning. Call this during graceful shutdown.
+
+A `Dispatch` racing `Stop` either completes normally or returns `ErrCommandBusClosed` — it never panics. `Stop` is idempotent and safe to call concurrently, but the bus cannot be restarted afterwards.
 
 ```go
 defer bus.Stop()
 ```
+
+Because `Stop` waits for in-flight commands, it is safe to tear down the event store immediately after it returns.
 
 ---
 

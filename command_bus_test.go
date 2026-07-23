@@ -264,6 +264,87 @@ func TestCommandBus_StopIsIdempotent(t *testing.T) {
 	bus.Stop() // must not panic
 }
 
+// Command types used only by TestCommandBus_RegisterWhileDispatching. Each
+// Register call writes a new key into bus.handlers, which is what used to race
+// with the worker goroutine's read.
+type raceCmdA struct{ ID string }
+
+func (c raceCmdA) AggregateID() string { return c.ID }
+
+type raceCmdB struct{ ID string }
+
+func (c raceCmdB) AggregateID() string { return c.ID }
+
+type raceCmdC struct{ ID string }
+
+func (c raceCmdC) AggregateID() string { return c.ID }
+
+type raceCmdD struct{ ID string }
+
+func (c raceCmdD) AggregateID() string { return c.ID }
+
+type raceCmdE struct{ ID string }
+
+func (c raceCmdE) AggregateID() string { return c.ID }
+
+// TestCommandBus_RegisterWhileDispatching asserts the concurrency contract the
+// CommandBus godoc promises: the type carries "synchronization mechanisms for
+// safe concurrent access" and Dispatch "is safe to call concurrently".
+// Registering a handler on a live bus while commands are in flight must
+// therefore be race-free. The worker's map read used to be unguarded, which
+// aborted the process with "fatal error: concurrent map read and map write".
+func TestCommandBus_RegisterWhileDispatching(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		bus := NewCommandBus(64, 1)
+
+		Register(bus, func(ctx context.Context, cmd raceCmdA) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		// Keep the worker busy reading b.handlers, and signal once it is
+		// actually draining the queue so the registrations below overlap it.
+		var wg sync.WaitGroup
+		running := make(chan struct{})
+		stop := make(chan struct{})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var once sync.Once
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := bus.Dispatch(context.Background(), raceCmdA{ID: "a"}); err != nil {
+					return
+				}
+				once.Do(func() { close(running) })
+			}
+		}()
+
+		<-running
+
+		// Concurrently register further handlers, each writing b.handlers.
+		Register(bus, func(ctx context.Context, cmd raceCmdB) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+		Register(bus, func(ctx context.Context, cmd raceCmdC) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+		Register(bus, func(ctx context.Context, cmd raceCmdD) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+		Register(bus, func(ctx context.Context, cmd raceCmdE) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		close(stop)
+		wg.Wait()
+		bus.Stop()
+	}
+}
+
 type benchCmd struct{ ID string }
 
 func (c benchCmd) AggregateID() string { return c.ID }
