@@ -3,6 +3,8 @@ package eventsourcing
 import (
 	"context"
 	"errors"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -194,3 +196,115 @@ func TestNewCommandBus(t *testing.T) {
 		})
 	}
 }
+
+type stopProbeCmd struct{ ID string }
+
+func (c stopProbeCmd) AggregateID() string { return c.ID }
+
+// TestCommandBus_StopDoesNotPanicPendingDispatch asserts that a Dispatch parked
+// on the queue send when Stop runs is either processed or fails with
+// ErrCommandBusClosed. It must never panic the sender, which is what closing the
+// shard queues used to do.
+func TestCommandBus_StopDoesNotPanicPendingDispatch(t *testing.T) {
+	// Unbuffered queue, single shard: every Dispatch beyond the one the worker
+	// picked up parks on the channel send.
+	bus := NewCommandBus(0, 1)
+
+	release := make(chan struct{})
+	var once sync.Once
+	Register(bus, func(ctx context.Context, cmd stopProbeCmd) (AppendResult, error) {
+		<-release // occupy the single worker
+		return AppendResult{Successful: true}, nil
+	})
+
+	const dispatchers = 32
+	var wg sync.WaitGroup
+	errCh := make(chan error, dispatchers)
+
+	for i := 0; i < dispatchers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := bus.Dispatch(context.Background(), stopProbeCmd{ID: "agg-1"})
+			errCh <- err
+		}()
+	}
+
+	// Give the dispatchers time to block on the queue send.
+	time.Sleep(100 * time.Millisecond)
+
+	go func() {
+		// Let Stop's wg.Wait() finish once it gets there.
+		time.Sleep(200 * time.Millisecond)
+		once.Do(func() { close(release) })
+	}()
+
+	bus.Stop() // must not panic the senders parked on the queue
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil && !errors.Is(err, ErrCommandBusClosed) {
+			t.Fatalf("unexpected dispatch error: %v", err)
+		}
+	}
+}
+
+// TestCommandBus_StopIsIdempotent guards the sync.Once around close(stopCh); a
+// second Stop used to panic with "close of closed channel".
+func TestCommandBus_StopIsIdempotent(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	bus.Stop()
+	bus.Stop() // must not panic
+}
+
+type benchCmd struct{ ID string }
+
+func (c benchCmd) AggregateID() string { return c.ID }
+
+// benchmarkDispatch measures end-to-end Dispatch throughput. Dispatch is
+// synchronous, so this covers the whole round trip: the stopCh check and wg.Add
+// under b.mu, the queue send, worker pickup, the handler, and the response
+// receive.
+func benchmarkDispatch(b *testing.B, shards, parallelism int) {
+	bus := NewCommandBus(1024, shards)
+	defer bus.Stop()
+
+	Register(bus, func(ctx context.Context, cmd benchCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	ids := make([]string, 512)
+	for i := range ids {
+		ids[i] = "agg-" + strconv.Itoa(i)
+	}
+
+	ctx := context.Background()
+	if parallelism > 0 {
+		b.SetParallelism(parallelism)
+	}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			if _, err := bus.Dispatch(ctx, benchCmd{ID: ids[i%len(ids)]}); err != nil {
+				b.Fatal(err)
+			}
+			i++
+		}
+	})
+}
+
+func BenchmarkCommandBusDispatchShards1(b *testing.B)  { benchmarkDispatch(b, 1, 0) }
+func BenchmarkCommandBusDispatchShards8(b *testing.B)  { benchmarkDispatch(b, 8, 0) }
+func BenchmarkCommandBusDispatchShards32(b *testing.B) { benchmarkDispatch(b, 32, 0) }
+
+// BenchmarkCommandBusDispatchContended oversubscribes GOMAXPROCS 32x so every
+// dispatcher contends for the b.mu that orders wg.Add against Stop's wg.Wait.
+func BenchmarkCommandBusDispatchContended(b *testing.B) { benchmarkDispatch(b, 16, 32) }

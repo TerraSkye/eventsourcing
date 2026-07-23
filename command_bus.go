@@ -42,6 +42,7 @@ type CommandBus struct {
 	handlers    map[string]CommandHandler[Command]
 	queues      []chan queuedCommand
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	wg          sync.WaitGroup
 	mu          sync.Mutex
 	shardCount  int
@@ -82,30 +83,34 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 	return bus
 }
 
-// Dispatch enqueues a command for processing by the registered handler and
-// waits for the result. It is safe to call concurrently.
+// Dispatch enqueues cmd for the handler registered for its type and blocks
+// until that handler returns. Commands for the same aggregate are routed to the
+// same shard, and each shard is drained by a single worker, so they are never
+// handled concurrently. Dispatch itself is safe to call concurrently.
 //
-// Parameters:
-//   - ctx: the context for cancellation or timeout
-//   - cmd: the command to dispatch
-//
-// Returns:
-//   - AppendResult: indicates success/failure of command processing
-//   - error: non-nil if the dispatch failed due to context cancellation or processing error
-//
-// Notes:
-//   - Returns an error immediately if the bus has been stopped.
-//   - Waits for the handler to complete and sends the result back via a response channel.
+// The returned [AppendResult] carries the outcome of the append. The error is
+// non-nil if ctx is cancelled before the command is enqueued or before the
+// result arrives, if no handler is registered for the command's type, if the
+// handler returns an error or panics, or if the bus has been stopped. Once the
+// bus is stopped the error wraps [ErrCommandBusClosed], including for a call
+// already parked waiting to enqueue.
 func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
+	// Registering as in-flight must be atomic with the stopCh check: sync.WaitGroup
+	// forbids an Add that races a Wait, and Stop calls Wait as soon as it has closed
+	// stopCh. Holding b.mu across both makes every Add happen-before that close, so
+	// Stop is a real barrier and go test -race stays clean.
+	b.mu.Lock()
 	select {
 	case <-b.stopCh:
+		b.mu.Unlock()
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	default:
 	}
+	b.wg.Add(1)
+	b.mu.Unlock()
+	defer b.wg.Done()
 
 	responseCh := make(chan commandResult, 1)
-	b.wg.Add(1)
-	defer b.wg.Done()
 
 	shard := b.selectShard(cmd.AggregateID())
 
@@ -113,6 +118,8 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	select {
 	case b.queues[shard] <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
 		// Wait for processing result
+	case <-b.stopCh:
+		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	case <-ctx.Done():
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
 	}
@@ -130,7 +137,21 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 
 // worker processes commands from a single shard queues.
 func (b *CommandBus) worker(queue chan queuedCommand) {
-	for cmd := range queue {
+
+	for {
+		var cmd queuedCommand
+
+		select {
+		case cmd = <-queue:
+		case <-b.stopCh:
+			// drain whatever is still queued, then exit
+			select {
+			case cmd = <-queue:
+			default:
+				return
+			}
+		}
+
 		cmdName := fmt.Sprintf("%T", cmd.Command)
 
 		h, exists := b.handlers[cmdName]
@@ -221,20 +242,20 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	b.handlers[cmdName] = h
 }
 
-// Stop shuts down the CommandBus safely.
+// Stop shuts down the bus. It stops accepting new commands, lets the workers
+// finish whatever is already queued, and waits for every in-flight [CommandBus.Dispatch]
+// to return before it does.
 //
-// Behavior:
-//   - Stops accepting new commands.
-//   - Closes the internal queues channel.
-//   - Waits for all in-flight commands to finish before returning.
-//
-// Example:
-//
-//	bus.Stop()
+// A Dispatch racing Stop either completes normally or fails with an error
+// wrapping [ErrCommandBusClosed]; it never panics. Stop is idempotent and safe
+// to call concurrently, but the bus cannot be restarted afterwards.
 func (b *CommandBus) Stop() {
-	close(b.stopCh)
-	for _, q := range b.queues {
-		close(q)
-	}
+	// Close under b.mu so it cannot land between Dispatch's stopCh check and its
+	// wg.Add. Once this returns, every subsequent Dispatch observes stopCh closed
+	// and bails out without touching wg, so Wait sees a final count.
+	b.mu.Lock()
+	b.stopOnce.Do(func() { close(b.stopCh) })
+	b.mu.Unlock()
+
 	b.wg.Wait()
 }
