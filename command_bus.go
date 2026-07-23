@@ -44,7 +44,7 @@ type CommandBus struct {
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 	wg          sync.WaitGroup
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	shardCount  int
 	middlewares []CommandHandlerMiddleware
 }
@@ -97,17 +97,18 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, error) {
 	// Registering as in-flight must be atomic with the stopCh check: sync.WaitGroup
 	// forbids an Add that races a Wait, and Stop calls Wait as soon as it has closed
-	// stopCh. Holding b.mu across both makes every Add happen-before that close, so
-	// Stop is a real barrier and go test -race stays clean.
-	b.mu.Lock()
+	// stopCh. Stop takes the write lock to close, so it waits out every reader here
+	// and every Add happens-before the close. Concurrent dispatches hold the read
+	// lock together and do not serialize.
+	b.mu.RLock()
 	select {
 	case <-b.stopCh:
-		b.mu.Unlock()
+		b.mu.RUnlock()
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	default:
 	}
 	b.wg.Add(1)
-	b.mu.Unlock()
+	b.mu.RUnlock()
 	defer b.wg.Done()
 
 	responseCh := make(chan commandResult, 1)
@@ -154,7 +155,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 
 		cmdName := fmt.Sprintf("%T", cmd.Command)
 
-		h, exists := b.handlers[cmdName]
+		h, exists := b.handlerFor(cmdName)
 
 		if !exists {
 			cmd.ResponseCh <- commandResult{
@@ -198,23 +199,31 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 	}
 }
 
+// handlerFor returns the handler registered for cmdName, and reports whether one
+// exists. The lock is held only for the map lookup, never for the handler call,
+// so a slow handler cannot block Register.
+func (b *CommandBus) handlerFor(cmdName string) (CommandHandler[Command], bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	h, ok := b.handlers[cmdName]
+	return h, ok
+}
+
 func (b *CommandBus) selectShard(aggregateID string) int {
 	hash := fnv.New32a()
 	hash.Write([]byte(aggregateID))
 	return int(hash.Sum32()) % b.shardCount
 }
 
-// Register adds a new typed command handler to the bus.
+// Register installs handler as the handler for command type C on b. The
+// registration key is derived from C with fmt.Sprintf("%T"), so there are no
+// manual type strings to keep in sync. Register panics with
+// [ErrDuplicateHandler] if a handler for C is already registered.
 //
-// Parameters:
-//   - b: pointer to the CommandBus
-//   - handler: a generic CommandHandler[Command] function for a specific command type C
-//
-// Notes:
-//   - Derives the command type name automatically using fmt.Sprintf("%T") to avoid
-//     manual registration strings.
-//   - Panics if a handler is already registered for the same command type.
-//   - The middleware chain is applied at registration time; call Use before Register.
+// The middleware chain is applied here, at registration time, from the
+// middlewares added via [CommandBus.Use] up to this point — so call Use first.
+// Register is safe to call on a bus that is already dispatching, though wiring
+// every handler during startup is the expected pattern.
 //
 // Example:
 //
