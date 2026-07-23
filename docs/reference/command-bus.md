@@ -67,11 +67,15 @@ result, err := bus.Dispatch(ctx, CreateTask{...})
 func (b *CommandBus) Stop()
 ```
 
-Stops accepting new commands, closes all internal queues, and waits for all in-flight commands to complete. Call this during graceful shutdown.
+Stops accepting new commands, lets the workers finish whatever is already queued, and waits for all in-flight commands to complete before returning. Call this during graceful shutdown.
+
+A `Dispatch` racing `Stop` either completes normally or returns `ErrCommandBusClosed` — it never panics. `Stop` is idempotent and safe to call concurrently, but the bus cannot be restarted afterwards.
 
 ```go
 defer bus.Stop()
 ```
+
+Because `Stop` waits for in-flight commands, it is safe to tear down the event store immediately after it returns.
 
 ---
 
