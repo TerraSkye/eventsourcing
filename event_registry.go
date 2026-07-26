@@ -16,30 +16,6 @@ var (
 	// registryMu protects access to the registry for concurrent operations.
 	registryMu sync.RWMutex
 
-	// RegisterEvent registers a new Event type using its default type name.
-	//
-	// It provides a reusable pattern for dynamically creating new event instances
-	// by string name. Registration performs the following steps:
-	//   1. Calls the provided factory function to obtain an instance of the event.
-	//   2. Retrieves the type name using EventType().
-	//   3. Registers the factory in the registry keyed by the type name.
-	//
-	// Parameters:
-	//   - event: A factory function of type func() Event that returns a new instance
-	//     of the event. The factory must not return nil.
-	//
-	// Panics:
-	//   - If the factory function is nil.
-	//   - If the factory returns nil.
-	//   - If an event with the same type name is already registered.
-	//
-	// Example Usage:
-	//   RegisterEvent(OrderCreated{})
-	RegisterEvent func(event Event) = func(event Event) {
-		RegisterEventByType(func() Event {
-			return event
-		})
-	}
 	// RegisterEventByType registers a new Event type using its default type name.
 	//
 	// It provides a reusable pattern for dynamically creating new event instances
@@ -111,6 +87,40 @@ var (
 		return typeToNames[fmt.Sprintf("%T", event)]
 	}
 )
+
+// eventPtr constrains PT to be a pointer to T that also implements Event.
+//
+// It lets RegisterEvent mint a genuinely new instance via new(T) for each
+// registration, the same way InitialState[T] lets a caller supply a factory
+// for T — except here the factory is derived from the type itself instead
+// of reflect, so no runtime type inspection is needed.
+type eventPtr[T any] interface {
+	*T
+	Event
+}
+
+// RegisterEvent registers a new Event type using its default type name.
+//
+// Unlike RegisterEventByType and RegisterEventByName, RegisterEvent does not
+// take a factory function. Instead it infers the concrete type T from the
+// pointer passed in and builds its own factory that returns new(T) on every
+// call, so each registration is guaranteed a fresh instance without reflect
+// and without the caller having to write out a closure.
+//
+// Parameters:
+//   - _: A pointer to a zero-value instance of the event, used only to infer
+//     its concrete type. The value itself is discarded.
+//
+// Panics:
+//   - If an event with the same type name is already registered.
+//
+// Example Usage:
+//   RegisterEvent(&OrderCreated{})
+func RegisterEvent[T any, PT eventPtr[T]](_ PT) {
+	RegisterEventByType(func() Event {
+		return PT(new(T))
+	})
+}
 
 // registerEventNameDefault is the internal implementation for registering an event under a name.
 //

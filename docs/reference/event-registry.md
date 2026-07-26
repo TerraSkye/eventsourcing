@@ -7,10 +7,14 @@ The event registry maps event type names to factory functions. Persistent event 
 ### RegisterEvent
 
 ```go
-var RegisterEvent func(event Event)
+func RegisterEvent[T any, PT eventPtr[T]](_ PT)
 ```
 
-Registers an event type using its `EventType()` name as the key.
+Registers an event type using its `EventType()` name as the key. The pointer
+passed in is only used to infer the concrete type `T`; the value itself is
+discarded. Each subsequent lookup gets a genuinely new `new(T)` instance —
+built at the type level via generics, not via reflection — so decoding two
+stored events never lets one overwrite the other's fields.
 
 ```go
 eventsourcing.RegisterEvent(&events.TaskCreated{})
@@ -82,7 +86,7 @@ Used internally by `EventGroupProcessor.StreamFilter()`.
 
 ## Behaviour notes
 
-- All registration functions are **package-level variables**. They can be replaced in tests to inject alternative implementations.
+- `RegisterEventByType`, `RegisterEventByName`, `NewEventByName`, and `EventNamesFor` are **package-level variables** and can be replaced in tests to inject alternative implementations. `RegisterEvent` is a generic function and cannot be replaced this way — swap `RegisterEventByType` instead if you need to intercept registration.
 - Registration **panics** on nil factory, nil result, empty name, or duplicate name.
 - The registry is protected by a `sync.RWMutex` and is safe for concurrent reads.
 - Register all events at startup (typically in `init()` functions or `main()`).

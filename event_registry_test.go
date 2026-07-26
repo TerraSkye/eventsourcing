@@ -1,6 +1,7 @@
 package eventsourcing
 
 import (
+	"encoding/json"
 	"strconv"
 	"sync"
 	"testing"
@@ -204,5 +205,85 @@ func TestFactoryReturnsNil(t *testing.T) {
 	// Register a factory that returns nil
 	RegisterEventByName("NilFactory", func() Event {
 		return nil
+	})
+}
+
+// SharedEvent mimics a normal domain event as documented in
+// docs/how-to/register-events.md: a pointer type registered with RegisterEvent.
+type SharedEvent struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (e *SharedEvent) EventType() string   { return "SharedEvent" }
+func (e *SharedEvent) AggregateID() string { return e.ID }
+
+func resetRegistry(t *testing.T) {
+	t.Helper()
+	registryMu.Lock()
+	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
+	registryMu.Unlock()
+}
+
+// TestRegisterEventReturnsNewInstance asserts the invariant documented on the
+// registry ("Each factory must return a new instance of a concrete Event type")
+// and already enforced for RegisterEventByType in TestRegisterEventByType.
+func TestRegisterEventReturnsNewInstance(t *testing.T) {
+	t.Run("distinct instances", func(t *testing.T) {
+		resetRegistry(t)
+
+		RegisterEvent(&SharedEvent{})
+
+		ev1, err := NewEventByName("SharedEvent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev2, err := NewEventByName("SharedEvent")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if ev1 == ev2 {
+			t.Fatalf("factory returned the same instance twice: %p", ev1)
+		}
+
+		ev1.(*SharedEvent).Name = "first"
+		if got := ev2.(*SharedEvent).Name; got != "" {
+			t.Fatalf("mutating one instance leaked into the other: got %q, want %q", got, "")
+		}
+	})
+
+	// This reproduces the exact decode path used by every persistent event
+	// store, e.g. eventstore/file/filestorage.go:231-239 and
+	// eventstore/postgres/eventstore.go:268.
+	t.Run("decoding two stored events yields independent values", func(t *testing.T) {
+		resetRegistry(t)
+
+		RegisterEvent(&SharedEvent{})
+
+		stored := [][]byte{
+			[]byte(`{"id":"agg-1","name":"first"}`),
+			[]byte(`{"id":"agg-1","name":"second"}`),
+		}
+
+		decoded := make([]Event, 0, len(stored))
+		for _, data := range stored {
+			ev, err := NewEventByName("SharedEvent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &ev); err != nil {
+				t.Fatal(err)
+			}
+			decoded = append(decoded, ev)
+		}
+
+		want := []string{"first", "second"}
+		for i, ev := range decoded {
+			if got := ev.(*SharedEvent).Name; got != want[i] {
+				t.Errorf("decoded[%d].Name = %q, want %q", i, got, want[i])
+			}
+		}
 	})
 }
