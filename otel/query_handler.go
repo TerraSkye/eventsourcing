@@ -12,10 +12,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// QueryTelemetry returns a QueryHandlerMiddleware that instruments every query dispatched
-// through the bus with OpenTelemetry tracing and metrics.
-// Use with bus.Use() to apply telemetry to all registered handlers.
-// The query type name is resolved at dispatch time from the concrete type.
+// QueryTelemetry returns an [eventsourcing.QueryHandlerMiddleware] that
+// instruments every query dispatched through the bus with OpenTelemetry
+// tracing and metrics. Use it with [eventsourcing.QueryBus.Use] to apply
+// telemetry to all registered handlers; the query type name is resolved at
+// dispatch time from the concrete type.
 func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
@@ -74,23 +75,14 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 	}
 }
 
-// WithQueryTelemetry wraps a QueryHandler with OpenTelemetry tracing and metrics.
+// WithQueryTelemetry wraps next with OpenTelemetry tracing and metrics,
+// returning an [eventsourcing.QueryHandler] of the same type that can be
+// used as a drop-in replacement.
 //
-// This decorator observes the execution of a query handler, producing both
-// tracing spans and metrics that reflect query lifecycle, success/failure,
-// and processing duration.
-//
-// The wrapper performs the following steps for each query execution:
-//  1. Starts a span for the query handling operation, named based on the query type.
-//  2. Attaches base attributes such as query type and query ID.
-//  3. Increments the in-flight query metric before execution and decrements it after completion.
-//  4. Invokes the underlying query handler.
-//  5. Updates span attributes and metrics based on the handler's result:
-//     - Records query duration metric.
-//     - Updates span status (OK or Error).
-//     - Emits metrics for handled queries and failed queries.
-//
-// Example Usage:
+// Each call to the returned handler's HandleQuery starts a span covering the
+// full invocation of next, tagged with the query type and query ID. It also
+// records [QueriesProcessing] (in-flight queries), [QueriesDuration], and
+// [QueriesCount] labelled by [AttrResult].
 //
 //	handler := WithQueryTelemetry(myQueryHandler)
 //	result, err := handler.HandleQuery(ctx, myQuery)

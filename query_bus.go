@@ -6,11 +6,10 @@ import (
 	"sync"
 )
 
-// QueryBus acts as a central registry for query handlers. It stores
-// handlers keyed by their query and result types, allowing multiple
-// query types to be registered in a single bus.
-//
-// Handlers can later be executed via a typed GenericQueryGateway.
+// QueryBus is a central registry of query handlers, keyed by their query
+// and result types, so that multiple query types can be registered on a
+// single bus. Handlers are executed through a typed [QueryGateway] created
+// with [NewQueryGateway].
 //
 // Example Usage:
 //
@@ -83,6 +82,11 @@ func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T,
 	}
 }
 
+// Validate reports an error listing every query/result type pair that a
+// [QueryGateway] was created for via [NewQueryGateway] but that has no
+// registered handler. Call it during startup, after all gateways and
+// handlers are wired up, to catch a missing registration before it can
+// surface as a runtime error.
 func (q *QueryBus) Validate() error {
 	errs := make([]error, 0)
 	for requestee := range q.requestees {

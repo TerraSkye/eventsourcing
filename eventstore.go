@@ -4,82 +4,54 @@ import (
 	"context"
 )
 
-// EventStore defines the contract for an append-only event store
-// used in event-sourced systems. An EventStore persists events
-// associated with a given aggregate ID in sequential order, allowing
-// for full reconstruction of aggregate state at any point in time.
+// EventStore is an append-only store of [Envelope]s, grouped into per-
+// aggregate streams, that allows an aggregate's state to be reconstructed by
+// replaying its stream.
 //
-// Implementations must guarantee:
-//   - Events for a given aggregate are stored in order.
-//   - Concurrency control based on the aggregate's expected version.
-//   - Iteration order from all Load* methods is deterministic (oldest → newest).
-//
-// The returned iter.Seq values are lazy iterators over the stored events.
-// They should be consumed immediately; no assumptions should be made about
-// reusability or thread-safety after iteration completes.
+// Implementations must store events for a given stream in the order they
+// were saved and yield them in that same order — oldest first — from every
+// Load* method. The [Iterator] values Load* methods return are lazy and
+// should be consumed promptly; implementations make no guarantee about
+// their reusability or thread-safety once iteration ends.
 type EventStore interface {
-	// Save appends all events in the given slice to the event stream for a specific aggregate.
-	//
-	// Parameters:
-	//   - ctx: Request-scoped context for cancellation and tracing.
-	//   - events: A slice of Envelope values to append. Each envelope should have
-	//     the aggregate ID and version set consistently.
-	//   - revision: The expected stream state or concurrency requirement. This can
-	//     be one of:
-	//       - Any: always append, do not check for conflicts.
-	//       - NoStream: stream must not exist; fail if it does.
-	//       - StreamExists: stream must exist; fail if it does not.
-	//
-	// Errors:
-	//   - ErrConcurrency if the originalVersion does not match.
-	//   - Any store-specific persistence error.
+	// Save appends events to the stream identified by their common StreamID,
+	// which must be the same across every element of events. revision states
+	// the caller's expectation of the stream's current state — [Any] to
+	// append unconditionally, [NoStream] to require the stream not already
+	// exist, [StreamExists] to require that it does, or a specific [Revision]
+	// to require an exact version — and Save returns a
+	// [StreamRevisionConflictError] if that expectation does not hold.
 	Save(ctx context.Context, events []Envelope, revision StreamState) (AppendResult, error)
 
-	// LoadStream loads all events for the given aggregate ID from version 0 onward.
-	//
-	// The returned iterator yields events in ascending version order.
-	// Iteration stops if:
-	//   - The iterator function returns false (consumer stops early).
-	//   - The context is canceled.
-	//
-	// Returns:
-	//   - iter.Seq[*Envelope]: Lazy iterator over events.
-	//   - error: Non-nil if the store could not read events.
+	// LoadStream returns an iterator over every event in id's stream, in
+	// ascending version order.
 	LoadStream(ctx context.Context, id string) (*Iterator[*Envelope], error)
 
-	// LoadStreamFrom loads all events for the given aggregate ID starting at the specified version.
-	//
-	// Parameters:
-	//   - ctx: Request-scoped context for cancellation and tracing.
-	//   - id: Aggregate identifier.
-	//   - version: Zero-based version index from which to start iteration.
-	//
-	// Returns:
-	//   - EnvelopeIterator: Lazy iterator over events from
+	// LoadStreamFrom returns an iterator over id's stream starting at
+	// version, in ascending version order. version is typically a
+	// [Revision]; [Any] starts from the beginning of the stream.
 	LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error)
 
-	// LoadFromAll loads all events from all aggregates starting at the specified version index.
-	//
-	// The definition of "version" here is store-specific; it may represent:
-	//   - A global monotonically increasing sequence number across all aggregates.
-	//   - A local version within each aggregate (in which case, events are yielded
-	//     from each aggregate starting at that version).
-	//
-	// Events should be yielded in chronological order as stored by the backend.
-	// Consumers should not assume global ordering unless explicitly documented by
-	// the implementation.
+	// LoadFromAll returns an iterator over events across every stream,
+	// starting at version. Whether version and the iteration order it
+	// produces are globally consistent, or only consistent within each
+	// stream, is implementation-specific; consult the implementation before
+	// relying on cross-stream ordering.
 	LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error)
+
 	// Close releases any resources held by the EventStore, such as network
-	// connections or file handles. After Close is called, the EventStore should
-	// not be used.
-	//
-	// Implementations should make Close idempotent.
+	// connections or file handles. Implementations should make Close
+	// idempotent. The EventStore must not be used after Close is called.
 	Close() error
 }
 
-// AppendResult describes the outcome of an append operation.
+// AppendResult describes the outcome of an [EventStore.Save] call.
 type AppendResult struct {
-	Successful          bool
-	StreamID            string
+	// Successful reports whether the events were persisted.
+	Successful bool
+	// StreamID is the stream the events were saved to.
+	StreamID string
+	// NextExpectedVersion is the version the stream's next [Revision] should
+	// use.
 	NextExpectedVersion uint64
 }

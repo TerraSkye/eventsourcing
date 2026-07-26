@@ -15,17 +15,38 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// eventstore is a KurrentDB-backed [cqrs.EventStore], delegating stream
+// storage, ordering, and revision checks to the KurrentDB server itself.
 type eventstore struct {
 	client *kurrentdb.Client
 }
 
-// NewEventStore creates a KurrentDB-backed eventstore
+// NewEventStore returns a KurrentDB-backed [cqrs.EventStore] that uses db for
+// all operations.
 func NewEventStore(db *kurrentdb.Client) cqrs.EventStore {
 	return &eventstore{
 		client: db,
 	}
 }
 
+// Save appends events to the stream they share, translating revision into
+// the equivalent KurrentDB stream-state expectation: [cqrs.Any] skips the
+// check, [cqrs.NoStream] requires the stream not to exist yet,
+// [cqrs.StreamExists] requires that it already does, and a [cqrs.Revision]
+// requires the stream's current revision to match exactly. All events must
+// have the same StreamID, or Save returns a non-nil error without contacting
+// the server. The append is retried with backoff on transient gRPC errors
+// (such as those from an in-progress leader election), for up to 30 seconds
+// or 10 attempts. On success it returns a [cqrs.AppendResult] whose
+// NextExpectedVersion is the stream's new revision as reported by KurrentDB.
+//
+// TODO: on a revision conflict, the returned cqrs.StreamRevisionConflictError
+// only has its Stream field set — ExpectedRevision and ActualRevision are
+// left as their zero value (a nil cqrs.StreamState). Calling Error() on that
+// value panics with a nil pointer dereference (confirmed), because
+// StreamRevisionConflictError.Error calls ToRawInt64() on both fields. Any
+// caller that logs or formats this error today will crash instead of seeing
+// a conflict message.
 func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
@@ -121,7 +142,11 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	if err != nil {
 		var conflictErr *kurrentdb.StreamRevisionConflictError
 		if errors.As(err, &conflictErr) {
-			//TODO extract the actual revisions..
+			// TODO: extract the actual revisions from conflictErr (the
+			// commented-out fields below). As written, ExpectedRevision and
+			// ActualRevision are left nil, and StreamRevisionConflictError.Error
+			// panics when called on a nil cqrs.StreamState. See the Save doc
+			// comment above.
 			return cqrs.AppendResult{
 					Successful: false,
 					StreamID:   streamID,
@@ -147,6 +172,16 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 
 }
 
+// LoadStream returns a lazy iterator over all events in the stream
+// identified by id, in the order they were appended.
+//
+// TODO: any error opening the read (including a genuine connectivity
+// failure) is currently reported as cqrs.ErrStreamNotFound, and any error
+// received while iterating — including a mid-stream connection drop, not
+// just a clean end of stream — is reported to the iterator as io.EOF, i.e.
+// as if the read had completed successfully. A caller has no way to
+// distinguish "the stream does not exist" or "the read failed partway
+// through" from a normal, complete read.
 func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction:      kurrentdb.Forwards,
@@ -174,7 +209,11 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// Stream finished normally
+			// TODO: this treats every error from Recv (including a real
+			// connection failure, confirmed possible per ReadStream.Recv in
+			// the kurrentdb client) as a normal end of stream, so genuine
+			// failures are silently reported as success. See the doc comment
+			// above.
 			return nil, io.EOF
 		}
 
@@ -210,6 +249,19 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 	return iter, nil
 }
 
+// LoadStreamFrom returns a lazy iterator over the events in the stream
+// identified by id, starting at the position identified by version. Only a
+// positive [cqrs.Revision] changes the starting point; version.ToRawInt64()
+// <= 0 — which includes [cqrs.NoStream], [cqrs.StreamExists], [cqrs.Any],
+// and a zero [cqrs.Revision] — all read from the beginning of the stream.
+// Unlike the memory, file, and postgres implementations of this interface,
+// cqrs.NoStream and cqrs.StreamExists are not enforced as existence
+// preconditions here.
+//
+// TODO: as with LoadStream, every error from Recv while iterating —
+// including a real connection failure — is reported to the iterator as
+// io.EOF, i.e. a normal end of stream, so a caller cannot tell a genuine
+// failure apart from a complete read.
 func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	var from kurrentdb.StreamPosition
 	if version.ToRawInt64() > 0 {
@@ -243,7 +295,8 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// Stream finished normally
+			// TODO: see the LoadStreamFrom doc comment above — this masks
+			// real Recv errors as a normal end of stream.
 			return nil, io.EOF
 		}
 
@@ -279,6 +332,13 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 	return iter, nil
 }
 
+// LoadFromAll returns a lazy iterator over every event across all streams,
+// in the global order KurrentDB stored them.
+//
+// TODO: version is accepted but never used — every call reads from the very
+// beginning of the $all stream regardless of the position passed in, so
+// there is currently no way to resume a previous LoadFromAll from where it
+// left off (already flagged in the code below).
 func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	//TODO fix `from`
 
@@ -301,7 +361,8 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// Stream finished normally
+			// Propagate as-is: io.EOF signals a normal end of stream, any
+			// other error is a genuine failure.
 			return nil, err
 		}
 
@@ -337,11 +398,13 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 	return iter, nil
 }
 
+// Close closes the underlying KurrentDB client connection.
 func (e eventstore) Close() error {
 	return e.client.Close()
 }
 
-// isRetryableError determines if an error should trigger a retry
+// isRetryableError reports whether err is a transient gRPC error worth
+// retrying (as opposed to a permanent failure such as an invalid argument).
 func isRetryableError(err error) bool {
 	s, ok := status.FromError(err)
 	if !ok {

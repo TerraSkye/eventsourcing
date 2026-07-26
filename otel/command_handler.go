@@ -13,10 +13,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// CommandTelemetry returns a CommandHandlerMiddleware that instruments every command
-// dispatched through the bus with OpenTelemetry tracing and metrics.
-// Use with bus.Use() to apply telemetry to all registered handlers.
-// The command type name is resolved at dispatch time from the concrete type.
+// CommandTelemetry returns an [eventsourcing.CommandHandlerMiddleware] that
+// instruments every command dispatched through the bus with OpenTelemetry
+// tracing and metrics. Use it with [eventsourcing.CommandBus.Use] to apply
+// telemetry to all registered handlers; the command type name is resolved at
+// dispatch time from the concrete type.
 func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
@@ -99,42 +100,18 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 	}
 }
 
-// WithCommandTelemetry wraps a CommandHandler with OpenTelemetry tracing and metrics.
+// WithCommandTelemetry wraps next with OpenTelemetry tracing and metrics,
+// returning an [eventsourcing.CommandHandler] of the same type that can be
+// used as a drop-in replacement.
 //
-// This decorator observes the execution of a command handler, producing both
-// tracing spans and metrics that reflect command lifecycle, success/failure,
-// concurrency conflicts, and processing duration.
-//
-// The wrapper performs the following steps for each command execution:
-//  1. Starts a span for the command handling operation, named based on the command type.
-//  2. Attaches base attributes such as command type and aggregate ID.
-//  3. Increments the in-flight command metric before execution and decrements it after completion.
-//  4. Invokes the underlying command handler.
-//  5. Updates span attributes and metrics based on the handler's result:
-//     - Sets the stream ID attribute from the AppendResult.
-//     - Records command duration metric.
-//     - Updates span status (OK or Error).
-//     - Emits metrics for handled commands, failed commands, and concurrency conflicts.
-//
-// Parameters:
-//   - next: The underlying CommandHandler to be wrapped. It must return an AppendResult
-//     containing at least the StreamID and NextExpectedVersion.
-//
-// Returns:
-//   - A CommandHandler of the same type that automatically instruments tracing and metrics.
-//
-// Behavior Details:
-//   - The span is started with SpanKindInternal.
-//   - Base attributes include the command type and aggregate ID; the stream ID is appended after handler execution.
-//   - Metrics recorded:
-//   - CommandsProcessing: increments/decrements in-flight commands.
-//   - CommandsDuration: duration of command handling in seconds.
-//   - CommandsCount: total commands, labelled with eventsourcing.result=success|failure.
-//   - ConcurrencyConflicts: detected StreamRevisionConflictError occurrences.
-//   - Span attributes updated after execution include stream ID and stream version.
-//   - Span status is set to codes.Ok if the command succeeded, or codes.Error if an error occurred.
-//
-// Example Usage:
+// Each call to the returned handler starts a span covering the full
+// invocation of next, tagged with the command type and aggregate ID and, once
+// next returns, with the resulting stream ID and version. It also records
+// [CommandsProcessing] (in-flight commands), [CommandsDuration], and
+// [CommandsCount] labelled by [AttrResult]. A returned
+// [eventsourcing.StreamRevisionConflictError] is additionally counted in
+// [ConcurrencyConflicts]; a returned [eventsourcing.ErrBusinessRuleViolation]
+// is recorded on the span as an expected outcome rather than a span error.
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
 //	result, err := handler(ctx, myCommand)

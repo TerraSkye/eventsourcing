@@ -9,7 +9,6 @@ import (
 
 type ctxKey string
 
-// Define constants for context keys
 const (
 	streamIDKey      ctxKey = "streamID"
 	aggregateIDKey   ctxKey = "aggregateID"
@@ -21,7 +20,10 @@ const (
 	causationIDKey   ctxKey = "causationID"
 )
 
-// WithEnvelope adds the context of the Event to the context
+// WithEnvelope returns a copy of ctx carrying env's stream ID, aggregate ID,
+// event ID, version, global version, occurred-at time, and metadata,
+// retrievable via the *FromContext functions below. It does not carry a
+// causation ID; use [WithCausation] for that.
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = context.WithValue(ctx, streamIDKey, env.StreamID)
 	ctx = context.WithValue(ctx, aggregateIDKey, env.Event.AggregateID())
@@ -33,7 +35,8 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	return ctx
 }
 
-// AggregateIDFromContext returns the AggregateID or "" if not present
+// AggregateIDFromContext returns the aggregate ID set by [WithEnvelope], or
+// "" if ctx carries none.
 func AggregateIDFromContext(ctx context.Context) string {
 	if v := ctx.Value(aggregateIDKey); v != nil {
 		if s, ok := v.(string); ok {
@@ -43,7 +46,8 @@ func AggregateIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// StreamIDFromContext returns the StreamID or "" if not present
+// StreamIDFromContext returns the stream ID set by [WithEnvelope], or "" if
+// ctx carries none.
 func StreamIDFromContext(ctx context.Context) string {
 	if v := ctx.Value(streamIDKey); v != nil {
 		if s, ok := v.(string); ok {
@@ -53,7 +57,8 @@ func StreamIDFromContext(ctx context.Context) string {
 	return ""
 }
 
-// EventIDFromContext returns the EventID or uuid.Nil if not present
+// EventIDFromContext returns the event ID set by [WithEnvelope], or
+// [uuid.Nil] if ctx carries none.
 func EventIDFromContext(ctx context.Context) uuid.UUID {
 	if v := ctx.Value(eventIDKey); v != nil {
 		if id, ok := v.(uuid.UUID); ok {
@@ -63,7 +68,8 @@ func EventIDFromContext(ctx context.Context) uuid.UUID {
 	return uuid.Nil
 }
 
-// VersionFromContext returns the Version or 0 if not present
+// VersionFromContext returns the stream version set by [WithEnvelope], or 0
+// if ctx carries none.
 func VersionFromContext(ctx context.Context) uint64 {
 	if v := ctx.Value(versionKey); v != nil {
 		if ver, ok := v.(uint64); ok {
@@ -73,7 +79,8 @@ func VersionFromContext(ctx context.Context) uint64 {
 	return 0
 }
 
-// VersionFromContext returns the Version or 0 if not present
+// GlobalVersionFromContext returns the global version set by
+// [WithEnvelope], or 0 if ctx carries none.
 func GlobalVersionFromContext(ctx context.Context) uint64 {
 	if v := ctx.Value(globalVersionKey); v != nil {
 		if ver, ok := v.(uint64); ok {
@@ -83,7 +90,8 @@ func GlobalVersionFromContext(ctx context.Context) uint64 {
 	return 0
 }
 
-// OccurredAtFromContext returns OccurredAt or zero time if not present
+// OccurredAtFromContext returns the occurred-at time set by [WithEnvelope],
+// or the zero [time.Time] if ctx carries none.
 func OccurredAtFromContext(ctx context.Context) time.Time {
 	if v := ctx.Value(occurredAtKey); v != nil {
 		if t, ok := v.(time.Time); ok {
@@ -93,7 +101,8 @@ func OccurredAtFromContext(ctx context.Context) time.Time {
 	return time.Time{}
 }
 
-// MetadataFromContext returns Metadata or nil if not present
+// MetadataFromContext returns the metadata set by [WithEnvelope], or nil if
+// ctx carries none.
 func MetadataFromContext(ctx context.Context) map[string]any {
 	if v := ctx.Value(metadataKey); v != nil {
 		if md, ok := v.(map[string]any); ok {
@@ -103,12 +112,16 @@ func MetadataFromContext(ctx context.Context) map[string]any {
 	return nil
 }
 
+// WithCausation returns a copy of ctx carrying causation, the identifier of
+// whatever caused the work now happening under ctx — for example, a
+// command's type name — for handlers to attach to events or log entries.
 func WithCausation(ctx context.Context, causation string) context.Context {
 	ctx = context.WithValue(ctx, causationIDKey, causation)
 	return ctx
 }
 
-// CausationFromContext returns Metadata or nil if not present
+// CausationFromContext returns the causation ID set by [WithCausation], or
+// "" if ctx carries none.
 func CausationFromContext(ctx context.Context) string {
 	if v := ctx.Value(causationIDKey); v != nil {
 		if causation, ok := v.(string); ok {

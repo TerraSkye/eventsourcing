@@ -16,22 +16,11 @@ var (
 	// registryMu protects access to the registry for concurrent operations.
 	registryMu sync.RWMutex
 
-	// RegisterEventByType registers a new Event type using its default type name.
-	//
-	// It provides a reusable pattern for dynamically creating new event instances
-	// by string name. Registration performs the following steps:
-	//   1. Calls the provided factory function to obtain an instance of the event.
-	//   2. Retrieves the type name using EventType().
-	//   3. Registers the factory in the registry keyed by the type name.
-	//
-	// Parameters:
-	//   - fn: A factory function of type func() Event that returns a new instance
-	//     of the event. The factory must not return nil.
-	//
-	// Panics:
-	//   - If the factory function is nil.
-	//   - If the factory returns nil.
-	//   - If an event with the same type name is already registered.
+	// RegisterEventByType registers fn under the type name of the [Event] it
+	// returns, i.e. fn().EventType(). Use this instead of [RegisterEvent]
+	// when you need explicit control over the factory, for example to
+	// inject constructor arguments. It panics if fn is nil, if fn() returns
+	// nil, or if an event is already registered under that name.
 	//
 	// Example Usage:
 	//   RegisterEventByType(func() Event { return &InventoryChanged{} })
@@ -39,20 +28,11 @@ var (
 		registerEventNameDefault(fn().EventType(), fn)
 	}
 
-	// RegisterEventByName registers a new Event type under a custom name.
-	//
-	// This is similar to RegisterEventByType, but allows using a name
-	// that is independent of EventType(). The provided factory function
-	// must return a new instance of the event type each time it is called.
-	//
-	// Parameters:
-	//   - name: The unique name to register the event under.
-	//   - fn: Factory function of type func() Event that returns a new instance.
-	//
-	// Panics:
-	//   - If fn is nil.
-	//   - If fn returns nil.
-	//   - If the name is already registered.
+	// RegisterEventByName registers fn under name, independently of the
+	// event's own EventType() — useful when the name a store has events
+	// persisted under no longer matches the current type name, for example
+	// after a rename. As with [RegisterEventByType], it panics if fn is nil,
+	// if fn() returns nil, or if name is already registered.
 	//
 	// Example Usage:
 	//   RegisterEventByName("CustomEventName", func() Event { return &InventoryChanged{} })
@@ -60,26 +40,17 @@ var (
 		registerEventNameDefault(name, fn)
 	}
 
-	// NewEventByName creates a new instance of a registered Event by its name.
-	//
-	// This function allows dynamic instantiation of events using their string name.
-	// It performs the following steps:
-	//   1. Looks up the factory function in the registry.
-	//   2. Calls the factory to create a new instance.
-	//
-	// Parameters:
-	//   - name: The name of the event to create.
-	//
-	// Returns:
-	//   - Event: A new instance of the registered event.
-	//   - error: Non-nil if the event name is not registered or the factory
-	//     returned nil.
+	// NewEventByName returns a new instance of the [Event] registered under
+	// name, or a non-nil [ErrEventNotRegistered] if no event is registered
+	// under that name.
 	//
 	// Example Usage:
 	//   ev, err := NewEventByName("InventoryChanged")
 	NewEventByName func(name string) (Event, error) = newEventByNameDefault
 
-	// EventNamesFor returns the registered names for a given Event type.
+	// EventNamesFor returns every name event's concrete type is registered
+	// under, regardless of which [RegisterEvent]/[RegisterEventByType]/
+	// [RegisterEventByName] call added each one.
 	EventNamesFor func(event Event) []string = func(event Event) []string {
 		registryMu.RLock()
 		defer registryMu.RUnlock()
@@ -88,34 +59,24 @@ var (
 	}
 )
 
-// eventPtr constrains PT to be a pointer to T that also implements Event.
-//
-// It lets RegisterEvent mint a genuinely new instance via new(T) for each
-// registration, the same way InitialState[T] lets a caller supply a factory
-// for T — except here the factory is derived from the type itself instead
-// of reflect, so no runtime type inspection is needed.
+// eventPtr constrains PT to a pointer to T that implements [Event], letting
+// [RegisterEvent] recover T from PT and mint new(T) itself, rather than
+// storing and replaying the single value the caller passed in.
 type eventPtr[T any] interface {
 	*T
 	Event
 }
 
-// RegisterEvent registers a new Event type using its default type name.
-//
-// Unlike RegisterEventByType and RegisterEventByName, RegisterEvent does not
-// take a factory function. Instead it infers the concrete type T from the
-// pointer passed in and builds its own factory that returns new(T) on every
-// call, so each registration is guaranteed a fresh instance without reflect
-// and without the caller having to write out a closure.
-//
-// Parameters:
-//   - _: A pointer to a zero-value instance of the event, used only to infer
-//     its concrete type. The value itself is discarded.
-//
-// Panics:
-//   - If an event with the same type name is already registered.
+// RegisterEvent registers the concrete event type T — inferred from the
+// pointer passed in, whose value is otherwise discarded — under its default
+// [Event.EventType] name. Each later [NewEventByName] call for that name
+// returns a fresh new(T), so unlike a hand-written closure over a single
+// instance, concurrent or repeated decodes never alias the same value. It
+// panics if an event is already registered under that name.
 //
 // Example Usage:
-//   RegisterEvent(&OrderCreated{})
+//
+//	RegisterEvent(&OrderCreated{})
 func RegisterEvent[T any, PT eventPtr[T]](_ PT) {
 	RegisterEventByType(func() Event {
 		return PT(new(T))

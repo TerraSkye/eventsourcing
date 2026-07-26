@@ -26,9 +26,15 @@ const lockPoolMaxConns = 4
 // schema.sql sends on after every insert into events.
 const notifyChannel = "eventsourcing_events_inserted"
 
-// EventBus is a PostgreSQL-backed event bus that uses polling to deliver events
-// to subscribers. Each subscriber's position is persisted in the event_subscriptions
-// table, allowing subscriptions to resume after a restart.
+// EventBus is a PostgreSQL-backed [cqrs.EventBus] that delivers events by
+// polling, woken promptly by LISTEN/NOTIFY (see NewEventBus). Each
+// subscriber's position is persisted in the event_subscriptions table, so
+// subscriptions resume where they left off after a restart. Delivery is
+// at-least-once and in strict id order: if a handler returns an error other
+// than [cqrs.ErrSkippedEvent], that event and the rest of its batch are
+// retried on the next poll without advancing the subscriber's position (see
+// poll), so a handler that keeps failing blocks that subscriber
+// indefinitely.
 type EventBus struct {
 	pool         *pgxpool.Pool
 	lockPool     *pgxpool.Pool
@@ -44,6 +50,8 @@ type EventBus struct {
 	listenOnce   sync.Once
 }
 
+// subscriber is a single registered handler and its poll state: its
+// options, and a wake channel used to trigger an immediate poll on NOTIFY.
 type subscriber struct {
 	name    string
 	opts    subscriberOptions
@@ -52,12 +60,14 @@ type subscriber struct {
 	wake    chan struct{}
 }
 
+// subscriberOptions accumulates the [cqrs.SubscriberOption] values passed
+// to Subscribe.
 type subscriberOptions struct {
 	filterEvents []string
 	startFrom    *int64
 }
 
-// NewEventBus creates a PostgreSQL-backed EventBus.
+// NewEventBus creates a PostgreSQL-backed [EventBus].
 // pollInterval controls how frequently each subscriber polls for new events
 // as a fallback; in normal operation, LISTEN/NOTIFY wakes subscribers
 // immediately after a commit. A value of a few seconds is reasonable for
@@ -81,7 +91,7 @@ func NewEventBus(pool *pgxpool.Pool, pollInterval time.Duration) *EventBus {
 }
 
 // newLockPool creates a small pool dedicated to poll()'s subscription-locking
-// transaction
+// transaction.
 func newLockPool(pool *pgxpool.Pool) *pgxpool.Pool {
 	cfg := pool.Config().Copy()
 	cfg.MaxConns = lockPoolMaxConns
@@ -99,10 +109,22 @@ func newLockPool(pool *pgxpool.Pool) *pgxpool.Pool {
 	return lockPool
 }
 
+// Use adds middlewares that wrap every handler registered afterward via
+// Subscribe. As required by [cqrs.EventBus], it must be called before
+// Subscribe: middlewares added after a given subscriber is registered do
+// not apply to that subscriber.
 func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 	b.middlewares = append(b.middlewares, middlewares...)
 }
 
+// Subscribe registers handler under name and starts polling for events on
+// its behalf, creating a persisted position record in event_subscriptions
+// if name has not been seen before (see ensureSubscription). By default a
+// subscriber receives every event; pass [WithFilterEvents] to restrict
+// delivery to specific event types, and [WithStartFrom] to control where a
+// brand-new subscription begins. It returns an error if handler is nil, the
+// bus is already closed, or name is already registered. The subscription is
+// removed automatically when ctx is canceled.
 func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("handler cannot be nil")
@@ -150,10 +172,15 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	return nil
 }
 
+// Errors returns the channel on which asynchronous handler and polling
+// errors are delivered, as required by [cqrs.EventBus].
 func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
+// Close stops the LISTEN connection and every subscriber's polling, waits
+// for their goroutines to finish, and closes the Errors channel. Calling
+// Close more than once is a no-op.
 func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -178,6 +205,8 @@ func (b *EventBus) Close() error {
 	return nil
 }
 
+// runSubscriber polls for s on b.pollInterval, or immediately whenever s.wake
+// is signaled by a NOTIFY, until ctx is canceled.
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
@@ -225,7 +254,22 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error 
 	return err
 }
 
-// poll locks the subscription row so that only one instance processes events at a time.
+// poll locks the subscription row so that only one instance processes
+// events for s at a time, then reads events with id greater than the
+// stored position and delivers them to s.handler in id order.
+//
+// The scan only considers events already visible in a fresh MVCC snapshot,
+// filtering out rows whose inserting transaction is still in progress (via
+// pg_snapshot_xmin). This means a slow transaction that has already
+// allocated a lower id delays delivery of every higher id until it commits
+// or rolls back, which keeps poll from ever advancing past that id and
+// permanently skipping it once it does commit.
+//
+// If s.handler returns an error other than [cqrs.ErrSkippedEvent], poll
+// returns without committing, so the position is not advanced and the same
+// batch (including any events already handled successfully earlier in this
+// call) is retried on the next poll.
+//
 // The locking transaction runs on b.lockPool, not b.pool: it is held open for the
 // entire call, including every s.handler.Handle() invocation, and Handle() typically
 // needs its own connection from b.pool. Keeping the two pools separate avoids a
@@ -379,6 +423,8 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// removeSubscriber cancels and unregisters the named subscriber. It is a
+// no-op if name is not registered.
 func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	sub, ok := b.subs[name]
@@ -389,6 +435,8 @@ func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Unlock()
 }
 
+// sendErr sends err on the Errors channel, dropping it if the channel's
+// buffer is full rather than blocking the caller.
 func (b *EventBus) sendErr(err error) {
 	select {
 	case b.errs <- err:
@@ -396,9 +444,11 @@ func (b *EventBus) sendErr(err error) {
 	}
 }
 
-// WithStartFrom sets the global event position from which a new subscription
-// begins consuming. Only applies when no existing record exists in
-// event_subscriptions; established subscriptions resume from their stored position.
+// WithStartFrom returns a [cqrs.SubscriberOption] that sets the global event
+// position from which a new subscription begins consuming. It only applies
+// when name has no existing record in event_subscriptions; an already
+// established subscription resumes from its stored position regardless. It
+// panics if applied to a bus other than this package's [EventBus].
 func WithStartFrom(pos int64) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*subscriberOptions)
@@ -409,8 +459,10 @@ func WithStartFrom(pos int64) cqrs.SubscriberOption {
 	}
 }
 
-// WithFilterEvents restricts the subscriber to only receive events whose
-// event_type matches one of the provided names.
+// WithFilterEvents returns a [cqrs.SubscriberOption] that restricts the
+// subscriber to events whose event_type matches one of types. Without this
+// option, a subscriber receives every event. It panics if applied to a bus
+// other than this package's [EventBus].
 func WithFilterEvents(types []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*subscriberOptions)
