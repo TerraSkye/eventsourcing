@@ -5,14 +5,10 @@ import (
 	"fmt"
 )
 
-// QueryGateway is a typed, callable facade over QueryBus. Call it directly
-// like a function to execute the registered handler for query type T.
-// It also implements QueryHandler[T, R], so it can be passed to decorators
-// such as WithQueryTelemetry or WithQueryLogging.
-//
-// Type Parameters:
-//   - T: The query type implementing Query.
-//   - R: The result type.
+// QueryGateway is a typed, callable facade over a [QueryBus]. Call it
+// directly like a function to execute the handler registered for query type
+// T and result type R. It also implements [QueryHandler], so it can be
+// passed to decorators such as WithQueryTelemetry or WithQueryLogging.
 //
 // Example Usage:
 //
@@ -20,19 +16,20 @@ import (
 //	result, err := gateway(ctx, MyQuery{ID: "42"})
 type QueryGateway[T Query, R any] func(ctx context.Context, qry T) (R, error)
 
-// HandleQuery implements QueryHandler[T, R].
+// HandleQuery implements [QueryHandler] by calling g.
 func (g QueryGateway[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
 	return g(ctx, qry)
 }
 
-// GenericQueryGateway is a backwards-compatible alias for QueryGateway.
+// GenericQueryGateway is a backwards-compatible alias for [QueryGateway].
 //
 // Deprecated: use QueryGateway directly.
 type GenericQueryGateway[T Query, R any] = QueryGateway[T, R]
 
-// NewQueryGateway creates a QueryGateway for a specific query and result type
-// backed by a QueryBus. Creating a gateway registers the (T, R) pair as a
-// requestee, which is checked by bus.Validate() at startup.
+// NewQueryGateway returns a [QueryGateway] for query type T and result type
+// R, backed by bus. It registers the (T, R) pair on bus as a requestee, so
+// that a later call to [QueryBus.Validate] fails if no handler for that pair
+// is ever registered.
 //
 // Example Usage:
 //

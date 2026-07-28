@@ -18,6 +18,11 @@ import (
 
 var _ cqrs.EventStore = (*FilesStore)(nil)
 
+// FilesStore is a file-backed [cqrs.EventStore] intended for tests and local
+// development. Each stream's events are stored as one JSON file per event
+// under a directory named after the stream ID, and a symlink to every event
+// is also kept under an "all" directory to support [FilesStore.LoadFromAll].
+// It is safe for concurrent use.
 type FilesStore struct {
 	baseDir   string
 	mu        sync.Mutex
@@ -25,6 +30,8 @@ type FilesStore struct {
 	globalSeq uint64
 }
 
+// NewFileStore creates a [FilesStore] rooted at dir, creating dir and its
+// "all" subdirectory if they do not already exist.
 func NewFileStore(dir string) (*FilesStore, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "all"), 0o755); err != nil {
 		return nil, err
@@ -39,6 +46,24 @@ func (f *FilesStore) streamDir(id string) string {
 	return filepath.Join(f.baseDir, id)
 }
 
+// Save appends events to the stream they share, enforcing the concurrency
+// check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
+// the stream not to exist yet, [cqrs.StreamExists] requires that it already
+// does, and a [cqrs.Revision] requires the stream's current length to match
+// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. All
+// events must have the same StreamID, or Save returns a non-nil error
+// without appending anything. On success it returns a [cqrs.AppendResult]
+// whose NextExpectedVersion is the stream's new length.
+//
+// TODO: each event is written to a file named after its own Version field
+// (e.g. "0000000002-Foo.json"), but Save never assigns that field itself —
+// unlike the postgres and kurrentdb implementations of this interface, which
+// compute the position server-side. If the caller does not set Version to a
+// value that is unique and sequential within the stream (for example, if it
+// is left at its zero value across a multi-event batch), later events
+// silently overwrite earlier ones on disk and Save still reports success
+// with no error (confirmed: saving 3 events with Version left unset leaves
+// only 1 file, and LoadStream then returns only that 1 event).
 func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true}, nil
@@ -151,18 +176,38 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 }
 
+// LoadStream returns a lazy iterator over all events in the stream
+// identified by id, in the order they were appended. It returns a non-nil
+// error if the stream does not exist.
 func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(f.streamDir(id), cqrs.StreamExists{})
 }
 
+// LoadStreamFrom returns a lazy iterator over the events in the stream
+// identified by id, starting at the position identified by version. A
+// [cqrs.Revision] starts at that index; [cqrs.NoStream] requires the stream
+// not to exist and returns a non-nil error if it does; [cqrs.StreamExists]
+// requires that it does exist and returns a non-nil error if it does not;
+// any other [cqrs.StreamState], including [cqrs.Any], reads from the
+// beginning of the stream. It also returns a non-nil error if the requested
+// revision is beyond the stream's current length.
 func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(f.streamDir(id), version)
 }
 
+// LoadFromAll returns a lazy iterator over every event saved across all
+// streams, ordered by the [cqrs.Envelope] GlobalVersion assigned when each
+// event was appended. version is interpreted the same way as in
+// [FilesStore.LoadStreamFrom], but against the global sequence rather than a
+// single stream.
 func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(filepath.Join(f.baseDir, "all"), version)
 }
 
+// loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
+// and LoadFromAll: it lists dir, applies the precondition or starting offset
+// described by from, and returns a lazy iterator over the decoded events in
+// filename order.
 func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	files, err := os.ReadDir(dir)
 	if err != nil {
@@ -256,15 +301,27 @@ func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Itera
 	return cqrs.NewIteratorFunc(nextFunc), nil
 }
 
+// Events returns a channel that receives every [cqrs.Envelope] as it is
+// saved. It is not part of the [cqrs.EventStore] interface; it exists so
+// tests and local tooling can observe writes as they happen. The channel has
+// a fixed buffer of 100 and sends are non-blocking, so a slow consumer
+// misses events rather than blocking Save. The channel is closed by Close.
 func (f *FilesStore) Events() <-chan *cqrs.Envelope {
 	return f.bus
 }
 
+// Close closes the channel returned by Events. After Close, the FilesStore
+// must not be used again.
+//
+// TODO: this is not idempotent, contrary to the cqrs.EventStore contract,
+// which asks implementations to make Close safe to call more than once — a
+// second call panics with "close of closed channel".
 func (f *FilesStore) Close() error {
 	close(f.bus)
 	return nil
 }
 
+// storedEvent is the on-disk JSON representation of a saved [cqrs.Envelope].
 type storedEvent struct {
 	EventID       uuid.UUID       `json:"event_id"`
 	StreamID      string          `json:"stream_id"`

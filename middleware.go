@@ -77,8 +77,14 @@ func (b *CommandBus) Use(middlewares ...CommandHandlerMiddleware) {
 //	bus.Use(myMiddleware)
 type QueryHandlerMiddleware func(next QueryGateway[Query, any]) QueryGateway[Query, any]
 
-// Use adds one or more middlewares to the QueryBus.
-// Must be called before RegisterQueryHandler; middleware is baked in at registration time.
+// Use appends middlewares to the chain applied to query handlers. The first
+// one appended is the outermost wrapper and runs first on each query.
+//
+// Use must be called before [RegisterQueryHandler] or
+// [RegisterQueryHandlerFunc]: the chain is baked into each handler at
+// registration time, so handlers already registered are not re-wrapped and a
+// later Use call has no effect on them. Configure the full chain during
+// startup wiring.
 //
 // Example Usage:
 //
@@ -121,19 +127,13 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 	})
 }
 
-// EventHandlerMiddleware defines a function type for decorating event handlers on an EventBus.
-// Middlewares are applied when a handler is passed to Subscribe, wrapping it with
-// cross-cutting concerns such as logging, telemetry, or error handling.
-//
-// Parameters:
-//   - next: The next EventHandler in the chain. Call it to pass the event to the
-//     following middleware or the final registered handler.
-//
-// Returns:
-//   - A wrapped EventHandler that intercepts event handling.
-//
-// Notes:
-//   - The first middleware passed to Use() is the outermost wrapper and executes first for each event.
+// EventHandlerMiddleware decorates an event handler on an [EventBus] with a
+// cross-cutting concern such as logging, telemetry, or error handling. It
+// receives the next handler in the chain and returns a handler that wraps
+// it; call next to pass the event along, or return without calling it to
+// short-circuit. Middleware is applied when a handler is passed to
+// [EventBus.Subscribe], and the first middleware passed to
+// [EventBus.Use] is the outermost wrapper and runs first for each event.
 //
 // Example Usage:
 //
@@ -147,18 +147,11 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 //	}
 type EventHandlerMiddleware func(next EventHandler) EventHandler
 
-// EventStoreMiddleware defines a function type for decorating an EventStore.
-// Apply one by wrapping a store directly: store = mw(store).
-//
-// Parameters:
-//   - next: The next EventStore in the chain. Delegate calls to it to preserve the
-//     original store's behaviour.
-//
-// Returns:
-//   - A decorated EventStore that intercepts one or more store operations.
-//
-// Notes:
-//   - A common implementation embeds EventStore and overrides only the methods of interest.
+// EventStoreMiddleware decorates an [EventStore], typically to intercept one
+// or more of its methods while delegating the rest to next. Apply one by
+// wrapping a store directly: store = mw(store). A common implementation
+// embeds EventStore for the pass-through methods and overrides only the
+// ones of interest.
 //
 // Example Usage:
 //

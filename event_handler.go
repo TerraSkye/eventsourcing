@@ -6,32 +6,17 @@ import (
 	"sort"
 )
 
-// EventHandler represents a generic event handler that can handle an Event.
+// EventHandler processes events delivered by an [EventBus] or
+// [EventGroupProcessor].
 type EventHandler interface {
-	// Handle processes the given Event within the provided context.
+	// Handle processes event within ctx.
 	Handle(ctx context.Context, event Event) error
 }
 
-// NewEventHandlerFunc creates an EventHandler from a plain function.
-//
-// This is a helper for quickly creating an EventHandler without defining
-// a separate struct. It wraps the provided function and implements
-// the EventHandler interface, allowing it to be used wherever an
-// EventHandler is required, such as in an EventHandlerGroup.
-//
-// Parameters:
-//   - fn: A function with signature func(ctx context.Context, ev Event) error.
-//     This function will be called whenever the EventHandler receives an event.
-//
-// Returns:
-//   - EventHandler: an implementation of the EventHandler interface
-//     that delegates event handling to the provided function.
-//
-// Behavior Details:
-//   - The provided function is called for every event passed to the EventHandler.
-//   - There is no type-checking or filtering: the handler will receive all events
-//     that it is invoked with. If you need type safety, use OnEvent[T] instead.
-//   - Any error returned by the function is propagated directly to the caller.
+// NewEventHandlerFunc returns fn as an [EventHandler], for quickly wrapping
+// a function without defining a separate type. fn is called for every event
+// it is invoked with, unfiltered by type; use [OnEvent] instead if you only
+// want to handle one concrete event type.
 //
 // Example Usage:
 //
@@ -54,11 +39,14 @@ func (h eventHandlerFunc) Handle(ctx context.Context, event Event) error {
 	return h(ctx, event)
 }
 
-// typedEventHandler is a strongly typed event handler for a specific Event type T.
+// typedEventHandler is an [EventHandler] for one specific Event type T,
+// keyed for [EventGroupProcessor] routing by T's package-qualified type
+// name (the same %T-derived form [EventNamesFor] keys its internal
+// type-to-name lookup by).
 type typedEventHandler[T Event] func(ctx context.Context, ev T) error
 
-// EventName returns the name of the event type T.
-// It is used internally by eventGroupProcessor for routing.
+// EventName returns T's package-qualified type name, used as the routing
+// key by [EventGroupProcessor].
 func (h typedEventHandler[T]) EventName() string {
 	var zero T
 	return fmt.Sprintf("%T", zero)
@@ -70,37 +58,20 @@ func (h typedEventHandler[T]) EventInstance() Event {
 	return zero
 }
 
-// Handle processes the event if it matches the type T.
-// Returns ErrSkippedEvent if the event is of the wrong type.
+// Handle calls h with event if it has type T, or returns [ErrSkippedEvent]
+// otherwise.
 func (h typedEventHandler[T]) Handle(ctx context.Context, event Event) error {
 	ev, ok := event.(T)
 	if !ok {
-		// Return sentinel error instead of voiding it
 		return &ErrSkippedEvent{Event: event}
 	}
 	return h(ctx, ev)
 }
 
-// OnEvent creates a strongly-typed EventHandler for a specific event type.
-//
-// It provides a reusable pattern for handling events in a type-safe manner
-// by performing the following steps:
-//  1. Wraps a user-provided function `fn(ctx, ev T)` into a typed handler.
-//  2. Associates the handler with the type name of T for internal routing.
-//  3. Returns an EventHandler that can be registered in an eventGroupProcessor.
-//
-// Parameters:
-//   - fn: A function with signature func(ctx context.Context, ev T) error,
-//     where T implements the Event interface.
-//
-// Returns:
-//   - EventHandler: a strongly-typed handler for events of type T.
-//
-// Behavior Details:
-//   - When called via eventGroupProcessor.Handle, the handler will only receive
-//     events of type T. If a different event type is passed, it returns
-//     ErrSkippedEvent.
-//   - EventName() internally derives the type name of T using TypeName[T].
+// OnEvent returns fn as an [EventHandler] that only processes events of
+// type T, returning [ErrSkippedEvent] for any other type. It is meant to be
+// registered with an [EventGroupProcessor], which uses T's type name to
+// route only matching events to it.
 //
 // Example Usage:
 //
@@ -114,31 +85,17 @@ func OnEvent[T Event](fn func(ctx context.Context, ev T) error) EventHandler {
 	return typedEventHandler[T](fn)
 }
 
-// EventGroupProcessor is a collection of typed event handlers.
-// It routes incoming events to the correct handler based on event type.
+// EventGroupProcessor routes each incoming event to the [EventHandler]
+// registered for its concrete type, typically one built with [OnEvent].
 type EventGroupProcessor struct {
 	handlers map[string]EventHandler // key = EventName()
 }
 
-// NewEventGroupProcessor creates a group of typed event handlers.
-//
-// It provides a reusable pattern for routing events to the correct handler
-// by performing the following steps:
-//  1. Accepts a list of typed EventHandler instances (created via OnEvent).
-//  2. Validates that all handlers implement EventName().
-//  3. Builds an internal map from EventName() to EventHandler for fast routing.
-//  4. Panics if duplicate handlers are provided for the same event type.
-//
-// Parameters:
-//   - handlers: A variadic list of typed EventHandler instances.
-//
-// Returns:
-//   - *eventGroupProcessor: a processor that routes events to the appropriate handler.
-//
-// Behavior Details:
-//   - Events are dispatched based on the EventName() returned by the handler.
-//   - If no handler exists for an event, Handle returns ErrSkippedEvent.
-//   - StreamFilter() returns the sorted list of event names handled by the group.
+// NewEventGroupProcessor builds an [EventGroupProcessor] from handlers,
+// which must each implement an internal EventName() string method — as the
+// handlers returned by [OnEvent] do — used as the routing key. It panics if
+// a handler doesn't implement that method, or if two handlers report the
+// same EventName().
 //
 // Example Usage:
 //
@@ -170,8 +127,8 @@ func NewEventGroupProcessor(handlers ...EventHandler) *EventGroupProcessor {
 	}
 }
 
-// Handle routes the given event to the correct typed handler.
-// Returns ErrSkippedEvent if no handler exists for the event type.
+// Handle routes ev to the handler registered for its concrete type, or
+// returns [ErrSkippedEvent] if none is registered.
 func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	name := fmt.Sprintf("%T", ev)
 	h, ok := p.handlers[name]
@@ -182,8 +139,10 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	return h.Handle(ctx, ev)
 }
 
-// StreamFilter returns a sorted list of all event names handled by this group.
-// Useful for subscribing to streams or listing registered handlers.
+// StreamFilter returns the sorted, registered names (see [EventNamesFor])
+// of every event type this group has a handler for — useful, for example,
+// as the filter passed to [EventBus.Subscribe] via a filtering
+// [SubscriberOption].
 func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
 	for _, h := range p.handlers {

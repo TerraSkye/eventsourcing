@@ -8,36 +8,35 @@ import (
 	"sync"
 )
 
+// Dispatcher has the same signature as [CommandBus.Dispatch], for code that
+// wants to depend on the dispatch behavior without depending on *CommandBus
+// itself.
 type Dispatcher interface {
 	Dispatch(ctx context.Context, cmd Command) (AppendResult, error)
 }
 
-// queuedCommand represents a command enqueued in the command bus for processing.
-// Each queuedCommand includes the context for cancellation, the command itself,
-// and a response channel to return the processing result.
+// queuedCommand is a command enqueued on a [CommandBus] shard, carrying the
+// context to honor for cancellation and the channel to deliver the result on.
 type queuedCommand struct {
 	Ctx        context.Context
 	Command    Command
 	ResponseCh chan<- commandResult
 }
 
-// commandResult represents the result of processing a command.
-// It contains the AppendResult (success/failure metadata) and any error
-// encountered during command handling.
+// commandResult is the outcome of processing a queuedCommand: the resulting
+// [AppendResult] and any error from the handler.
 type commandResult struct {
 	Result AppendResult
 	Err    error
 }
 
-// CommandBus is an internal, in-memory, type-safe command dispatcher.
-// It maintains a mapping of command type names to their handlers, a queues for
-// incoming commands, and synchronization mechanisms for safe concurrent access.
-//
-// The CommandBus supports:
-//   - Enqueuing commands for asynchronous processing
-//   - Typed command registration using generics
-//   - Safe shutdown that waits for in-flight commands to complete
-//   - Panic recovery in handlers to prevent the bus from crashing
+// CommandBus is an in-memory, type-safe command dispatcher. It keeps a
+// registry of command type names to handlers, sharded queues of incoming
+// commands, and the synchronization needed for concurrent [Dispatch] and
+// [Register] calls. Commands for a given aggregate are always routed to the
+// same shard and processed one at a time, [Stop] waits for in-flight
+// dispatches to finish, and a handler panic is recovered rather than
+// crashing the bus.
 type CommandBus struct {
 	handlers    map[string]CommandHandler[Command]
 	queues      []chan queuedCommand
@@ -49,18 +48,13 @@ type CommandBus struct {
 	middlewares []CommandHandlerMiddleware
 }
 
-// NewCommandBus creates a new instance of CommandBus with a buffered queues.
-//
-// Parameters:
-//   - bufferSize: the size of the internal queues for enqueued commands.
-//
-// Returns:
-//   - pointer to a newly initialized CommandBus. The internal processing
-//     goroutine is started automatically.
+// NewCommandBus returns a [CommandBus] with shardCount shards, each with a
+// worker goroutine already running and a queue buffering up to bufferSize
+// commands. shardCount is clamped to at least 1.
 //
 // Example:
 //
-//	bus := NewCommandBus(100)
+//	bus := NewCommandBus(100, 4)
 func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 
 	if shardCount <= 0 {
@@ -136,7 +130,7 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	}
 }
 
-// worker processes commands from a single shard queues.
+// worker processes commands from a single shard's queue.
 func (b *CommandBus) worker(queue chan queuedCommand) {
 
 	for {

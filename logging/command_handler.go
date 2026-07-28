@@ -8,9 +8,10 @@ import (
 	"github.com/terraskye/eventsourcing"
 )
 
-// WithCommandLogging wraps a CommandHandler with logging functionality.
-// It logs the command type and aggregate ID before execution, and logs
-// errors if the command fails.
+// WithCommandLogging wraps next so that every invocation is logged. Before
+// calling next it logs the command's concrete type and
+// [eventsourcing.Command.AggregateID]; if next returns an error, that error is
+// logged as well.
 func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next eventsourcing.CommandHandler[C]) eventsourcing.CommandHandler[C] {
 
 	return func(ctx context.Context, command C) (eventsourcing.AppendResult, error) {
@@ -26,8 +27,10 @@ func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next event
 	}
 }
 
-// CommandLogging returns a CommandHandlerMiddleware that logs every command dispatched
-// through the bus. Use with bus.Use() to apply logging to all registered handlers.
+// CommandLogging returns an [eventsourcing.CommandHandlerMiddleware] that logs
+// every command dispatched through a [eventsourcing.CommandBus]: its type and
+// aggregate ID before it runs, and any error it returns. Register it with
+// [eventsourcing.CommandBus.Use] to apply logging to all handlers on the bus.
 func CommandLogging(logger *slog.Logger) eventsourcing.CommandHandlerMiddleware {
 	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
 		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {

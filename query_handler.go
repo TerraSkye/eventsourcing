@@ -4,18 +4,17 @@ import (
 	"context"
 )
 
-// Query is the interface that must be implemented by any type to be considered a query.
+// Query is implemented by any type that can be handled by a [QueryHandler].
 type Query interface {
+	// ID returns an identifier for this query occurrence, for example for
+	// correlation in logs or traces.
 	ID() []byte
 }
 
-// QueryHandler represents a handler for a specific query type T and
-// produces a result of type R. This interface allows generic, type-safe
-// registration and execution of query logic.
-//
-// Type Parameters:
-//   - T: The query type implementing Query.
-//   - R: The return type, either a single ReadModel or an Iterator.
+// QueryHandler handles queries of the concrete type T, which must implement
+// [Query], and produces a result of type R — typically a read model or an
+// [Iterator] over one. It enables generic, type-safe registration and
+// execution of query logic through a [QueryBus].
 //
 // Example Usage:
 //
@@ -31,14 +30,8 @@ type QueryHandler[T Query, R any] interface {
 	HandleQuery(ctx context.Context, qry T) (R, error)
 }
 
-// queryHandlerFunc is a helper type to allow ordinary functions to
-// implement QueryHandler[T,R].
-//
-// Example Usage:
-//
-//	handler := NewQueryHandlerFunc(func(ctx context.Context, q MyQuery) (*MyResult, error) {
-//	    return &MyResult{Value: 42}, nil
-//	})
+// queryHandlerFunc adapts an ordinary function to implement
+// QueryHandler[T, R].
 type queryHandlerFunc[T Query, R any] func(ctx context.Context, qry T) (R, error)
 
 // HandleQuery calls the underlying function.
@@ -46,13 +39,7 @@ func (f queryHandlerFunc[T, R]) HandleQuery(ctx context.Context, qry T) (R, erro
 	return f(ctx, qry)
 }
 
-// NewQueryHandlerFunc creates a QueryHandler from a function.
-//
-// Parameters:
-//   - fn: The function to wrap as a QueryHandler.
-//
-// Returns:
-//   - QueryHandler[T,R]: A handler that implements QueryHandler interface.
+// NewQueryHandlerFunc returns fn as a [QueryHandler].
 //
 // Example Usage:
 //

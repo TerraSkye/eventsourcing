@@ -10,6 +10,9 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
+// subscriber is a single registered handler and its per-handler delivery
+// state: an event-type filter and a buffered channel served by its own
+// worker goroutine.
 type subscriber struct {
 	name    string
 	handler cqrs.EventHandler
@@ -18,10 +21,15 @@ type subscriber struct {
 	cancel  context.CancelFunc
 }
 
+// filter holds the event-type allowlist configured via [WithFilterEvents].
 type filter struct {
 	events []string
 }
 
+// EventBus is an in-memory [cqrs.EventBus]. It delivers events to
+// subscribers within the process, using one buffered channel and worker
+// goroutine per subscriber; it does not persist events, so nothing is
+// replayed across process restarts.
 type EventBus struct {
 	mu          sync.RWMutex
 	subs        map[string]*subscriber
@@ -32,7 +40,9 @@ type EventBus struct {
 	middlewares []cqrs.EventHandlerMiddleware
 }
 
-// NewEventBus constructs a new bus with a given subscriber buffer size.
+// NewEventBus constructs an [EventBus] whose subscribers each buffer up to
+// bufferSize undelivered events. Once a subscriber's buffer is full,
+// Dispatch blocks until that subscriber's handler drains it.
 func NewEventBus(bufferSize int) *EventBus {
 	return &EventBus{
 		subs:       make(map[string]*subscriber),
@@ -41,11 +51,19 @@ func NewEventBus(bufferSize int) *EventBus {
 	}
 }
 
+// Use adds middlewares that wrap every handler registered afterward via
+// Subscribe. As required by [cqrs.EventBus], it must be called before
+// Subscribe: middlewares added after a given subscriber is registered do
+// not apply to that subscriber.
 func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 	b.middlewares = append(b.middlewares, middlewares...)
 }
 
-// Subscribe registers a handler with a filter and name.
+// Subscribe registers handler under name to receive dispatched events. By
+// default a subscriber receives every event; pass [WithFilterEvents] to
+// restrict delivery to specific event types. It returns an error if handler
+// is nil, the bus is already closed, or name is already registered. The
+// subscription is removed automatically when ctx is canceled.
 func (b *EventBus) Subscribe(
 	ctx context.Context,
 	name string,
@@ -103,11 +121,15 @@ func (b *EventBus) Subscribe(
 	return nil
 }
 
+// Errors returns the channel on which asynchronous handler errors are
+// delivered, as required by [cqrs.EventBus].
 func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
-// Close shuts down the bus and waits for all workers.
+// Close cancels every subscriber and waits for their worker goroutines to
+// finish before closing the Errors channel. Calling Close more than once is
+// a no-op.
 func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -133,7 +155,8 @@ func (b *EventBus) Close() error {
 	return nil
 }
 
-// runSubscriber processes events for a single handler.
+// runSubscriber delivers events from s.events to s.handler until ctx is
+// canceled or s.events is closed by Close or removeSubscriber.
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
@@ -159,6 +182,8 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	}
 }
 
+// removeSubscriber cancels and unregisters the named subscriber. It is a
+// no-op if name is not registered.
 func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	s, ok := b.subs[name]
@@ -173,7 +198,13 @@ func (b *EventBus) removeSubscriber(name string) {
 	close(s.events)
 }
 
-// Dispatch sends an event to all matching subscribers.
+// Dispatch delivers ev to every subscriber whose event-type filter matches
+// it (see [WithFilterEvents]), or to every subscriber if none configured a
+// filter. Each subscriber's handler sees events in the order Dispatch
+// delivered them, on that subscriber's own goroutine, but Dispatch itself
+// blocks until ev is queued for every matching subscriber — a subscriber
+// whose buffer is full therefore delays the caller until its handler
+// catches up. Dispatch is a no-op once the bus has been closed.
 func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -191,6 +222,10 @@ func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	}
 }
 
+// WithFilterEvents returns a [cqrs.SubscriberOption] that restricts delivery
+// to events whose [cqrs.Event.EventType] matches one of filteredEvents.
+// Without this option, a subscriber receives every dispatched event. It
+// panics if applied to a bus other than this package's [EventBus].
 func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*filter)

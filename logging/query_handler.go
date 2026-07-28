@@ -8,11 +8,15 @@ import (
 	"github.com/terraskye/eventsourcing"
 )
 
+// queryHandlerLogger wraps an [eventsourcing.QueryHandler] with logging.
 type queryHandlerLogger[T eventsourcing.Query, R any] struct {
 	logger *slog.Logger
 	next   eventsourcing.QueryHandler[T, R]
 }
 
+// HandleQuery implements [eventsourcing.QueryHandler] by logging the query's
+// concrete type before delegating to the wrapped handler, and logging the
+// error if that call fails.
 func (q *queryHandlerLogger[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
 	qryType := fmt.Sprintf("%T", qry)
 	q.logger.InfoContext(ctx, "Query", "query", qryType)
@@ -25,8 +29,8 @@ func (q *queryHandlerLogger[T, R]) HandleQuery(ctx context.Context, qry T) (R, e
 	return result, err
 }
 
-// WithQueryLogging wraps a QueryHandler with logging functionality.
-// It logs the query type before execution, and logs errors if the query fails.
+// WithQueryLogging wraps next so that every query it handles is logged: its
+// concrete type before the call, and the error if the call fails.
 func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next eventsourcing.QueryHandler[T, R]) eventsourcing.QueryHandler[T, R] {
 	return &queryHandlerLogger[T, R]{
 		logger: logger,
@@ -34,8 +38,10 @@ func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next ev
 	}
 }
 
-// QueryLogging returns a QueryHandlerMiddleware that logs every query dispatched
-// through the bus. Use with bus.Use() to apply logging to all registered handlers.
+// QueryLogging returns an [eventsourcing.QueryHandlerMiddleware] that logs
+// every query dispatched through a [eventsourcing.QueryBus]: its type before
+// it runs, and any error it returns. Register it with
+// [eventsourcing.QueryBus.Use] to apply logging to all handlers on the bus.
 func QueryLogging(logger *slog.Logger) eventsourcing.QueryHandlerMiddleware {
 	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
 		return func(ctx context.Context, qry eventsourcing.Query) (any, error) {

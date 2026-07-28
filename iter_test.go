@@ -3,11 +3,39 @@ package eventsourcing_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
 	cqrs "github.com/terraskye/eventsourcing"
 )
+
+func ExampleNewIteratorFunc() {
+	items := []int{1, 2, 3, 4, 5}
+	i := 0
+
+	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (int, error) {
+		if i >= len(items) {
+			return 0, io.EOF
+		}
+		val := items[i]
+		i++
+		return val, nil
+	})
+
+	for iter.Next(context.Background()) {
+		fmt.Println(iter.Value())
+	}
+	if err := iter.Err(); err != nil {
+		panic(err)
+	}
+	// Output:
+	// 1
+	// 2
+	// 3
+	// 4
+	// 5
+}
 
 func TestIteratorBasic(t *testing.T) {
 	items := []int{1, 2, 3}

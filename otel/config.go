@@ -6,26 +6,29 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-// config holds the options for tracing an endpoint.
+// config holds the telemetry options for a single wrapped endpoint, built up
+// from the [Option] values passed to a constructor such as
+// [WithCommandTelemetry] or [WithEventStoreTelemetry].
 type config struct {
-	// Operation identifies the current operation and serves as a span name.
+	// Operation is the default span name for the endpoint.
 	Operation string
 
-	// GetOperation is an optional function that can set the span name based on the existing operation
-	// for the endpoint and information in the context.
-	//
-	// If the function is nil, or the returned operation is empty, the existing operation for the endpoint is used.
+	// GetOperation, if non-nil, derives the span name from the context and
+	// the existing operation name. If it returns an empty string, the
+	// existing operation name is used instead.
 	GetOperation func(ctx context.Context, operation string) string
 
-	// Attributes holds the default attributes for each span created by this middleware.
+	// Attributes are added to every span created for the endpoint.
 	Attributes []attribute.KeyValue
 
-	// GetAttributes is an optional function that can extract trace attributes
-	// from the context and add them to the span.
+	// GetAttributes, if non-nil, is called for each span to derive
+	// additional attributes from the context.
 	GetAttributes func(ctx context.Context) []attribute.KeyValue
 }
 
-// Option configures an EndpointMiddleware.
+// Option configures the telemetry behavior of a wrapper such as
+// [WithCommandTelemetry], [WithQueryTelemetry], [WithEventBusTelemetry], or
+// [WithEventStoreTelemetry].
 type Option interface {
 	apply(*config)
 }
@@ -36,29 +39,32 @@ func (o optionFunc) apply(c *config) {
 	o(c)
 }
 
-// WithOperation sets an operation name for an endpoint.
-// Use this when you register a middleware for each endpoint.
+// WithOperation sets a fixed span name for the wrapped endpoint, overriding
+// the package's default naming.
 func WithOperation(operation string) Option {
 	return optionFunc(func(o *config) {
 		o.Operation = operation
 	})
 }
 
-// WithOperationGetter sets an operation name getter function in config.
+// WithOperationGetter sets a function that derives the span name at call
+// time from the context and the endpoint's current operation name.
 func WithOperationGetter(fn func(ctx context.Context, name string) string) Option {
 	return optionFunc(func(o *config) {
 		o.GetOperation = fn
 	})
 }
 
-// WithAttributes sets the default attributes for the spans created by the Endpoint tracer.
+// WithAttributes sets attributes to add to every span created by the
+// wrapped endpoint.
 func WithAttributes(attrs ...attribute.KeyValue) Option {
 	return optionFunc(func(o *config) {
 		o.Attributes = attrs
 	})
 }
 
-// WithAttributeGetter extracts additional attributes from the context.
+// WithAttributeGetter sets a function that derives additional span
+// attributes from the context at call time.
 func WithAttributeGetter(fn func(ctx context.Context) []attribute.KeyValue) Option {
 	return optionFunc(func(o *config) {
 		o.GetAttributes = fn

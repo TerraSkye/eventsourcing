@@ -14,6 +14,12 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
+// EventBus is a KurrentDB-backed [cqrs.EventBus]. Each subscriber is backed
+// by a persistent subscription to $all: Subscribe creates the subscription
+// if it does not already exist and then consumes it with automatic
+// reconnect and retry. Delivery is at-least-once: an event is acknowledged
+// to KurrentDB only after the handler returns nil or [cqrs.ErrSkippedEvent],
+// so a handler error leaves the event pending for redelivery.
 type EventBus struct {
 	db          *kurrentdb.Client
 	subs        map[string]*subscriber
@@ -25,6 +31,8 @@ type EventBus struct {
 	middlewares []cqrs.EventHandlerMiddleware
 }
 
+// subscriber is a single registered handler together with the persistent
+// subscription options it was created with.
 type subscriber struct {
 	name    string
 	opt     kurrentdb.SubscribeToPersistentSubscriptionOptions
@@ -33,7 +41,13 @@ type subscriber struct {
 	cancel  context.CancelFunc
 }
 
-// NewEventBus creates a KurrentDB-backed event bus
+// NewEventBus creates a KurrentDB-backed [EventBus] using db as the
+// underlying client.
+//
+// TODO: the buffer parameter is stored but never read anywhere in this
+// package — there is no internal channel it sizes. Either wire it up (e.g.
+// to size a delivery buffer) or remove it; as written it is dead
+// configuration that misleads callers into thinking it affects behavior.
 func NewEventBus(db *kurrentdb.Client, buffer uint64) *EventBus {
 	return &EventBus{
 		db:     db,
@@ -43,10 +57,23 @@ func NewEventBus(db *kurrentdb.Client, buffer uint64) *EventBus {
 	}
 }
 
+// Use adds middlewares that wrap every handler registered afterward via
+// Subscribe. As required by [cqrs.EventBus], it must be called before
+// Subscribe: middlewares added after a given subscriber is registered do
+// not apply to that subscriber.
 func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 	b.middlewares = append(b.middlewares, middlewares...)
 }
 
+// Subscribe registers handler under name as the consumer of a persistent
+// subscription to $all called name, creating that subscription first if it
+// does not already exist (see EnsurePersistentSubscription). Options such
+// as WithStartAtZero, WithStartAt, WithFilterEvents, and WithFilterStream
+// configure the subscription at creation time only; they have no effect on
+// a subscription that already exists in KurrentDB. It returns an error if
+// handler is nil, the bus is already closed, name is already registered, or
+// the subscription could not be ensured. The subscription is removed from
+// the bus automatically when ctx is canceled.
 func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
@@ -99,6 +126,18 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	return nil
 }
 
+// EnsurePersistentSubscription creates the persistent subscription to $all
+// called name, using opt, if it does not already exist. If a subscription
+// by that name already exists, it is left untouched.
+//
+// TODO: if GetPersistentSubscriptionInfoToAll fails with anything other
+// than kurrentdb.ErrorCodeResourceNotFound — including errors that aren't a
+// *kurrentdb.Error at all, e.g. a network failure — this function silently
+// returns nil instead of propagating the error or creating the
+// subscription. Subscribe then proceeds as if the subscription were ready,
+// so the real failure only surfaces later (if at all) as an async error
+// from the persistent-subscription stream. Consider returning err in the
+// non-not-found cases instead of swallowing it.
 func (b *EventBus) EnsurePersistentSubscription(ctx context.Context, name string, opt kurrentdb.PersistentAllSubscriptionOptions) error {
 
 	var kurrentErr *kurrentdb.Error
@@ -124,6 +163,12 @@ func (b *EventBus) EnsurePersistentSubscription(ctx context.Context, name string
 	return nil
 }
 
+// runSubscriber runs s's persistent subscription with exponential-backoff
+// reconnect on failure, up to 100 attempts. If the subscription still
+// cannot be established after those attempts, it sends a final error on
+// Errors() and returns, permanently stopping delivery for s; s's name
+// remains registered until its context is canceled or the bus is closed, so
+// it cannot be re-subscribed under the same name in the meantime.
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
@@ -155,6 +200,13 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	}
 }
 
+// runSubscription reads from s's persistent subscription until ctx is
+// canceled or the subscription is dropped, decoding each event, dispatching
+// it to s.handler, and acknowledging it to KurrentDB unless the handler
+// returns an error other than [cqrs.ErrSkippedEvent] (in which case it is
+// left unacknowledged for redelivery). It returns a non-nil error whenever
+// the subscription ends for a reason other than ctx being canceled, so the
+// caller can decide to reconnect.
 func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 	stream, err := b.db.SubscribeToPersistentSubscriptionToAll(ctx, s.name, s.opt)
 	if err != nil {
@@ -249,6 +301,8 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 	}
 }
 
+// removeSubscriber cancels and unregisters the named subscriber. It is a
+// no-op if name is not registered.
 func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	sub, ok := b.subs[name]
@@ -259,10 +313,15 @@ func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Unlock()
 }
 
+// Errors returns the channel on which asynchronous handler and subscription
+// errors are delivered, as required by [cqrs.EventBus].
 func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
+// Close cancels every subscriber and waits for their worker goroutines to
+// finish before closing the Errors channel. Calling Close more than once is
+// a no-op.
 func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
@@ -282,6 +341,10 @@ func (b *EventBus) Close() error {
 	return nil
 }
 
+// WithStartAtZero returns a [cqrs.SubscriberOption] that starts a newly
+// created persistent subscription from the beginning of $all. It has no
+// effect on a subscription that already exists in KurrentDB, and it panics
+// if applied to a bus other than this package's [EventBus].
 func WithStartAtZero() cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
@@ -292,6 +355,10 @@ func WithStartAtZero() cqrs.SubscriberOption {
 	}
 }
 
+// WithStartAt returns a [cqrs.SubscriberOption] that starts a newly created
+// persistent subscription from the given commit/prepare position in $all.
+// It has no effect on a subscription that already exists in KurrentDB, and
+// it panics if applied to a bus other than this package's [EventBus].
 func WithStartAt(revision uint64) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
@@ -305,6 +372,15 @@ func WithStartAt(revision uint64) cqrs.SubscriberOption {
 	}
 }
 
+// WithFilterEvents returns a [cqrs.SubscriberOption] that configures a
+// newly created persistent subscription's server-side filter to include
+// only events whose KurrentDB event type is one of filteredEvents. It has
+// no effect on a subscription that already exists in KurrentDB. Since a
+// persistent subscription has a single filter, combine all desired names
+// into one call rather than calling this more than once: applying it
+// together with WithFilterStream, or applying either more than once, means
+// only the last one applied takes effect. It panics if applied to a bus
+// other than this package's [EventBus].
 func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
@@ -318,6 +394,12 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	}
 }
 
+// WithFilterStream returns a [cqrs.SubscriberOption] that configures a
+// newly created persistent subscription's server-side filter to include
+// only streams whose name starts with one of streams. It has no effect on
+// a subscription that already exists in KurrentDB, and — as with
+// WithFilterEvents — only the last filter option applied takes effect. It
+// panics if applied to a bus other than this package's [EventBus].
 func WithFilterStream(streams []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)

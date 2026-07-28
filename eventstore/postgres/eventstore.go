@@ -20,16 +20,33 @@ const pgUniqueViolation = "23505"
 
 var _ cqrs.EventStore = (*eventstore)(nil)
 
+// eventstore is a PostgreSQL-backed [cqrs.EventStore]. Stream membership and
+// per-stream ordering are recorded in the events table's stream_id and
+// stream_position columns; the table's own auto-incrementing id column
+// provides the global order consumed by LoadFromAll.
 type eventstore struct {
 	pool *pgxpool.Pool
 }
 
-// NewEventStore returns a PostgreSQL-backed EventStore.
-// The pool must be configured to connect to a database containing the events table.
+// NewEventStore returns a PostgreSQL-backed [cqrs.EventStore]. The pool must
+// already be configured to connect to a database containing the events
+// table; NewEventStore does not create or migrate the schema.
 func NewEventStore(pool *pgxpool.Pool) cqrs.EventStore {
 	return &eventstore{pool: pool}
 }
 
+// Save appends events to the stream they share, enforcing the concurrency
+// check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
+// the stream not to exist yet, [cqrs.StreamExists] requires that it already
+// does, and a [cqrs.Revision] requires the stream's current length to match
+// exactly. All events must have the same StreamID, or Save returns a
+// non-nil error without appending anything. The whole append happens inside
+// a transaction serialized against other writers to the same stream by a
+// Postgres advisory lock, so on a revision mismatch — whether caught by the
+// check above or by a unique-constraint violation from a concurrent writer —
+// it returns a [cqrs.StreamRevisionConflictError] and nothing is persisted.
+// On success it returns a [cqrs.AppendResult] whose NextExpectedVersion is
+// the stream's new length.
 func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true}, nil
@@ -156,6 +173,9 @@ func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	}, nil
 }
 
+// LoadStream returns a lazy iterator over all events in the stream
+// identified by id, in the order they were appended. It returns a non-nil
+// error if the stream does not exist.
 func (s *eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM events WHERE stream_id = $1)", id).Scan(&exists); err != nil {
@@ -170,6 +190,16 @@ func (s *eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 		FROM events WHERE stream_id = $1 ORDER BY stream_position ASC`, id)
 }
 
+// LoadStreamFrom returns a lazy iterator over the events in the stream
+// identified by id, starting after the position identified by version.
+// [cqrs.NoStream] requires the stream not to exist and returns a non-nil
+// error if it does; [cqrs.StreamExists] requires that it does exist and
+// returns a non-nil error if it does not; [cqrs.Any] reads from the
+// beginning of the stream. Any other [cqrs.StreamState] — in practice a
+// [cqrs.Revision] of n — is treated as a position, and events after it are
+// returned, so a caller that has already processed n events resumes exactly
+// where it left off; a zero revision behaves like reading from the
+// beginning.
 func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	switch version.(type) {
 	case cqrs.NoStream:
@@ -209,6 +239,15 @@ func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 	}
 }
 
+// LoadFromAll returns a lazy iterator over every event saved across all
+// streams, in the global order they were committed, starting after the
+// position identified by version (per its ToRawInt64, so [cqrs.Any],
+// [cqrs.NoStream], and [cqrs.StreamExists] all behave like reading from the
+// very beginning). It only returns events from transactions that had
+// already committed when the read began, so a transaction that is still
+// in-flight — even if it inserted a row with a lower id than one already
+// visible — cannot be skipped over and later missed by a subsequent call
+// with a higher version.
 func (s *eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	fromID := version.ToRawInt64()
 	return s.queryRows(ctx, `
@@ -219,13 +258,16 @@ func (s *eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) 
 		ORDER BY id ASC`, fromID)
 }
 
+// Close closes the underlying connection pool. It is safe to call more than
+// once.
 func (s *eventstore) Close() error {
 	s.pool.Close()
 	return nil
 }
 
-// queryRows executes a SELECT and returns a lazy Iterator over the resulting Envelopes.
-// The database connection is held open until the iterator is exhausted or an error occurs.
+// queryRows executes a SELECT and returns a lazy [cqrs.Iterator] over the
+// resulting [cqrs.Envelope] values. The underlying rows are held open until
+// the iterator is exhausted or an error occurs.
 func (s *eventstore) queryRows(ctx context.Context, sql string, args ...any) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -249,6 +291,8 @@ func (s *eventstore) queryRows(ctx context.Context, sql string, args ...any) (*c
 	}), nil
 }
 
+// scanEnvelope decodes a single events row into a [cqrs.Envelope],
+// reconstructing the concrete [cqrs.Event] via [cqrs.NewEventByName].
 func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
 	var (
 		globalID       int64

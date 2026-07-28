@@ -16,52 +16,26 @@ import (
 
 var _ eventsourcing.EventBus = (*TelemetryEventBus)(nil)
 
-// TelemetryEventBus wraps an EventBus with OpenTelemetry tracing and metrics.
-//
-// This decorator intercepts event subscriptions to automatically instrument
-// event handlers with distributed tracing and metrics collection. It creates
-// a consumer span per received event that links back to the original producer
-// trace, enabling end-to-end distributed tracing from command execution through
-// event processing.
+// TelemetryEventBus wraps an [eventsourcing.EventBus], instrumenting every
+// subscription registered through it with OpenTelemetry tracing and metrics.
+// For each received event it starts a consumer span linked back to the
+// original producer trace, enabling end-to-end distributed tracing from
+// command execution through event processing. Construct one with
+// [WithEventBusTelemetry].
 type TelemetryEventBus struct {
 	next eventsourcing.EventBus
 	cfg  *config
 }
 
-// Subscribe registers an event handler wrapped with telemetry instrumentation.
-//
-// For each received event the wrapper:
-//  1. Extracts trace context from event metadata to establish distributed trace links.
-//  2. Creates a consumer span named "receive subscription" with event attributes.
-//  3. Links the span to the original producer trace for correlation.
-//  4. Increments the EventBusHandled metric.
-//  5. Invokes the underlying event handler.
-//  6. Records the EventBusDuration metric with processing time.
-//  7. Updates span status based on handler result:
-//     - ErrSkippedEvent: span status OK (intentional skip)
-//     - Other errors: span status Error, increments EventBusErrors metric
-//     - Success: span status OK
-//
-// Parameters:
-//   - ctx: Context for the subscription setup.
-//   - name: Unique identifier for this subscription, used in span attributes.
-//   - next: The event handler to be wrapped with telemetry instrumentation.
-//   - options: Optional subscriber configuration options passed to the underlying bus.
-//
-// Returns:
-//   - An error if the subscription registration fails.
-//
-// Behavior Details:
-//   - The span uses SpanKindConsumer to indicate event consumption.
-//   - Trace links connect the consumer span to the original command/producer trace.
-//   - Metrics recorded:
-//   - EventBusHandled: count of events received by this subscription.
-//   - EventBusDuration: handler execution time in seconds.
-//   - EventBusErrors: count of handler errors (excludes ErrSkippedEvent).
-//   - Span attributes include event type, event ID, global position, stream position,
-//     stream ID, and subscriber name.
-//
-// Example Usage:
+// Subscribe registers next under name on the underlying bus, wrapping it so
+// each received event is handled inside a consumer span linked to the
+// original producer trace (recovered from the event's metadata). The span is
+// tagged with the event type, event ID, global and stream position, stream
+// ID, and subscriber name; [EventBusHandled] and [EventBusDuration] are
+// recorded for every invocation, and [EventBusErrors] for every error other
+// than [eventsourcing.ErrSkippedEvent], which is treated as an intentional,
+// non-error skip. It returns an error if the underlying bus fails to
+// register the subscription.
 //
 //	bus := otel.WithEventBusTelemetry(eventBus)
 //	err := bus.Subscribe(ctx, "order-projector", orderProjector)
@@ -136,45 +110,31 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 
 }
 
-// Errors returns the error channel from the underlying event bus.
-//
-// This method delegates directly to the wrapped EventBus without additional
-// instrumentation, as errors are already tracked at the handler level.
+// Use delegates to the underlying [eventsourcing.EventBus], adding
+// middlewares to the chain applied to its subscribers.
 func (t *TelemetryEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
 	t.next.Use(middlewares...)
 }
 
+// Errors returns the error channel from the underlying event bus. This
+// method delegates directly to the wrapped [eventsourcing.EventBus] without
+// additional instrumentation, since errors are already tracked at the
+// handler level in [TelemetryEventBus.Subscribe].
 func (t *TelemetryEventBus) Errors() <-chan error {
 	return t.next.Errors()
 }
 
-// Close closes the underlying event bus and waits for all handlers to finish.
-//
-// This method delegates directly to the wrapped EventBus without additional
-// instrumentation.
+// Close closes the underlying event bus and waits for all handlers to
+// finish. This method delegates directly to the wrapped
+// [eventsourcing.EventBus] without additional instrumentation.
 func (t *TelemetryEventBus) Close() error {
 	return t.next.Close()
 }
 
-// WithEventBusTelemetry wraps an EventBus with OpenTelemetry tracing and metrics.
-//
-// This constructor creates a TelemetryEventBus that decorates all subscriptions
-// with automatic tracing spans and metrics collection. The wrapper preserves
-// distributed trace context by extracting trace information from event metadata
-// and linking consumer spans to the original producer traces.
-//
-// Parameters:
-//   - next: The underlying EventBus to be wrapped.
-//   - options: Optional configuration for customizing telemetry behavior:
-//   - WithAttributes: adds static attributes to all spans.
-//   - WithAttributeGetter: adds dynamic attributes from context.
-//   - WithOperation: customizes the span operation name.
-//   - WithOperationGetter: dynamically customizes span names.
-//
-// Returns:
-//   - A TelemetryEventBus that implements the EventBus interface with telemetry.
-//
-// Example Usage:
+// WithEventBusTelemetry wraps next in a [TelemetryEventBus], instrumenting
+// every subscription registered through it with OpenTelemetry tracing and
+// metrics. See [TelemetryEventBus.Subscribe] for what is recorded; options
+// such as [WithAttributes] and [WithOperation] customize the spans produced.
 //
 //	bus := otel.WithEventBusTelemetry(eventBus,
 //	    otel.WithAttributes(attribute.String("service", "orders")),
@@ -192,9 +152,11 @@ func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *Tele
 	}
 }
 
-// EventBusTelemetry returns an EventHandlerMiddleware that instruments event
-// handlers subscribed through the bus with OpenTelemetry tracing and metrics.
-// Use with NewMiddlewareEventBus().Use() to apply telemetry to all subscribers.
+// EventBusTelemetry returns an [eventsourcing.EventHandlerMiddleware] that
+// instruments event handlers with OpenTelemetry tracing and metrics; it
+// wraps each handler with [WithEventTelemetry]. Pass it to an
+// [eventsourcing.EventBus] implementation's Use method to apply telemetry to
+// all subscribers registered afterward.
 func EventBusTelemetry(options ...Option) eventsourcing.EventHandlerMiddleware {
 	return func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 		return WithEventTelemetry(next, options...)

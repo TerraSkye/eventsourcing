@@ -14,7 +14,20 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// TODO extract the consumer group
+// WithEventTelemetry wraps next with OpenTelemetry tracing and metrics,
+// returning an [eventsourcing.EventHandler] that can be used as a drop-in
+// replacement.
+//
+// Each call starts a span linked to the original producer trace (recovered
+// from the event's metadata), tagged with the event type, event ID, global
+// and stream position, and stream ID. It records [EventBusHandled] and
+// [EventBusDuration] for every invocation. A returned
+// [eventsourcing.ErrSkippedEvent] is treated as an intentional, non-error
+// skip and marks the span OK, while any other error marks the span as
+// failed; unlike [TelemetryEventBus.Subscribe], it does not record
+// [EventBusErrors].
+//
+// TODO: extract the consumer group.
 func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) eventsourcing.EventHandler {
 	cfg := &config{}
 
@@ -79,6 +92,9 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {
+				// TODO: TelemetryEventBus.Subscribe increments EventBusErrors
+				// here; this path does not. Confirm whether that's
+				// intentional or a gap.
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
 			}

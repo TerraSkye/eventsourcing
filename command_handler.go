@@ -10,57 +10,39 @@ import (
 	"github.com/google/uuid"
 )
 
-// StreamNamer produces the stream name for a given command, with access to context
+// StreamNamer maps a [Command] to the name of the event stream it belongs to.
 type StreamNamer func(ctx context.Context, cmd Command) string
 
-// DefaultStreamNamer is the default function used to determine the stream name
-// for a given command when no custom StreamNamer is provided.
+// DefaultStreamNamer is the [StreamNamer] used by command handlers when no
+// custom namer is configured. By default it returns the command's
+// [Command.AggregateID] as the stream name.
 //
-// By default, it returns the AggregateID of the command as the stream name.
+// It can be overridden globally, for example to add tenant prefixes for
+// multi-tenancy. Override it during program initialization, before any
+// handler runs, to avoid data races on the global.
 //
-// This variable can be overridden globally to change the default behavior
-// for all command handlers, for example to support multi-tenancy, prefixes,
-// or other custom naming conventions.
-//
-// Example usage:
-//
-//	// Default behavior uses AggregateID
-//	stream := DefaultStreamNamer(ctx, myCommand)
-//
-//	// Override globally
+//	// During startup:
 //	DefaultStreamNamer = func(ctx context.Context, cmd Command) string {
-//	    tenant := ctx.Value("tenant").(string)
-//	    return fmt.Sprintf("%s-orders-%s", tenant, cmd.AggregateID())
+//		tenant, _ := ctx.Value(tenantKey).(string)
+//		return fmt.Sprintf("%s-orders-%s", tenant, cmd.AggregateID())
 //	}
 var DefaultStreamNamer StreamNamer = func(ctx context.Context, cmd Command) string {
 	return cmd.AggregateID()
 }
 
-// CommandHandler defines a function type for handling commands of a specific type.
+// CommandHandler handles commands of the concrete type C, which must
+// implement [Command]. A handler carries out the business logic for a
+// command — validating it, deciding what should happen, and persisting any
+// resulting events — and is typically registered with a [CommandBus] via
+// [Register], which dispatches each command to the handler registered for
+// its type.
 //
-// C represents the concrete command type implementing the Command interface.
-//
-// A CommandHandler is responsible for implementing the business logic associated
-// with a command. This typically includes validation, orchestration, and producing
-// side effects, such as persisting events to an EventStore or triggering other operations.
-//
-// Handlers of this type are generally registered with a CommandBus, which ensures that
-// commands are dispatched to the correct handler based on their type.
-//
-// Parameters:
-//   - ctx: The context for controlling cancellation, deadlines, and carrying request-scoped values.
-//   - command: The command of type C, representing the intent to perform a domain action.
-//
-// Returns:
-//   - AppendResult: Represents the result of handling the command, including success status,
-//     the next expected version of the aggregate, and any events that were persisted.
-//   - error: Non-nil if the command handling failed, e.g., due to validation errors, business rule violations,
-//     or persistence failures.
-//
-// Notes:
-//   - Implementations should treat the command as immutable.
-//   - Any domain state changes should be expressed via events (AppendResult.Events) rather than directly mutating state.
-//   - Handlers should not panic; all errors should be returned via the error return value.
+// It returns an [AppendResult] describing the outcome and a non-nil error
+// if handling failed, for example due to a validation error, a business-rule
+// violation, or a persistence failure. Implementations should treat the
+// command as immutable, express state changes as events persisted to an
+// [EventStore] rather than by mutating in-memory state, and return errors
+// rather than panicking.
 //
 // Example Usage:
 //
@@ -68,103 +50,57 @@ var DefaultStreamNamer StreamNamer = func(ctx context.Context, cmd Command) stri
 //	    if seatAlreadyReserved(cmd.SeatNumber) {
 //	        return AppendResult{Successful: false}, fmt.Errorf("seat already reserved")
 //	    }
-//	    events := []Event{SeatReserved{SeatNumber: cmd.SeatNumber, UserID: cmd.UserID}}
-//	    return AppendResult{Successful: true, Events: events}, nil
+//	    // persist a SeatReserved event via an EventStore, then:
+//	    return AppendResult{Successful: true, StreamID: cmd.AggregateID()}, nil
 //	}
 type CommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
 
-// InitialState returns an initial state of type T
-//
-// T represents the aggregate state type.
-//
-// Returns:go
-//   - The initial aggregate state of type T.
-//
-// Notes:
-//   - The InitialState is responsible for returning an initial state
+// InitialState returns the zero-event aggregate state of type T, before any
+// events have been evolved into it — for example, an empty struct or one
+// with its fields set to their defaults.
 type InitialState[T any] func() T
 
-// Evolver evolves the given state into a new state with the event applied.
-//
-// T represents the aggregate state type.
-//
-// Parameters:
-//   - currentState: The current aggregate state.
-//   - envelope: A Envelope object representing an historical event
-//     of an aggregate.
-//
-// Returns:
-//   - The reconstructed aggregate state of type T.
-//
-// Notes:
-//   - The Evolver is responsible for applying the event to the
-//     current state, producing the latest state.
+// Evolver applies a single historical event to currentState and returns the
+// resulting aggregate state of type T. It must not mutate currentState;
+// [NewCommandHandler] calls it once per event, in stream order, folding the
+// result of each call into the next.
 type Evolver[T any] func(currentState T, envelope *Envelope) T
 
-// Decider determines which events should occur based on the current state and a command.
-//
-// T represents the aggregate state type.
-// C represents the command type.
-//
-// Parameters:
-//   - state: The current aggregate state as returned by the Evolver.
-//   - cmd: The command to handle, containing the intent to change state.
-//
-// Returns:
-//   - A slice of Event representing the events that should be applied to the aggregate.
-//   - An error, which should be non-nil if the command violates business rules
-//     or cannot be applied to the current state.
-//
-// Notes:
-//   - The Decider should not mutate the input state directly; it should produce
-//     events that, when applied via the Evolver, will update the state accordingly.
-//   - Returning an empty slice indicates that the command produces no events
-//     (e.g., it was idempotent or had no effect).
+// Decider inspects state, as produced by an [Evolver], against cmd and
+// returns the events that should occur as a result, or a non-nil error if
+// cmd violates a business rule or cannot be applied to state. It must not
+// mutate state; state changes are expressed only through the returned
+// events. An empty, nil slice means cmd produces no events, for example
+// because it was idempotent or had no effect.
 type Decider[T any, C Command] func(state T, cmd C) ([]Event, error)
 
-// CommandHandlerOption defines a function type that modifies handlerOptions.
-// These options are applied when constructing a NewCommandHandler to customize behavior.
+// CommandHandlerOption configures a [CommandHandler] built by
+// [NewCommandHandler].
 type CommandHandlerOption func(configuration *handlerOptions)
 
 // NewCommandHandler returns a generic command handler for any aggregate type.
 //
-// It provides a reusable pattern for handling commands in an event-sourced system
-// by performing the following steps:
-//  1. Load the event history for the aggregate (using LoadStreamFrom).
-//  2. Evolve the current state based on the event history.
-//  3. Decide which new events should occur based on the command and current state.
-//  4. Wrap the decided events in envelopes, assigning version numbers and metadata.
-//  5. Persist the envelopes to the EventStore, respecting the configured revision
-//     and concurrency rules.
+// The returned handler, on each call: loads command's stream from store
+// (named by [DefaultStreamNamer], or a [StreamNamer] set via
+// [WithStreamNamer]) using [EventStore.LoadStreamFrom]; folds every loaded
+// event into initialState with evolve; passes the resulting state and the
+// command to decide to get the events to persist; wraps them in
+// [Envelope]s, stamping each with a new UUID, the next sequential version,
+// the current time, and any metadata from functions added via
+// [WithMetadataExtractor]; and saves them with [EventStore.Save] against
+// the [StreamState] configured via [WithStreamState] (default [Any]).
 //
-// Parameters:
-//   - store: The EventStore used to load and persist events.
-//   - initialState: a function of type InitialState[T] that created the initial state for the command.
-//   - evolve: A function of type Evolver[T] that reconstructs aggregate state from a sequence of events.
-//   - decide: A function of type Decider[T, C] that produces events based on the current state and command.
-//   - opts: Optional CommandHandlerOption values for customizing behavior, such as:
-//   - StreamState: The expected stream revision (default is Any).
-//   - RetryAttempts: Number of retries on version conflicts (default 0).
-//
-// Returns:
-//   - A function that takes a context and a command of type C, and returns:
-//   - AppendResult: Contains information about the persistence result, including success
-//     and the next expected version.
-//   - error: Non-nil if the command failed, either due to a business rule violation,
-//     persistence error, or concurrency conflict.
-//
-// Behavior Details:
-//   - The command’s AggregateID() is used to identify the target stream in the EventStore.
-//   - The SeqWithSideEffect wrapper tracks the last version while evolving state.
-//   - If the configured StreamState is Revision, it is updated to the latest version
-//     before saving to ensure optimistic concurrency control.
-//   - If the decide function returns no events, the handler returns a successful result without persisting.
-//   - Each event is wrapped in an Envelope with a new UUID, metadata map, version, and timestamp.
-//   - Errors during loading, evolving, deciding, or saving are propagated with context using errors.Wrap.
+// If decide returns no events, the handler returns a successful
+// [AppendResult] without calling Save. If decide returns a non-nil error,
+// the handler returns it wrapped in an [ErrBusinessRuleViolation]. If Save
+// fails with a [StreamRevisionConflictError], the handler retries the whole
+// load-evolve-decide-save cycle according to the [backoff.BackOff] set via
+// [WithRetryStrategy] (default: no retries); any other Save or load error is
+// returned directly, without retrying.
 //
 // Example Usage:
 //
-//	handler := NewCommandHandler(store, evolveFunc, decideFunc, WithStreamState(Any{}))
+//	handler := NewCommandHandler(store, initialStateFunc, evolveFunc, decideFunc, WithStreamState(Any{}))
 //	result, err := handler(ctx, myCommand)
 func NewCommandHandler[T any, C Command](
 	store EventStore,
@@ -254,6 +190,12 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			// --- Persist events ---
+			// TODO: this always saves against the originally configured
+			// options.Revision, not the Revision(lastVersion) derived from
+			// the stream just loaded above (see the `revision` var, which
+			// tracks it but is never used here). For a fixed Revision
+			// option this makes every retry re-check the same, now-stale,
+			// expectation instead of the current one.
 			result, err := store.Save(ctx, envelopes, options.Revision)
 
 			if err != nil {
@@ -272,22 +214,8 @@ func NewCommandHandler[T any, C Command](
 	}
 }
 
-// handlerOptions defines configuration for a CommandHandler.
-//
-// It is used internally by NewCommandHandler to control behavior such as
-// concurrency checks, retry strategy, and event metadata enrichment.
-//
-// Fields:
-//   - StreamState: Determines the concurrency check applied when saving events.
-//     Defaults to Any{}.
-//   - RetryStrategy: Strategy for retrying operations in case of transient
-//     failures or version conflicts. Defaults to no retries.
-//   - MetadataFuncs: Slice of functions that generate metadata for each event.
-//     Each function receives the context and returns a map of key-value pairs.
-//   - StreamNamer: Function used to determine the stream name for a command.
-//     If nil, DefaultStreamNamer is used, which returns the AggregateID by default.
-//     This can be overridden per handler or globally for custom naming conventions
-//     (e.g., multi-tenancy, dynamic prefixes, or other domain-specific logic).
+// handlerOptions holds the configuration [NewCommandHandler] builds from
+// its [CommandHandlerOption] arguments.
 type handlerOptions struct {
 	// Revision is the condition applied when saving events to the stream.
 	// It determines the concurrency check behavior (default is Any).
@@ -306,25 +234,22 @@ type handlerOptions struct {
 	StreamNamer StreamNamer
 }
 
-// WithStreamState sets the expected stream revision for a NewCommandHandler.
-//
-// The StreamState controls the concurrency check when persisting events. For example:
-//   - Any{}: no version check (default)
-//   - NoStream{}: ensures the stream does not exist
-//   - StreamExists{}: ensures the stream exists
-//   - Revision{N}: expects the stream to be at version N
+// WithStreamState sets the [StreamState] a [NewCommandHandler] expects the
+// stream to be in when it saves events — [Any] (the default) to skip the
+// check, [NoStream] or [StreamExists] to assert existence, or a specific
+// [Revision] to assert an exact version.
 //
 // Usage:
 //
-//	handler := NewCommandHandler(store, initialState, evolve, decide, WithRevision(NoStream))
+//	handler := NewCommandHandler(store, initialState, evolve, decide, WithStreamState(NoStream{}))
 func WithStreamState(rev StreamState) CommandHandlerOption {
 	return func(cfg *handlerOptions) { cfg.Revision = rev }
 }
 
-// WithRetryStrategy sets the retry strategy for a NewCommandHandler.
-//
-// The BackOff strategy controls how many times and with what delay the handler
-// retries saving events in case of concurrency conflicts or transient errors.
+// WithRetryStrategy sets the [backoff.BackOff] a [NewCommandHandler] uses to
+// retry its load-evolve-decide-save cycle after a
+// [StreamRevisionConflictError]. Without this option, no retries are
+// performed and the handler returns the conflict directly.
 //
 // Usage:
 //
@@ -333,11 +258,11 @@ func WithRetryStrategy(strategy backoff.BackOff) CommandHandlerOption {
 	return func(cfg *handlerOptions) { cfg.RetryStrategy = strategy }
 }
 
-// WithMetadataExtractor adds a metadata function to a NewCommandHandler.
-//
-// Each metadata function is called for every command handling execution and can
-// inject additional key-value pairs into the event envelopes. Multiple metadata
-// extractors can be combined; they are applied in order of registration.
+// WithMetadataExtractor adds fn to the metadata functions a
+// [NewCommandHandler] calls for every command, merging their results into
+// each resulting [Envelope]'s Metadata. Multiple extractors can be combined;
+// they run in the order they were added, later ones overwriting keys set by
+// earlier ones.
 //
 // Usage:
 //
@@ -348,11 +273,8 @@ func WithMetadataExtractor(fn func(ctx context.Context) map[string]any) CommandH
 	}
 }
 
-// WithStreamNamer sets a custom stream naming function on a NewCommandHandler.
-//
-// The StreamNamer is called for every command handling execution and determines
-// the stream name used to load and persist events. This allows customization
-// beyond the default behavior of using the command's AggregateID as the stream name.
+// WithStreamNamer overrides the [StreamNamer] a [NewCommandHandler] uses to
+// name the stream it loads and saves to, in place of [DefaultStreamNamer].
 //
 // Usage:
 //

@@ -5,41 +5,20 @@ import (
 	"io"
 )
 
+// IterFunc produces the next item of type T, returning [io.EOF] once
+// iteration is complete.
 type IterFunc[T any] func(ctx context.Context) (T, error)
 
-// Iterator is a generic, type-safe iterator over items of type T.
+// Iterator is a pull-based iterator over items of type T, driven by an
+// [IterFunc] supplied through [NewIteratorFunc] or [NewSliceIterator]. It
+// underlies the event streams returned by an [EventStore]'s Load* methods,
+// but its next-function can equally paginate, stream, or buffer
+// asynchronously — whatever the source needs.
 //
-// It abstracts the iteration logic, allowing for multiple iteration strategies
-// such as paginated fetching, streaming, or pre-filling a buffer asynchronously.
-//
-// The iterator provides the following API:
-//   - Next(ctx): advances the iterator and reports whether a next value exists.
-//   - Value(): retrieves the current value after Next() returns true.
-//   - Err(): retrieves any error encountered during iteration.
-//   - All(ctx): consumes the iterator fully and returns all items as a slice.
-//
-// Type Parameters:
-//   - T: The item type returned by the iterator. Can be a pointer, struct, or primitive.
-//
-// Example Usage:
-//
-//	items := []int{1, 2, 3, 4, 5}
-//	i := 0
-//	iter := NewIteratorFunc(func(ctx context.Context) (int, error) {
-//	    if i >= len(items) {
-//	        return 0, io.EOF
-//	    }
-//	    val := items[i]
-//	    i++
-//	    return val, nil
-//	})
-//
-//	for iter.Next(context.Background()) {
-//	    fmt.Println(iter.Value())
-//	}
-//	if err := iter.Err(); err != nil {
-//	    panic(err)
-//	}
+// Call Next repeatedly to advance the iterator, reading the current item
+// with Value after each call that returns true; when Next returns false,
+// call Err to distinguish a clean end of iteration (nil) from a failure. See
+// [ExampleNewIteratorFunc].
 type Iterator[T any] struct {
 	// nextFunc is the function that produces the next value in the iteration.
 	// It must return:
@@ -58,23 +37,9 @@ type Iterator[T any] struct {
 	done bool
 }
 
-// Next advances the iterator to the next value.
-//
-// Returns:
-//   - bool: true if a new value is available; false if iteration is complete
-//     or an error occurred.
-//
-// Behavior:
-//   - Calls nextFunc to retrieve the next item.
-//   - If nextFunc returns io.EOF, marks iteration as done and returns false.
-//   - If nextFunc returns a non-nil error, stores it and returns false.
-//   - Otherwise, stores the item in current and returns true.
-//
-// Example:
-//
-//	if iter.Next(ctx) {
-//	    item := iter.Value()
-//	}
+// Next advances the iterator and reports whether a new value is available.
+// It returns false once the underlying [IterFunc] reports [io.EOF] or
+// returns any other error; call Err afterward to tell the two apart.
 func (it *Iterator[T]) Next(ctx context.Context) bool {
 	if it.done || it.err != nil {
 		return false
@@ -96,38 +61,21 @@ func (it *Iterator[T]) Next(ctx context.Context) bool {
 	return true
 }
 
-// Value returns the current item in the iteration.
-//
-// Returns:
-//   - T: the current item, or the zero value if Next() has not been called
-//     or iteration has completed.
-//
-// Usage:
-//
-//	item := iter.Value()
+// Value returns the item read by the most recent call to Next, or the zero
+// value of T if Next has not been called or has returned false.
 func (it *Iterator[T]) Value() T {
 	return it.current
 }
 
-// Err returns the last error encountered during iteration.
-//
-// Returns:
-//   - error: the error returned by nextFunc, if any. Returns nil if iteration
-//     completed normally.
+// Err returns the error that ended iteration, or nil if Next has not yet
+// returned false or iteration completed because the source was exhausted.
 func (it *Iterator[T]) Err() error {
 	return it.err
 }
 
-// All consumes the iterator and returns all remaining items in a slice.
-//
-// Returns:
-//   - []T: all items produced by the iterator
-//   - error: the first non-EOF error encountered, or nil if iteration completed normally.
-//
-// Behavior:
-//   - Repeatedly calls Next() until it returns false.
-//   - Collects all items via Value().
-//   - Returns any error encountered via Err().
+// All consumes the iterator by calling Next until it returns false,
+// collecting each Value along the way, and returns the collected items
+// along with the result of Err.
 func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 	var results []T
 	for it.Next(ctx) {
@@ -136,42 +84,15 @@ func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 	return results, it.Err()
 }
 
-// NewIteratorFunc constructs a new Iterator[T] using the provided nextFunc.
-//
-// Parameters:
-//   - nextFunc: function that produces the next item. Must return:
-//     (T, nil) for valid items
-//     (any, io.EOF) to signal end of iteration
-//     (any, error) to signal a failure
-//
-// Returns:
-//   - *Iterator[T]: a new iterator ready for consumption via Next()/All()
-//
-// Example:
-//
-//	iter := NewIteratorFunc(func(ctx context.Context) (int, error) {
-//	    if i >= len(items) {
-//	        return 0, io.EOF
-//	    }
-//	    val := items[i]
-//	    i++
-//	    return val, nil
-//	})
+// NewIteratorFunc returns an [Iterator] driven by nextFunc, which must
+// return [io.EOF] to signal the end of iteration and any other error to
+// signal a failure.
 func NewIteratorFunc[T any](nextFunc func(ctx context.Context) (T, error)) *Iterator[T] {
 	return &Iterator[T]{nextFunc: nextFunc}
 }
 
-// NewSliceIterator constructs a new Iterator[T] using the provided slice T.
-//
-// Parameters:
-//   - slice: []T
-//
-// Returns:
-//   - *Iterator[T]: a new iterator ready for consumption via Next()/All()
-//
-// Example:
-//
-//	iter := NewSliceIterator([]int{1,2,3,4,5})
+// NewSliceIterator returns an [Iterator] that yields the elements of slice
+// in order.
 func NewSliceIterator[T any](slice []T) *Iterator[T] {
 	index := 0
 
