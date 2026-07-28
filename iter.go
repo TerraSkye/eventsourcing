@@ -47,6 +47,8 @@ func (it *Iterator[T]) Next(ctx context.Context) bool {
 
 	val, err := it.nextFunc(ctx)
 	if err != nil {
+		var zero T
+		it.current = zero
 		if err == io.EOF {
 			it.done = true
 			it.err = nil
