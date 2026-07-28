@@ -174,6 +174,21 @@ func TestIteratorValueZeroBeforeNext(t *testing.T) {
 	}
 }
 
+func TestIteratorValueZeroAfterCompletion(t *testing.T) {
+	iter := cqrs.NewSliceIterator([]int{1, 2, 3})
+
+	for iter.Next(t.Context()) {
+	}
+
+	if iter.Err() != nil {
+		t.Fatalf("unexpected error: %v", iter.Err())
+	}
+
+	if v := iter.Value(); v != 0 {
+		t.Fatalf("expected Value() to be zero after iteration completed, got %v", v)
+	}
+}
+
 func TestIteratorNoItems(t *testing.T) {
 	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (int, error) {
 		return 0, io.EOF
