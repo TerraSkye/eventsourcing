@@ -24,6 +24,15 @@ func TestErrorStrings(t *testing.T) {
 			want: `concurrency conflict on stream "stream-123": (expected version 5, actual 7)`,
 		},
 		{
+			name: "StreamRevisionConflictError with non-Revision StreamStates",
+			err: StreamRevisionConflictError{
+				Stream:           "stream-123",
+				ExpectedRevision: Any{},
+				ActualRevision:   StreamExists{},
+			},
+			want: `concurrency conflict on stream "stream-123": (expected version -1, actual -2)`,
+		},
+		{
 			name: "ErrSkippedEvent",
 			err:  ErrSkippedEvent{Event: &event{}},
 			want: "skipped event of type *eventsourcing.event",
