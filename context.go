@@ -23,10 +23,16 @@ const (
 // WithEnvelope returns a copy of ctx carrying env's stream ID, aggregate ID,
 // event ID, version, global version, occurred-at time, and metadata,
 // retrievable via the *FromContext functions below. It does not carry a
-// causation ID; use [WithCausation] for that.
+// causation ID; use [WithCausation] for that. The aggregate ID is "" if
+// env.Event is nil.
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
+	var aggregateID string
+	if env.Event != nil {
+		aggregateID = env.Event.AggregateID()
+	}
+
 	ctx = context.WithValue(ctx, streamIDKey, env.StreamID)
-	ctx = context.WithValue(ctx, aggregateIDKey, env.Event.AggregateID())
+	ctx = context.WithValue(ctx, aggregateIDKey, aggregateID)
 	ctx = context.WithValue(ctx, eventIDKey, env.EventID)
 	ctx = context.WithValue(ctx, versionKey, env.Version)
 	ctx = context.WithValue(ctx, globalVersionKey, env.GlobalVersion)
