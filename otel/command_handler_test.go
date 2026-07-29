@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/terraskye/eventsourcing"
 	"go.opentelemetry.io/otel/attribute"
@@ -82,4 +83,74 @@ func TestWithCommandTelemetry_ConcurrentCallsRaceOnSharedBaseAttributes(t *testi
 		}(i)
 	}
 	wg.Wait()
+}
+
+type durationTestCommand struct{}
+
+func (durationTestCommand) AggregateID() string { return "agg-1" }
+
+// TestCommandTelemetryDurationRecordedInSeconds is a regression test for
+// GitHub issue #57: CommandTelemetry recorded
+// time.Since(startTime).Milliseconds() into eventsourcing.commands.duration,
+// but the instrument declares metric.WithUnit("s") and second-scaled bucket
+// boundaries — every sample from the middleware path was 1000x too large,
+// and any operation faster than 1ms recorded as exactly 0 (Milliseconds()
+// truncates to an integer). WithCommandTelemetry was already correct, using
+// .Seconds().
+func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
+	rec := durationRecorder
+
+	const work = 50 * time.Millisecond
+	const instrument = "eventsourcing.commands.duration"
+
+	tests := []struct {
+		name   string
+		invoke func(t *testing.T)
+	}{
+		{
+			name: "CommandTelemetry middleware",
+			invoke: func(t *testing.T) {
+				h := CommandTelemetry()(func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+					time.Sleep(work)
+					return eventsourcing.AppendResult{Successful: true}, nil
+				})
+				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
+					t.Fatalf("command: %v", err)
+				}
+			},
+		},
+		{
+			name: "WithCommandTelemetry decorator",
+			invoke: func(t *testing.T) {
+				h := WithCommandTelemetry(func(ctx context.Context, cmd durationTestCommand) (eventsourcing.AppendResult, error) {
+					time.Sleep(work)
+					return eventsourcing.AppendResult{Successful: true}, nil
+				})
+				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
+					t.Fatalf("command: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(rec.valuesFor(instrument))
+			tc.invoke(t)
+			got := rec.valuesFor(instrument)
+			if len(got) != before+1 {
+				t.Fatalf("expected exactly one new %s sample, got %d", instrument, len(got)-before)
+			}
+
+			v := got[len(got)-1]
+			if v >= 1 {
+				t.Errorf("%s recorded %v for a %v operation; the instrument declares unit \"s\", so it should be ~%v",
+					instrument, v, work, work.Seconds())
+			}
+			if v < work.Seconds()*0.5 {
+				t.Errorf("%s recorded %v for a %v operation; expected ~%v seconds",
+					instrument, v, work, work.Seconds())
+			}
+		})
+	}
 }

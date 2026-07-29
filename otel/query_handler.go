@@ -59,7 +59,7 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 			startTime := time.Now()
 			result, err := next(ctx, qry)
 
-			QueriesDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrQueryType.String(queryType)))
+			QueriesDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrQueryType.String(queryType)))
 
 			if err != nil {
 				span.SetStatus(codes.Error, err.Error())

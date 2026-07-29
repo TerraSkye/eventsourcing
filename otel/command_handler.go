@@ -65,7 +65,7 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 				AttrStreamID.String(result.StreamID),
 				AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 			)
-			CommandsDuration.Record(ctx, float64(time.Since(startTime).Milliseconds()), metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(commandType)))
 			span.SetAttributes(attr...)
 
 			if err != nil {
