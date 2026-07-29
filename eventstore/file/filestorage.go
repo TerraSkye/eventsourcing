@@ -18,10 +18,21 @@ import (
 
 var _ cqrs.EventStore = (*FilesStore)(nil)
 
+// allDirName is the top-level directory holding the symlink fan-in of every
+// event across all streams, used by [FilesStore.LoadFromAll].
+const allDirName = "all"
+
+// streamsDirName is the top-level directory under which each stream gets
+// its own subdirectory, named streamsDirName/<streamID>. Nesting streams
+// one level down, rather than storing streamID directly under baseDir,
+// keeps any stream ID — including "all" itself — from ever colliding with
+// allDirName.
+const streamsDirName = "streams"
+
 // FilesStore is a file-backed [cqrs.EventStore] intended for tests and local
 // development. Each stream's events are stored as one JSON file per event
-// under a directory named after the stream ID, and a symlink to every event
-// is also kept under an "all" directory to support [FilesStore.LoadFromAll].
+// under its own directory (see streamDir), and a symlink to every event is
+// also kept under an "all" directory to support [FilesStore.LoadFromAll].
 // It is safe for concurrent use.
 type FilesStore struct {
 	baseDir   string
@@ -31,9 +42,12 @@ type FilesStore struct {
 }
 
 // NewFileStore creates a [FilesStore] rooted at dir, creating dir and its
-// "all" subdirectory if they do not already exist.
+// reserved subdirectories if they do not already exist.
 func NewFileStore(dir string) (*FilesStore, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "all"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, allDirName), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, streamsDirName), 0o755); err != nil {
 		return nil, err
 	}
 	return &FilesStore{
@@ -43,7 +57,7 @@ func NewFileStore(dir string) (*FilesStore, error) {
 }
 
 func (f *FilesStore) streamDir(id string) string {
-	return filepath.Join(f.baseDir, id)
+	return filepath.Join(f.baseDir, streamsDirName, id)
 }
 
 // Save appends events to the stream they share, enforcing the concurrency
@@ -148,9 +162,9 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
 		// symlink to all/
-		all := filepath.Join(f.baseDir, "all", fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
+		all := filepath.Join(f.baseDir, allDirName, fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
 
-		rel, _ := filepath.Rel(filepath.Join(f.baseDir, "all"), path)
+		rel, _ := filepath.Rel(filepath.Join(f.baseDir, allDirName), path)
 
 		if err := os.Symlink(rel, all); err != nil {
 			return cqrs.AppendResult{
@@ -201,7 +215,7 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 // [FilesStore.LoadStreamFrom], but against the global sequence rather than a
 // single stream.
 func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(filepath.Join(f.baseDir, "all"), version)
+	return f.loadFromDir(filepath.Join(f.baseDir, allDirName), version)
 }
 
 // loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
