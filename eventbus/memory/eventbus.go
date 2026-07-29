@@ -12,12 +12,16 @@ import (
 
 // subscriber is a single registered handler and its per-handler delivery
 // state: an event-type filter and a buffered channel served by its own
-// worker goroutine.
+// worker goroutine. ctx is never explicitly canceled by anyone but cancel,
+// and its Done channel is the only shutdown signal for this subscriber —
+// events is never closed, so Dispatch can safely send to it without holding
+// b.mu (see Dispatch).
 type subscriber struct {
 	name    string
 	handler cqrs.EventHandler
 	filter  *filter
 	events  chan *cqrs.Envelope
+	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
@@ -99,6 +103,7 @@ func (b *EventBus) Subscribe(
 			events: make([]string, 0),
 		},
 		events: make(chan *cqrs.Envelope, b.bufferSize),
+		ctx:    workerCtx,
 		cancel: cancel,
 	}
 
@@ -138,10 +143,10 @@ func (b *EventBus) Close() error {
 	}
 	b.closed = true
 
-	// Close all subscribers
+	// Cancel every subscriber. events is deliberately never closed — see
+	// subscriber and Dispatch.
 	for name, s := range b.subs {
 		s.cancel()
-		close(s.events)
 		delete(b.subs, name)
 	}
 	b.mu.Unlock()
@@ -156,7 +161,7 @@ func (b *EventBus) Close() error {
 }
 
 // runSubscriber delivers events from s.events to s.handler until ctx is
-// canceled or s.events is closed by Close or removeSubscriber.
+// canceled by Close or removeSubscriber.
 func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	defer b.wg.Done()
 
@@ -165,11 +170,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		case <-ctx.Done():
 			return
 
-		case ev, ok := <-s.events:
-			if !ok {
-				return
-			}
-
+		case ev := <-s.events:
 			// Handle event
 			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, ev), ev.Event); err != nil {
 				select {
@@ -195,7 +196,6 @@ func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Unlock()
 
 	s.cancel()
-	close(s.events)
 }
 
 // Dispatch delivers ev to every subscriber whose event-type filter matches
@@ -204,20 +204,32 @@ func (b *EventBus) removeSubscriber(name string) {
 // delivered them, on that subscriber's own goroutine, but Dispatch itself
 // blocks until ev is queued for every matching subscriber — a subscriber
 // whose buffer is full therefore delays the caller until its handler
-// catches up. Dispatch is a no-op once the bus has been closed.
+// catches up, though never past that subscriber's own removal or the bus
+// being closed. Dispatch is a no-op once the bus has been closed.
 func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	if b.closed {
+		b.mu.RUnlock()
 		return
 	}
-
+	matched := make([]*subscriber, 0, len(b.subs))
 	for _, s := range b.subs {
-
 		if len(s.filter.events) == 0 || slices.Contains(s.filter.events, ev.Event.EventType()) {
-			select {
-			case s.events <- ev:
-			}
+			matched = append(matched, s)
+		}
+	}
+	b.mu.RUnlock()
+
+	// The blocking send below must not run while holding b.mu: a subscriber
+	// whose buffer is full (or whose handler is stuck) would otherwise block
+	// Close and every other Dispatch call, not just this one. The select's
+	// second case bounds the wait to that subscriber's own lifetime, so a
+	// subscriber removed (or the bus closed) while this send is pending is
+	// given up on instead of blocking forever with nothing left to drain it.
+	for _, s := range matched {
+		select {
+		case s.events <- ev:
+		case <-s.ctx.Done():
 		}
 	}
 }
