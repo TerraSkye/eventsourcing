@@ -386,10 +386,17 @@ func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) 
 // described by from, and returns a lazy iterator over the decoded events in
 // filename order.
 func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+	// A stream's directory is only created lazily, on its first successful
+	// Save, so a never-saved stream (a perfectly normal thing to load, e.g.
+	// via Any{} or NoStream{} for a brand-new aggregate) has no directory at
+	// all yet — that's an empty stream, not an error, and the StreamState
+	// switch below decides whether an empty stream is acceptable.
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		//TODO handle errors.
-		return nil, err
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		files = nil
 	}
 
 	var offset uint64
