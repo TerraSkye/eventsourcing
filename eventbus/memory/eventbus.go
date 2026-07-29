@@ -70,7 +70,9 @@ func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 // default a subscriber receives every event; pass [WithFilterEvents] to
 // restrict delivery to specific event types. It returns an error if handler
 // is nil, the bus is already closed, or name is already registered. The
-// subscription is removed automatically when ctx is canceled.
+// subscription is removed automatically when ctx is canceled, or when the
+// bus is closed — neither leaves a goroutine behind, even if ctx is
+// long-lived (e.g. context.Background()).
 func (b *EventBus) Subscribe(
 	ctx context.Context,
 	name string,
@@ -98,7 +100,7 @@ func (b *EventBus) Subscribe(
 	}
 	handler = wrapped
 
-	workerCtx, cancel := context.WithCancel(context.Background())
+	workerCtx, cancel := context.WithCancel(ctx)
 	s := &subscriber{
 		name:    name,
 		handler: handler,
@@ -120,9 +122,16 @@ func (b *EventBus) Subscribe(
 	b.wg.Add(1)
 	go b.runSubscriber(workerCtx, s)
 
-	// Automatically remove when caller’s ctx finishes
+	// workerCtx is a child of ctx, so its Done channel closes whenever
+	// either the caller cancels ctx (auto-unsubscribe) or Close/
+	// removeSubscriber calls cancel directly — one signal to watch for
+	// both triggers, rather than parking on the caller's ctx alone, which
+	// never fires (and leaks this goroutine) for a long-lived ctx such as
+	// context.Background().
+	b.wg.Add(1)
 	go func() {
-		<-ctx.Done()
+		defer b.wg.Done()
+		<-workerCtx.Done()
 		b.removeSubscriber(name)
 	}()
 
