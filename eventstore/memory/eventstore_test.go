@@ -689,3 +689,48 @@ func TestSave_AfterClose_Panics(t *testing.T) {
 		t.Error("expected an error saving to a closed store, got nil")
 	}
 }
+
+// TestLoadFromAll_Any is a regression test for GitHub issue #49:
+// LoadFromAll never switched on the concrete type of version, feeding
+// version.ToRawInt64() straight into an unsigned offset. Any{}'s
+// ToRawInt64() of -1 became a huge uint64 offset, panicking with
+// "index out of range" on the very first Next() call — even against an
+// empty store.
+func TestLoadFromAll_Any(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty store", func(t *testing.T) {
+		store := memory.NewMemoryStore(10)
+
+		iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+		if err != nil {
+			t.Fatalf("LoadFromAll(Any{}) on an empty store: unexpected error: %v", err)
+		}
+
+		got := collectAll(t, iter)
+		if len(got) != 0 {
+			t.Fatalf("expected 0 events, got %d", len(got))
+		}
+	})
+
+	t.Run("store with events", func(t *testing.T) {
+		store := memory.NewMemoryStore(10)
+
+		if _, err := store.Save(ctx, []cqrs.Envelope{
+			newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
+			newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 2}),
+		}, cqrs.NoStream{}); err != nil {
+			t.Fatalf("setup save: %v", err)
+		}
+
+		iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+		if err != nil {
+			t.Fatalf("LoadFromAll(Any{}): unexpected error: %v", err)
+		}
+
+		got := collectAll(t, iter)
+		if len(got) != 2 {
+			t.Fatalf("expected 2 events, got %d", len(got))
+		}
+	})
+}
