@@ -87,16 +87,27 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // command to decide to get the events to persist; wraps them in
 // [Envelope]s, stamping each with a new UUID, the next sequential version,
 // the current time, and any metadata from functions added via
-// [WithMetadataExtractor]; and saves them with [EventStore.Save] against
-// the [StreamState] configured via [WithStreamState] (default [Any]).
+// [WithMetadataExtractor]; and saves them with [EventStore.Save].
+//
+// The [StreamState] configured via [WithStreamState] (default [Any])
+// determines how a save conflict is handled. [Any] and [StreamExists] don't
+// pin the stream to an exact version — [Any] asserts nothing, and
+// [StreamExists] only asserts non-emptiness, once loading has confirmed the
+// stream exists — so the handler saves against the revision it just loaded
+// and, on conflict, retries the whole load-evolve-decide-save cycle
+// according to the [backoff.BackOff] set via [WithRetryStrategy] (default:
+// no retries). [NoStream] and a specific [Revision] pin the stream to an
+// exact point (version 0, or N) that the caller explicitly asserted; a
+// conflict there means that expectation was violated, so it is returned
+// immediately rather than retried. A [StreamExists] load failure (the
+// stream doesn't exist yet) is likewise always returned immediately, never
+// retried — it's a fail-fast precondition, not a save conflict to converge
+// on. Any other Save or load error is also returned directly, without
+// retrying.
 //
 // If decide returns no events, the handler returns a successful
 // [AppendResult] without calling Save. If decide returns a non-nil error,
-// the handler returns it wrapped in an [ErrBusinessRuleViolation]. If Save
-// fails with a [StreamRevisionConflictError], the handler retries the whole
-// load-evolve-decide-save cycle according to the [backoff.BackOff] set via
-// [WithRetryStrategy] (default: no retries); any other Save or load error is
-// returned directly, without retrying.
+// the handler returns it wrapped in an [ErrBusinessRuleViolation].
 //
 // Example Usage:
 //
@@ -120,14 +131,28 @@ func NewCommandHandler[T any, C Command](
 		o(options)
 	}
 
+	// Revision and NoStream pin the stream to an exact point (a specific
+	// version, or version 0) that the caller explicitly asserted; retrying
+	// past that point would silently violate the expectation, so a
+	// conflict there is reported back immediately. That's also true of
+	// StreamExists failing to load: the stream doesn't exist (yet), which
+	// is a fail-fast condition, not a save conflict to converge on. But
+	// once a StreamExists load succeeds, the stream's existence is settled
+	// and only its version remains in question — from that point on it
+	// behaves like Any (no version pinned), tracking the version loaded
+	// and retrying on a save conflict.
+	_, isAny := options.Revision.(Any)
+	_, isStreamExists := options.Revision.(StreamExists)
+	autoConverge := isAny || isStreamExists
+
 	return func(ctx context.Context, command C) (AppendResult, error) {
 		// the stream ID for the given command
 		var streamID = options.StreamNamer(ctx, command)
 		// the state we will decide against
 		var state = initialState()
-		// the stream state we will save against
+		// the stream state we will load from, and (when autoConverge) save against
 		var revision = options.Revision
-		// the revision we
+		// the last version loaded from the stream
 		var lastVersion uint64
 		// Retry loop for handling concurrency conflicts
 		result, err := backoff.RetryWithData(func() (AppendResult, error) {
@@ -135,6 +160,11 @@ func NewCommandHandler[T any, C Command](
 			iter, err := store.LoadStreamFrom(ctx, streamID, revision)
 
 			if err != nil {
+				// Even for StreamExists, a missing stream fails fast here:
+				// the "auto-converge, don't pin a version" treatment only
+				// applies once the stream is confirmed to exist — this load
+				// error means it doesn't (yet), which is not something a
+				// save-conflict retry cycle can resolve.
 				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): load failed: %w", command, command.AggregateID(), streamID, err))
 			}
@@ -190,19 +220,31 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			// --- Persist events ---
-			// TODO: this always saves against the originally configured
-			// options.Revision, not the Revision(lastVersion) derived from
-			// the stream just loaded above (see the `revision` var, which
-			// tracks it but is never used here). For a fixed Revision
-			// option this makes every retry re-check the same, now-stale,
-			// expectation instead of the current one.
-			result, err := store.Save(ctx, envelopes, options.Revision)
+			// With Any{} or StreamExists{}, save against the revision just
+			// loaded above (Revision(lastVersion)), so a conflict can be
+			// resolved by reloading and retrying. Revision(N) and NoStream{}
+			// pin the stream to an exact point the caller asserted, so they
+			// are saved against unchanged.
+			saveRevision := options.Revision
+			if autoConverge {
+				saveRevision = revision
+			}
+			result, err := store.Save(ctx, envelopes, saveRevision)
 
 			if err != nil {
 				var conflict *StreamRevisionConflictError
 				if errors.As(err, &conflict) {
-					// Retry on concurrency conflicts
-					return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID}, conflict
+					if autoConverge {
+						// Retry: reload from `revision` and try again.
+						return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID}, conflict
+					}
+					// The caller asserted a specific stream expectation
+					// (Revision or NoStream); a conflict means that
+					// expectation was violated, so it is reported back
+					// directly instead of being retried against a different
+					// target.
+					return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID},
+						backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict))
 				}
 				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): failed to save event: %w", command, command.AggregateID(), streamID, err))
 			}
@@ -235,9 +277,16 @@ type handlerOptions struct {
 }
 
 // WithStreamState sets the [StreamState] a [NewCommandHandler] expects the
-// stream to be in when it saves events — [Any] (the default) to skip the
-// check, [NoStream] or [StreamExists] to assert existence, or a specific
-// [Revision] to assert an exact version.
+// stream to be in when it saves events — [Any] (the default) to save
+// against the revision the handler just loaded, or [StreamExists] to do the
+// same after additionally requiring the stream to already exist; both retry
+// on save conflict per [WithRetryStrategy], since neither pins an exact
+// version. (A [StreamExists] load failure — the stream not existing yet —
+// is still a fail-fast precondition and is always returned immediately.)
+// [NoStream] (stream must not exist) or a specific [Revision] (stream must
+// be at exactly that version) pin the stream to an exact point the caller
+// explicitly asserted; a conflict there is always returned immediately,
+// never retried, since retrying would silently move past that point.
 //
 // Usage:
 //
@@ -247,9 +296,15 @@ func WithStreamState(rev StreamState) CommandHandlerOption {
 }
 
 // WithRetryStrategy sets the [backoff.BackOff] a [NewCommandHandler] uses to
-// retry its load-evolve-decide-save cycle after a
-// [StreamRevisionConflictError]. Without this option, no retries are
-// performed and the handler returns the conflict directly.
+// retry its load-evolve-decide-save cycle after a save conflict, when the
+// handler is configured (via [WithStreamState]) with [Any] (the default) or
+// [StreamExists] — neither pins the stream to an exact version, so a save
+// conflict can be resolved by retrying. It does not apply to a [StreamExists]
+// load failure (the stream not existing yet), which is always returned
+// immediately. Without this option, no retries are performed and the
+// handler returns the conflict directly. It has no effect when
+// [WithStreamState] is set to [NoStream] or a specific [Revision] — those
+// pin an exact point, so a conflict there is always returned immediately.
 //
 // Usage:
 //

@@ -16,11 +16,13 @@ type StreamState interface {
 type Any struct{}
 ```
 
-No concurrency check. Events are always appended regardless of the current stream version.
+No caller-specified expectation of the stream's version. This is the **default** for `NewCommandHandler`.
 
-**Use when**: Order of writes doesn't matter, or you handle conflicts in application logic.
+Passed directly to `EventStore.Save`, `Any{}` means no concurrency check — events are always appended regardless of the current stream version.
 
-This is the **default** for `NewCommandHandler`.
+`NewCommandHandler` behaves differently: it tracks the version it just loaded and saves against that instead, so a concurrent write is still detected as `*StreamRevisionConflictError` and, if `WithRetryStrategy` is configured, retried by reloading, re-deciding, and resaving until it converges. This is what "the framework manages Revision automatically" (below) refers to.
+
+**Use when**: You don't need to pin a specific version yourself and want the handler to resolve conflicts by retrying.
 
 ---
 
@@ -52,6 +54,8 @@ The stream **must exist**. If it doesn't, `Save` returns `ErrStreamNotFound` and
 
 **Use when**: A command targets an existing aggregate and you want to fail fast if it was never created.
 
+In `NewCommandHandler`, that "fail fast" only covers the missing-stream case: a load failure because the stream doesn't exist yet is always returned immediately, never retried, even with `WithRetryStrategy` configured — it's a precondition, not a version race. But once the stream is confirmed to exist, `StreamExists` isn't pinned to a specific version any more than `Any` is, so a subsequent save conflict is retried the same way `Any` converges (see [Any](#any) above).
+
 ---
 
 ## Revision
@@ -62,10 +66,13 @@ type Revision uint64
 
 The stream must be at exactly this version. If the actual version differs, `Save` returns `*StreamRevisionConflictError`.
 
-**Use when**: Implementing optimistic concurrency. `NewCommandHandler` manages this automatically during retries — you should not normally set `Revision` manually.
+**Use when**: You've read the stream at a specific version yourself (e.g. an API caller round-tripping a version from an earlier read) and want to detect — not silently absorb — a change since then. A conflict is always returned immediately, never retried: retrying would move past the exact version you pinned, defeating the reason you asserted it.
+
+You should not normally set `Revision` manually just to get optimistic concurrency inside `NewCommandHandler` — use the default `Any{}` for that, which tracks the loaded version and retries on conflict automatically:
 
 ```go
-// The framework sets this internally after loading events:
+// With Any{}, the framework tracks this internally after loading events
+// and saves against it, instead of a caller-supplied Revision:
 revision = eventsourcing.Revision(lastLoadedVersion)
 ```
 
