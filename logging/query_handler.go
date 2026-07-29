@@ -44,14 +44,6 @@ func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next ev
 // [eventsourcing.QueryBus.Use] to apply logging to all handlers on the bus.
 func QueryLogging(logger *slog.Logger) eventsourcing.QueryHandlerMiddleware {
 	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
-		return func(ctx context.Context, qry eventsourcing.Query) (any, error) {
-			qryType := fmt.Sprintf("%T", qry)
-			logger.InfoContext(ctx, "Query", "query", qryType)
-			result, err := next(ctx, qry)
-			if err != nil {
-				logger.ErrorContext(ctx, "Query failed", "query", qryType, "error", err)
-			}
-			return result, err
-		}
+		return WithQueryLogging(logger, next).HandleQuery
 	}
 }

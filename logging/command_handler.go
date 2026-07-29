@@ -33,14 +33,6 @@ func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next event
 // [eventsourcing.CommandBus.Use] to apply logging to all handlers on the bus.
 func CommandLogging(logger *slog.Logger) eventsourcing.CommandHandlerMiddleware {
 	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
-		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-			cmdType := fmt.Sprintf("%T", cmd)
-			logger.InfoContext(ctx, "Dispatch", "command", cmdType, "aggregateID", cmd.AggregateID())
-			result, err := next(ctx, cmd)
-			if err != nil {
-				logger.ErrorContext(ctx, "Dispatch failed", "command", cmdType, "aggregateID", cmd.AggregateID(), "error", err)
-			}
-			return result, err
-		}
+		return WithCommandLogging(logger, next)
 	}
 }
