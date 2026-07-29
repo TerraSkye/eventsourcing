@@ -83,3 +83,56 @@ func TestSave_StreamNamedAllCollidesWithGlobalDir(t *testing.T) {
 		t.Fatalf("LoadStream(%q)[0].Event = %#v, want *allCollisionEvent{Name: \"first-in-all\"}", "all", envs[0].Event)
 	}
 }
+
+// TestFileStoreClose_CalledTwice_Panics is a regression test for GitHub
+// issue #39: Close unconditionally called close(f.bus) with no guard, so
+// calling it a second time panicked with "close of closed channel",
+// contrary to the EventStore contract that Close must be idempotent.
+func TestFileStoreClose_CalledTwice_Panics(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("first Close: unexpected error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("second Close panicked: %v (EventStore godoc requires Close to be idempotent)", r)
+		}
+	}()
+
+	if err := store.Close(); err != nil {
+		t.Errorf("second Close: unexpected error: %v", err)
+	}
+}
+
+// TestFileStoreSave_AfterClose_Panics is a regression test for GitHub issue
+// #39: Save's non-blocking send to f.bus only guarded against a full
+// channel, not a closed one, so any Save call after Close panicked with
+// "send on closed channel" instead of returning an error.
+func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: unexpected error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Save after Close panicked: %v", r)
+		}
+	}()
+
+	_, err = store.Save(context.Background(), []cqrs.Envelope{
+		envelopeFor("order-1", 0, "after-close"),
+	}, cqrs.NoStream{})
+	if err == nil {
+		t.Error("expected an error saving to a closed store, got nil")
+	}
+}

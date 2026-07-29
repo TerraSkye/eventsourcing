@@ -37,6 +37,7 @@ const streamsDirName = "streams"
 type FilesStore struct {
 	baseDir   string
 	mu        sync.Mutex
+	closed    bool
 	bus       chan *cqrs.Envelope
 	globalSeq uint64
 }
@@ -88,6 +89,10 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	if f.closed {
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf("save to stream %q: event store is closed", streamID)
+	}
 
 	os.MkdirAll(sdir, 0o755)
 
@@ -324,13 +329,17 @@ func (f *FilesStore) Events() <-chan *cqrs.Envelope {
 	return f.bus
 }
 
-// Close closes the channel returned by Events. After Close, the FilesStore
-// must not be used again.
-//
-// TODO: this is not idempotent, contrary to the cqrs.EventStore contract,
-// which asks implementations to make Close safe to call more than once — a
-// second call panics with "close of closed channel".
+// Close closes the channel returned by Events. After Close, Save returns an
+// error instead of appending. Calling Close more than once is a no-op.
 func (f *FilesStore) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+
 	close(f.bus)
 	return nil
 }
