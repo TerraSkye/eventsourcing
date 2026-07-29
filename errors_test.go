@@ -51,7 +51,7 @@ func TestErrorStrings(t *testing.T) {
 
 func TestErrBusinessRuleViolation_Error(t *testing.T) {
 	inner := errors.New("insufficient balance")
-	err := ErrBusinessRuleViolation{Err: inner}
+	err := NewBusinessRuleViolation(inner)
 
 	want := "business rule violation :insufficient balance"
 	if got := err.Error(); got != want {
@@ -70,7 +70,7 @@ func TestErrBusinessRuleViolation_Error_NilCause(t *testing.T) {
 
 func TestErrBusinessRuleViolation_Unwrap(t *testing.T) {
 	inner := errors.New("item out of stock")
-	err := ErrBusinessRuleViolation{Err: inner}
+	err := NewBusinessRuleViolation(inner)
 
 	if !errors.Is(err, inner) {
 		t.Error("errors.Is should match the wrapped inner error")
@@ -79,23 +79,38 @@ func TestErrBusinessRuleViolation_Unwrap(t *testing.T) {
 
 func TestErrBusinessRuleViolation_Cause(t *testing.T) {
 	inner := errors.New("duplicate order")
-	err := ErrBusinessRuleViolation{Err: inner}
 
-	if err.Cause() != inner {
-		t.Errorf("Cause() = %v, want %v", err.Cause(), inner)
+	var violation *ErrBusinessRuleViolation
+	if !errors.As(NewBusinessRuleViolation(inner), &violation) {
+		t.Fatal("expected NewBusinessRuleViolation to return an *ErrBusinessRuleViolation")
+	}
+
+	if violation.Cause() != inner {
+		t.Errorf("Cause() = %v, want %v", violation.Cause(), inner)
 	}
 }
 
 func TestErrBusinessRuleViolation_ErrorsAs(t *testing.T) {
 	inner := errors.New("age restriction")
-	wrapped := fmt.Errorf("command failed: %w", &ErrBusinessRuleViolation{Err: inner})
+	wrapped := fmt.Errorf("command failed: %w", NewBusinessRuleViolation(inner))
 
 	var violation *ErrBusinessRuleViolation
 	if !errors.As(wrapped, &violation) {
 		t.Fatal("errors.As should unwrap to *ErrBusinessRuleViolation")
 	}
 
-	if violation.Err != inner {
-		t.Errorf("inner error = %v, want %v", violation.Err, inner)
+	if violation.Cause() != inner {
+		t.Errorf("Cause() = %v, want %v", violation.Cause(), inner)
+	}
+}
+
+// TestNewBusinessRuleViolation_NilErr covers the reason NewBusinessRuleViolation
+// exists: passing a possibly-nil err straight through must produce a true nil
+// error, not a non-nil interface wrapping a nil-cause *ErrBusinessRuleViolation
+// (the classic typed-nil-in-interface footgun), so a decide function can
+// return NewBusinessRuleViolation(validate(...)) unconditionally.
+func TestNewBusinessRuleViolation_NilErr(t *testing.T) {
+	if err := NewBusinessRuleViolation(nil); err != nil {
+		t.Errorf("NewBusinessRuleViolation(nil) = %v, want nil", err)
 	}
 }

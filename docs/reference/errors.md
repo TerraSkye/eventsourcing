@@ -29,11 +29,21 @@ if errors.Is(err, eventsourcing.ErrStreamNotFound) {
 
 ```go
 type ErrBusinessRuleViolation struct {
-    Err error
+    // unexported cause
 }
+
+func NewBusinessRuleViolation(err error) error
 ```
 
 Wraps the error returned by a `Decider` function. Returned by `CommandHandler` when `decide` returns a non-nil error.
+
+The cause is unexported, so construct one with `NewBusinessRuleViolation` rather than a struct literal. If `err` is nil, `NewBusinessRuleViolation` returns nil too — so a `decide` function can return a possibly-nil validation error straight through without an explicit nil check:
+
+```go
+func decide(state State, cmd Command) ([]eventsourcing.Event, error) {
+    return nil, eventsourcing.NewBusinessRuleViolation(validate(state, cmd))
+}
+```
 
 ```go
 var violation *eventsourcing.ErrBusinessRuleViolation

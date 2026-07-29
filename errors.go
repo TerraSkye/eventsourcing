@@ -67,22 +67,38 @@ func (e ErrSkippedEvent) Error() string {
 
 // ErrBusinessRuleViolation wraps an error returned when a [Command] violates
 // a business rule. Use it to signal expected, recoverable domain-level
-// rejections, as opposed to infrastructure or persistence errors.
+// rejections, as opposed to infrastructure or persistence errors. Its cause
+// is unexported — construct one with [NewBusinessRuleViolation] and read the
+// cause back with [ErrBusinessRuleViolation.Cause] or [errors.Unwrap].
 type ErrBusinessRuleViolation struct {
-	Err error
+	err error
+}
+
+// NewBusinessRuleViolation wraps err as an [ErrBusinessRuleViolation]. If err
+// is nil, it returns nil, so a decide function can pass a possibly-nil
+// validation error straight through without an explicit nil check:
+//
+//	func decide(state State, cmd Command) ([]Event, error) {
+//		return nil, NewBusinessRuleViolation(validate(state, cmd))
+//	}
+func NewBusinessRuleViolation(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ErrBusinessRuleViolation{err: err}
 }
 
 func (e ErrBusinessRuleViolation) Error() string {
-	if e.Err == nil {
+	if e.err == nil {
 		return "business rule violation"
 	}
-	return fmt.Sprintf("business rule violation :%s", e.Err.Error())
+	return fmt.Sprintf("business rule violation :%s", e.err.Error())
 }
 
 func (e ErrBusinessRuleViolation) Cause() error {
-	return e.Err
+	return e.err
 }
 
 func (e ErrBusinessRuleViolation) Unwrap() error {
-	return e.Err
+	return e.err
 }
