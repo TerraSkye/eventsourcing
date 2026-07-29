@@ -377,18 +377,24 @@ func WithStartAt(revision uint64) cqrs.SubscriberOption {
 
 // WithFilterEvents returns a [cqrs.SubscriberOption] that configures a
 // newly created persistent subscription's server-side filter to include
-// only events whose KurrentDB event type is one of filteredEvents. It has
-// no effect on a subscription that already exists in KurrentDB. Since a
-// persistent subscription has a single filter, combine all desired names
-// into one call rather than calling this more than once: applying it
-// together with WithFilterStream, or applying either more than once, means
-// only the last one applied takes effect. It panics if applied to a bus
-// other than this package's [EventBus].
+// only events whose KurrentDB event type is one of filteredEvents. An empty
+// or nil filteredEvents leaves the subscription unfiltered — matching every
+// event type — same as the memory, file, and postgres EventBus
+// implementations' own empty-filter conventions. It has no effect on a
+// subscription that already exists in KurrentDB. Since a persistent
+// subscription has a single filter, combine all desired names into one call
+// rather than calling this more than once: applying it together with
+// WithFilterStream, or applying either more than once, means only the last
+// one applied takes effect. It panics if applied to a bus other than this
+// package's [EventBus].
 func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
 		if !ok {
 			panic(fmt.Sprintf("WithFilterEvents: expected *SubscribeToAllOptions, got %T", cfg))
+		}
+		if len(filteredEvents) == 0 {
+			return
 		}
 		opts.Filter = &kurrentdb.SubscriptionFilter{
 			Type:  kurrentdb.EventFilterType,
