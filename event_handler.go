@@ -3,6 +3,7 @@ package eventsourcing
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 )
 
@@ -53,9 +54,16 @@ func (h typedEventHandler[T]) EventName() string {
 	return fmt.Sprintf("%T", zero)
 }
 
-// EventInstance returns a zero-value instance of the event type T.
+// EventInstance returns an instance of the event type T suitable for calling
+// methods on, such as [Event.EventType] — for a non-pointer T this is just
+// the zero value, but for a pointer T the zero value is nil, which would
+// panic if EventType happens to be a value-receiver method promoted to the
+// pointer, so a fresh zero-value pointee is allocated instead.
 func (h typedEventHandler[T]) EventInstance() Event {
 	var zero T
+	if t := reflect.TypeOf(zero); t != nil && t.Kind() == reflect.Pointer {
+		return reflect.New(t.Elem()).Interface().(Event)
+	}
 	return zero
 }
 
@@ -140,15 +148,19 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	return h.Handle(ctx, ev)
 }
 
-// StreamFilter returns the sorted, registered names (see [EventNamesFor])
-// of every event type this group has a handler for — useful, for example,
-// as the filter passed to [EventBus.Subscribe] via a filtering
-// [SubscriberOption].
+// StreamFilter returns the sorted [Event.EventType] of every event type this
+// group has a handler for — useful, for example, as the filter passed to
+// [EventBus.Subscribe] via a filtering [SubscriberOption]. It reads
+// EventType directly off each handler's zero-value event instance rather
+// than consulting the global event registry, so it reflects exactly what
+// this group routes on: registering an event with [RegisterEvent] is only
+// needed by stores that rehydrate events by name, and has no bearing on
+// what a group actually handles.
 func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
 	for _, h := range p.handlers {
 		if ei, ok := h.(interface{ EventInstance() Event }); ok {
-			out = append(out, EventNamesFor(ei.EventInstance())...)
+			out = append(out, ei.EventInstance().EventType())
 		}
 	}
 	sort.Strings(out) // deterministic order

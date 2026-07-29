@@ -168,15 +168,14 @@ func TestEventGroupProcessor_DuplicateHandlerPanics(t *testing.T) {
 	)
 }
 
+// TestEventGroupProcessor_StreamFilter_Sorted asserts StreamFilter returns
+// each handled type's own Event.EventType(), sorted. It deliberately does
+// not register either type in the global event registry (registration is
+// only needed by stores that rehydrate events by name, per GitHub issue
+// #55), and a later RegisterEventByName alias for one of the types must not
+// change the filter, since StreamFilter reflects what the group routes on,
+// not the registry.
 func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
-	registryMu.Lock()
-	registry = map[string]func() Event{}
-	typeToNames = map[string][]string{}
-	registryMu.Unlock()
-
-	RegisterEvent(&CartCreated{})
-	RegisterEvent(&ItemAdded{})
-
 	group := NewEventGroupProcessor(
 		OnEvent(func(ctx context.Context, ev *ItemAdded) error { return nil }),
 		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
@@ -193,9 +192,8 @@ func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
 	})
 
 	names = group.StreamFilter()
-	expected = []string{"CartCreated", "ItemAdded", "ItemAddedV2"}
 	if !reflect.DeepEqual(names, expected) {
-		t.Errorf("StreamFilter() after RegisterEventByName = %v, want %v", names, expected)
+		t.Errorf("StreamFilter() after RegisterEventByName = %v, want unchanged %v", names, expected)
 	}
 }
 
