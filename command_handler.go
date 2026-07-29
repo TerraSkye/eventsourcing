@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -201,9 +202,7 @@ func NewCommandHandler[T any, C Command](
 			envelopes := make([]Envelope, len(events))
 			baseMetadata := make(map[string]any)
 			for _, fn := range options.MetadataFuncs {
-				for k, v := range fn(ctx) {
-					baseMetadata[k] = v
-				}
+				maps.Copy(baseMetadata, fn(ctx))
 			}
 
 			nextVersion := lastVersion + 1
@@ -213,7 +212,7 @@ func NewCommandHandler[T any, C Command](
 					EventID:    uuid.New(),
 					StreamID:   streamID,
 					Event:      event,
-					Metadata:   baseMetadata,
+					Metadata:   maps.Clone(baseMetadata),
 					Version:    nextVersion + uint64(i),
 					OccurredAt: time.Now(),
 				}

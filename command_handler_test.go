@@ -598,6 +598,60 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	}
 }
 
+// TestNewCommandHandler_EnvelopesDoNotShareMetadataMap is a regression test
+// for GitHub issue #24: when decide produces multiple events, every envelope
+// in the batch used to get the same *map[string]any* instance for Metadata,
+// so mutating one envelope's metadata after the fact (e.g. a per-event
+// causation_id, as otel.TelemetryStore.Save adds) silently mutated every
+// other envelope's metadata too.
+func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
+	var savedEnvelopes []Envelope
+	store := &testStore{
+		loadFn: func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+			return newSliceEnvelopeIterator(nil), nil
+		},
+		saveFn: func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+			savedEnvelopes = envelopes
+			return AppendResult{Successful: true, StreamID: "s"}, nil
+		},
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(state int, env *Envelope) int { return state + 1 },
+		func(state int, cmd testEvent) ([]Event, error) {
+			return []Event{
+				testEvent{agg: cmd.AggregateID(), typ: "first"},
+				testEvent{agg: cmd.AggregateID(), typ: "second"},
+			}, nil
+		},
+		WithMetadataExtractor(func(ctx context.Context) map[string]any {
+			return map[string]any{"seed": "value"}
+		}),
+	)
+
+	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("expected successful append, got %+v", res)
+	}
+	if len(savedEnvelopes) != 2 {
+		t.Fatalf("expected 2 saved envelopes, got %d", len(savedEnvelopes))
+	}
+
+	// Simulate a consumer enriching only the FIRST event's metadata after the
+	// batch was produced (e.g. the otel decorator's per-event causation_id).
+	savedEnvelopes[0].Metadata["causation_id"] = "abc-123"
+
+	if v, ok := savedEnvelopes[1].Metadata["causation_id"]; ok {
+		t.Fatalf("second event's metadata was mutated by writing to the first "+
+			"event's metadata map: got causation_id=%v", v)
+	}
+}
+
 func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 	// This test verifies that when an iterator encounters an unregistered event
 	// (e.g., from NewEventByName failing), the error is properly propagated
