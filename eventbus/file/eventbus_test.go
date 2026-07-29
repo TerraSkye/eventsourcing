@@ -3,8 +3,6 @@ package file
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -42,12 +40,6 @@ func TestFileEventBusCloseIdempotent(t *testing.T) {
 // only stops the subscriber's loop from picking up anything further; a
 // currently-running processFile/Handle call always uses context.Background()
 // and completes normally even if Close runs concurrently.
-//
-// This writes the event file directly into the subscriber's directory
-// instead of going through Dispatch, deliberately sidestepping a separate,
-// already-tracked bug where Envelope.Event (a non-empty interface) cannot
-// round-trip through encoding/json — irrelevant to what's being tested here,
-// which is only whether the handler's context is left uncancelled.
 func TestFileEventBusClose_LetsInFlightHandlerFinish(t *testing.T) {
 	root := t.TempDir()
 	bus, err := NewFileEventBus(root)
@@ -70,10 +62,14 @@ func TestFileEventBusClose_LetsInFlightHandlerFinish(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	subDir := filepath.Join(root, "sub1")
-	eventPath := filepath.Join(subDir, "00000000000000000001.json")
-	if err := os.WriteFile(eventPath, []byte(`{"StreamID":"s1"}`), 0o644); err != nil {
-		t.Fatalf("write event file: %v", err)
+	// Let the subscriber's fsnotify watcher come up before dispatching.
+	time.Sleep(200 * time.Millisecond)
+
+	if err := bus.Dispatch(&eventsourcing.Envelope{
+		StreamID: "s1",
+		Event:    orderPlaced{ID: "s1", Total: 1},
+	}); err != nil {
+		t.Fatalf("Dispatch: %v", err)
 	}
 
 	select {
