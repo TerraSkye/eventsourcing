@@ -2,6 +2,8 @@ package file
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	cqrs "github.com/terraskye/eventsourcing"
@@ -134,5 +136,60 @@ func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
 	}, cqrs.NoStream{})
 	if err == nil {
 		t.Error("expected an error saving to a closed store, got nil")
+	}
+}
+
+// TestFileStoreGlobalSequenceSurvivesReopen is a regression test for GitHub
+// issue #40: globalSeq started at 0 on every NewFileStore call and was never
+// recovered from the events already on disk, so reopening a store over an
+// existing directory re-issued global versions that were already taken —
+// causing Save to fail with "file exists" (same event type as an existing
+// event) or silently produce duplicate GlobalVersion values (different
+// event type).
+func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	first, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	res, err := first.Save(ctx, []cqrs.Envelope{envelopeFor("cart-1", 0, "first")}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("first Save unsuccessful")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen the same directory, as a process restart would.
+	second, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("reopen NewFileStore: %v", err)
+	}
+	defer second.Close()
+
+	res, err = second.Save(ctx, []cqrs.Envelope{envelopeFor("cart-2", 0, "second")}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("Save after reopen: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("Save after reopen unsuccessful")
+	}
+
+	// Both events must be reachable from all/ with distinct global versions.
+	entries, err := os.ReadDir(filepath.Join(dir, allDirName))
+	if err != nil {
+		t.Fatalf("ReadDir(all): %v", err)
+	}
+	if len(entries) != 2 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("all/ has %d entries %v, want 2", len(entries), names)
 	}
 }

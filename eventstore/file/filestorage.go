@@ -43,18 +43,58 @@ type FilesStore struct {
 }
 
 // NewFileStore creates a [FilesStore] rooted at dir, creating dir and its
-// reserved subdirectories if they do not already exist.
+// reserved subdirectories if they do not already exist. If dir already
+// contains events from a previous instance, the global sequence used to
+// number new events (see Save) resumes after the highest one already on
+// disk, rather than restarting at zero.
 func NewFileStore(dir string) (*FilesStore, error) {
-	if err := os.MkdirAll(filepath.Join(dir, allDirName), 0o755); err != nil {
+	allDir := filepath.Join(dir, allDirName)
+	if err := os.MkdirAll(allDir, 0o755); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(dir, streamsDirName), 0o755); err != nil {
 		return nil, err
 	}
+
+	globalSeq, err := highestGlobalVersion(allDir)
+	if err != nil {
+		return nil, fmt.Errorf("recover global sequence: %w", err)
+	}
+
 	return &FilesStore{
-		baseDir: dir,
-		bus:     make(chan *cqrs.Envelope, 100),
+		baseDir:   dir,
+		bus:       make(chan *cqrs.Envelope, 100),
+		globalSeq: globalSeq,
 	}, nil
+}
+
+// highestGlobalVersion returns the highest global version already recorded
+// in allDir (named "%010d-<EventType>.json"), or 0 if allDir is empty.
+func highestGlobalVersion(allDir string) (uint64, error) {
+	entries, err := os.ReadDir(allDir)
+	if err != nil {
+		return 0, err
+	}
+
+	var highest uint64
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok {
+			continue
+		}
+		numPart, _, ok := strings.Cut(name, "-")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseUint(numPart, 10, 64)
+		if err != nil {
+			continue
+		}
+		if n > highest {
+			highest = n
+		}
+	}
+	return highest, nil
 }
 
 func (f *FilesStore) streamDir(id string) string {
