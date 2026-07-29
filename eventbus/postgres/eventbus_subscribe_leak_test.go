@@ -1,0 +1,61 @@
+package postgres_test
+
+import (
+	"context"
+	"runtime"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	cqrs "github.com/terraskye/eventsourcing"
+	pgbus "github.com/terraskye/eventsourcing/eventbus/postgres"
+)
+
+func countGoroutinesCreatedBy(substr string) int {
+	buf := make([]byte, 4<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), substr)
+}
+
+// TestSubscribe_CtxWatcherGoroutineLeaksAfterClose is a regression test for
+// GitHub issue #34: the goroutine that auto-removes a subscriber blocked on
+// <-ctx.Done() alone, which never fires for a long-lived ctx such as
+// context.Background() (used by every other test/example in this repo) —
+// leaking one goroutine per Subscribe call for the rest of the process's
+// life, unaffected by Close.
+func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
+	const n = 20
+	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/postgres.(*EventBus).Subscribe"
+
+	pool := newPool(t)
+	bus := pgbus.NewEventBus(pool, 50*time.Millisecond)
+
+	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+		return nil
+	})
+
+	before := countGoroutinesCreatedBy(createdBy)
+
+	for i := 0; i < n; i++ {
+		name := "leak-sub-" + strconv.Itoa(i)
+		if err := bus.Subscribe(context.Background(), name, handler); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+
+	if err := bus.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Give any well-behaved goroutines a chance to exit.
+	time.Sleep(500 * time.Millisecond)
+	runtime.GC()
+
+	after := countGoroutinesCreatedBy(createdBy)
+
+	leaked := after - before
+	if leaked > 0 {
+		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
+	}
+}
