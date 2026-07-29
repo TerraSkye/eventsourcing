@@ -318,7 +318,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
-		WithStreamState(Revision(5)), // will be updated to latest loaded revision (7)
+		WithStreamState(Revision(5)), // explicit Revision is a hard expectation and stays fixed
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -337,6 +337,194 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		}
 	default:
 		t.Fatalf("expected StreamState, got %T", seenRevision)
+	}
+}
+
+// TestNewCommandHandler_AnyRevision_RetryConverges is a regression test for
+// GitHub issue #23: with the default Any{} stream state, a save conflict
+// must be retried against the revision the handler just loaded, not a
+// stale one, so a competing writer landing between load and save doesn't
+// make every retry fail identically.
+func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
+	store := &testStore{}
+
+	// First load returns the stream as it was before a competing writer's
+	// append; the second load (triggered by the retry) returns the extra
+	// event that competing writer landed.
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		if store.loadCalled == 1 {
+			return newSliceEnvelopeIterator([]*Envelope{
+				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
+			}), nil
+		}
+		return newSliceEnvelopeIterator([]*Envelope{
+			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
+		}), nil
+	}
+
+	var seenRevisions []StreamState
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		seenRevisions = append(seenRevisions, revision)
+		if len(seenRevisions) == 1 {
+			return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(1), ActualRevision: Revision(2)}
+		}
+		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s + 1 },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+	)
+
+	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err != nil {
+		t.Fatalf("expected retry to converge, got error: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("expected successful append, got %+v", res)
+	}
+
+	if len(seenRevisions) != 2 {
+		t.Fatalf("expected 2 save attempts, got %d", len(seenRevisions))
+	}
+	if rv, ok := seenRevisions[0].(Revision); !ok || uint64(rv) != 1 {
+		t.Fatalf("expected first save to use Revision(1), got %#v", seenRevisions[0])
+	}
+	if rv, ok := seenRevisions[1].(Revision); !ok || uint64(rv) != 2 {
+		t.Fatalf("expected retried save to use Revision(2) (advanced past the foreign event), got %#v", seenRevisions[1])
+	}
+}
+
+// TestNewCommandHandler_ExplicitRevision_ConflictNotRetried verifies that a
+// caller-supplied Revision(N) is a hard expectation: a conflict against it
+// is returned immediately, even when a retry strategy is configured that
+// would otherwise allow retries.
+func TestNewCommandHandler_ExplicitRevision_ConflictNotRetried(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(nil), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(0), ActualRevision: Revision(1)}
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithStreamState(Revision(0)),
+		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 5)),
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err == nil {
+		t.Fatalf("expected the explicit Revision(0) conflict to be returned as an error")
+	}
+	var conflict *StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected error to wrap *StreamRevisionConflictError, got: %v", err)
+	}
+	if store.saveCalled != 1 {
+		t.Fatalf("expected exactly 1 save attempt (no retry for an explicit Revision), got %d", store.saveCalled)
+	}
+}
+
+// TestNewCommandHandler_StreamExists_MissingStreamFailsFast verifies that a
+// StreamExists{} load failure (the stream doesn't exist yet) is returned
+// immediately, never retried — even with a retry strategy configured. Only
+// once a StreamExists load succeeds does the handler stop pinning an exact
+// expectation and start auto-converging on save conflicts (see
+// TestNewCommandHandler_StreamExists_ConflictRetries).
+func TestNewCommandHandler_StreamExists_MissingStreamFailsFast(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return nil, fmt.Errorf("stream %q: should exist: %w", stream, ErrStreamNotFound)
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		t.Fatalf("Save should not be called when the stream doesn't exist")
+		return AppendResult{}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s + 1 },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithStreamState(StreamExists{}),
+		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err == nil {
+		t.Fatalf("expected an error when the stream doesn't exist")
+	}
+	if !errors.Is(err, ErrStreamNotFound) {
+		t.Fatalf("expected error to wrap ErrStreamNotFound, got: %v", err)
+	}
+	if store.loadCalled != 1 {
+		t.Fatalf("expected exactly 1 load attempt (no retry while the stream doesn't exist), got %d", store.loadCalled)
+	}
+}
+
+// TestNewCommandHandler_StreamExists_ConflictRetries verifies that once the
+// stream is confirmed to exist, StreamExists{} behaves like Any{} for
+// concurrency conflicts: it isn't pinned to a version, so a conflict is
+// resolved by reloading and retrying rather than failing immediately.
+func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		if store.loadCalled == 1 {
+			return newSliceEnvelopeIterator([]*Envelope{
+				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
+			}), nil
+		}
+		return newSliceEnvelopeIterator([]*Envelope{
+			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
+		}), nil
+	}
+
+	var seenRevisions []StreamState
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		seenRevisions = append(seenRevisions, revision)
+		if len(seenRevisions) == 1 {
+			return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(1), ActualRevision: Revision(2)}
+		}
+		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s + 1 },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithStreamState(StreamExists{}),
+		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+	)
+
+	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err != nil {
+		t.Fatalf("expected retry to converge, got error: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("expected successful append, got %+v", res)
+	}
+	if len(seenRevisions) != 2 {
+		t.Fatalf("expected 2 save attempts, got %d", len(seenRevisions))
+	}
+	if rv, ok := seenRevisions[1].(Revision); !ok || uint64(rv) != 2 {
+		t.Fatalf("expected retried save to use Revision(2) (advanced past the foreign event), got %#v", seenRevisions[1])
 	}
 }
 
