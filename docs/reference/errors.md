@@ -35,20 +35,23 @@ type ErrBusinessRuleViolation struct {
 func NewBusinessRuleViolation(err error) error
 ```
 
-Wraps the error returned by a `Decider` function. Returned by `CommandHandler` when `decide` returns a non-nil error.
+Wraps the error returned by a `Decider` function. `NewCommandHandler` already wraps whatever error `decide` returns in one of these automatically — so a `decide` function used with it should just return the plain error (e.g. `fmt.Errorf("task already exists")`), not call `NewBusinessRuleViolation` itself; doing so would nest one violation inside another.
 
-The cause is unexported, so construct one with `NewBusinessRuleViolation` rather than a struct literal. If `err` is nil, `NewBusinessRuleViolation` returns nil too — so a `decide` function can return a possibly-nil validation error straight through without an explicit nil check:
+The cause is unexported, so construct one with `NewBusinessRuleViolation` rather than a struct literal. Use it when signaling a business rule violation from a hand-rolled `CommandHandler` that doesn't go through `NewCommandHandler`'s decide step — e.g. so an OpenTelemetry middleware can still recognize it as an expected, recoverable rejection via `errors.As`. If `err` is nil, `NewBusinessRuleViolation` returns nil too:
 
 ```go
-func decide(state State, cmd Command) ([]eventsourcing.Event, error) {
-    return nil, eventsourcing.NewBusinessRuleViolation(validate(state, cmd))
+func handleCreateTask(ctx context.Context, cmd CreateTask) (eventsourcing.AppendResult, error) {
+    if err := validate(cmd); err != nil {
+        return eventsourcing.AppendResult{}, eventsourcing.NewBusinessRuleViolation(err)
+    }
+    // ... append the resulting events directly ...
 }
 ```
 
 ```go
 var violation *eventsourcing.ErrBusinessRuleViolation
 if errors.As(err, &violation) {
-    cause := violation.Unwrap() // the original error from decide
+    cause := violation.Unwrap() // the original error
 }
 ```
 

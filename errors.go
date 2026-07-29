@@ -75,12 +75,15 @@ type ErrBusinessRuleViolation struct {
 }
 
 // NewBusinessRuleViolation wraps err as an [ErrBusinessRuleViolation]. If err
-// is nil, it returns nil, so a decide function can pass a possibly-nil
-// validation error straight through without an explicit nil check:
+// is nil, it returns nil.
 //
-//	func decide(state State, cmd Command) ([]Event, error) {
-//		return nil, NewBusinessRuleViolation(validate(state, cmd))
-//	}
+// [NewCommandHandler] already wraps whatever error its [Decider] returns in
+// an ErrBusinessRuleViolation, so a Decider used with it should just return
+// the plain error — calling this in a Decider would nest one violation
+// inside another. Use it when signaling a business rule violation from a
+// hand-rolled [CommandHandler] that doesn't go through NewCommandHandler's
+// decide step, so callers (e.g. an OpenTelemetry middleware) can still
+// recognize it as an expected, recoverable rejection via [errors.As].
 func NewBusinessRuleViolation(err error) error {
 	if err == nil {
 		return nil
