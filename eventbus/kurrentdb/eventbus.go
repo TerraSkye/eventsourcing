@@ -414,7 +414,10 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 
 // WithFilterStream returns a [cqrs.SubscriberOption] that configures a
 // newly created persistent subscription's server-side filter to include
-// only streams whose name starts with one of streams. It has no effect on
+// only streams whose name starts with one of streams. An empty or nil
+// streams leaves the subscription unfiltered — matching every stream —
+// rather than being sent to KurrentDB as an empty filter, which the server
+// rejects outright ("must provide regex or prefixes"). It has no effect on
 // a subscription that already exists in KurrentDB, and — as with
 // WithFilterEvents — only the last filter option applied takes effect. It
 // panics if applied to a bus other than this package's [EventBus].
@@ -423,6 +426,9 @@ func WithFilterStream(streams []string) cqrs.SubscriberOption {
 		opts, ok := cfg.(*kurrentdb.PersistentAllSubscriptionOptions)
 		if !ok {
 			panic(fmt.Sprintf("WithFilterStream: expected *PersistentAllSubscriptionOptions, got %T", cfg))
+		}
+		if len(streams) == 0 {
+			return
 		}
 		opts.Filter = &kurrentdb.SubscriptionFilter{
 			Type:     kurrentdb.StreamFilterType,

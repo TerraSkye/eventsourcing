@@ -121,3 +121,24 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
 	}
 }
+
+// TestSubscribe_WithFilterStreamEmptyAlwaysFails is a regression test for
+// GitHub issue #47: WithFilterStream unconditionally set
+// Filter.Prefixes = streams with no handling for an empty/nil slice. An
+// empty stream list produced a SubscriptionFilter with both Prefixes and
+// Regex empty, which the vendor KurrentDB client rejects outright when
+// creating the persistent subscription ("must provide regex or prefixes"),
+// so every Subscribe call passing WithFilterStream(nil) failed
+// unconditionally instead of being treated as "no filter".
+func TestSubscribe_WithFilterStreamEmptyAlwaysFails(t *testing.T) {
+	bus := kdbbus.NewEventBus(testDB, 50)
+
+	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+		return nil
+	})
+
+	err := bus.Subscribe(context.Background(), "filter-stream-empty-sub", handler, kdbbus.WithFilterStream(nil))
+	if err != nil {
+		t.Fatalf("Subscribe with an empty stream filter should succeed (treated as no filter), got error: %v", err)
+	}
+}
