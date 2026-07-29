@@ -76,7 +76,9 @@ func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 // a subscription that already exists in KurrentDB. It returns an error if
 // handler is nil, the bus is already closed, name is already registered, or
 // the subscription could not be ensured. The subscription is removed from
-// the bus automatically when ctx is canceled.
+// the bus automatically when ctx is canceled, or when the bus is closed —
+// neither leaves a goroutine behind, even if ctx is long-lived (e.g.
+// context.Background()).
 func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
@@ -98,7 +100,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	}
 	handler = wrapped
 
-	workerCtx, cancel := context.WithCancel(context.Background())
+	workerCtx, cancel := context.WithCancel(ctx)
 
 	opt := kurrentdb.PersistentAllSubscriptionOptions{}
 
@@ -120,9 +122,16 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	b.wg.Add(1)
 	go b.runSubscriber(workerCtx, sub)
 
-	// Remove subscriber when caller context is done
+	// workerCtx is a child of ctx, so its Done channel closes whenever
+	// either the caller cancels ctx (auto-unsubscribe) or Close/
+	// removeSubscriber calls cancel directly — one signal to watch for
+	// both triggers, rather than parking on the caller's ctx alone, which
+	// never fires (and leaks this goroutine) for a long-lived ctx such as
+	// context.Background().
+	b.wg.Add(1)
 	go func() {
-		<-ctx.Done()
+		defer b.wg.Done()
+		<-workerCtx.Done()
 		b.removeSubscriber(name)
 	}()
 
