@@ -111,6 +111,39 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 	}
 }
 
+func TestNewCommandHandler_DecideError_BusinessRuleViolation(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(nil), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		t.Fatalf("Save should not be called when decide returns an error")
+		return AppendResult{}, nil
+	}
+
+	decideErr := errors.New("insufficient funds")
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return nil, decideErr
+		},
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "a", typ: "t"})
+	if err == nil {
+		t.Fatalf("expected decide's error to be returned")
+	}
+	var violation *ErrBusinessRuleViolation
+	if !errors.As(err, &violation) {
+		t.Fatalf("expected error to wrap *ErrBusinessRuleViolation, got: %v", err)
+	}
+	if !errors.Is(err, decideErr) {
+		t.Fatalf("expected error chain to contain decide's original error, got: %v", err)
+	}
+}
+
 func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {

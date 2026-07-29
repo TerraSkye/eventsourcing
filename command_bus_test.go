@@ -3,7 +3,9 @@ package eventsourcing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -73,6 +75,32 @@ func TestCommandBus_HandlerPanic(t *testing.T) {
 	bus.Stop()
 }
 
+// TestCommandBus_HandlerPanicWithError covers the branch where the recovered
+// panic value already is an error (as opposed to TestCommandBus_HandlerPanic's
+// string panic), so the worker uses it directly instead of wrapping it with
+// fmt.Errorf("panic: %v", r).
+func TestCommandBus_HandlerPanicWithError(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+
+	boom := errors.New("boom")
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		panic(boom)
+	})
+
+	_, err := bus.Dispatch(context.Background(), testCmd{ID: "x"})
+	if err == nil {
+		t.Fatalf("expected panic recovery error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected error chain to contain the panicked error, got: %v", err)
+	}
+	if !errors.Is(err, ErrHandlerPanicked) {
+		t.Fatalf("expected error chain to contain ErrHandlerPanicked, got: %v", err)
+	}
+
+	bus.Stop()
+}
+
 func TestCommandBus_ContextCancelBeforeEnqueue(t *testing.T) {
 	bus := NewCommandBus(0, 1) // zero buffer so enqueue blocks
 
@@ -129,6 +157,36 @@ func TestRegister_DuplicateHandlerPanics(t *testing.T) {
 	})
 }
 
+// TestRegister_HandlerTypeMismatchReturnsError covers Register's generated
+// wrapper's own type assertion (cmd.(C)) failing. In normal use this can't
+// happen — the worker only ever looks a handler up by the same %T string
+// Register derived it from — so this calls the wrapper directly (fetched via
+// handlerFor, bypassing the worker's cmdName-matching) with a command of a
+// different concrete type to exercise the defensive check itself.
+func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		return AppendResult{Successful: true}, nil
+	})
+
+	cmdName := fmt.Sprintf("%T", testCmd{})
+	h, ok := bus.handlerFor(cmdName)
+	if !ok {
+		t.Fatalf("expected a handler registered for %s", cmdName)
+	}
+
+	_, err := h(context.Background(), testCmd2{ID: "mismatched"})
+	if err == nil {
+		t.Fatalf("expected an error for a command type mismatch")
+	}
+	if !strings.Contains(err.Error(), "expected command type") {
+		t.Fatalf("expected a type-mismatch error, got: %v", err)
+	}
+
+	bus.Stop()
+}
+
 func TestCommandBus_Stop(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 
@@ -179,7 +237,7 @@ func TestNewCommandBus(t *testing.T) {
 		want int
 	}{
 		{
-			name: "a minumum of 1 shard is present",
+			name: "a minimum of 1 shard is present",
 			args: args{
 				bufferSize: 1,
 				shardCount: 0,
