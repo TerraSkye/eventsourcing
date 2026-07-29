@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,4 +165,39 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	if leaked > 0 {
 		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
 	}
+}
+
+// TestFileEventBus_UseRacesWithSubscribe is a regression test for GitHub
+// issue #28: Use appended to b.middlewares with no synchronization, and
+// Subscribe read b.middlewares before acquiring b.mu, so calling Use
+// concurrently with Subscribe was a data race under `go test -race`.
+func TestFileEventBus_UseRacesWithSubscribe(t *testing.T) {
+	root := t.TempDir()
+	bus, err := NewFileEventBus(root)
+	if err != nil {
+		t.Fatalf("NewFileEventBus: %v", err)
+	}
+	defer bus.Close()
+
+	noopMiddleware := func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
+		return next
+	}
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		bus.Use(noopMiddleware)
+	}()
+
+	go func() {
+		defer wg.Done()
+		_ = bus.Subscribe(context.Background(), "sub-1", handler)
+	}()
+
+	wg.Wait()
 }

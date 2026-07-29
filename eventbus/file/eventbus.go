@@ -89,8 +89,11 @@ func NewFileEventBus(root string) (*FileEventBus, error) {
 // Use adds middlewares that wrap every handler registered afterward via
 // Subscribe. As required by [eventsourcing.EventBus], it must be called
 // before Subscribe: middlewares added after a given subscriber is
-// registered do not apply to that subscriber.
+// registered do not apply to that subscriber. Use and Subscribe are both
+// safe to call concurrently.
 func (b *FileEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.middlewares = append(b.middlewares, middlewares...)
 }
 
@@ -118,11 +121,6 @@ func (b *FileEventBus) Subscribe(
 		opt(cfg)
 	}
 
-	wrapped := handler
-	for i := len(b.middlewares) - 1; i >= 0; i-- {
-		wrapped = b.middlewares[i](wrapped)
-	}
-
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -132,6 +130,11 @@ func (b *FileEventBus) Subscribe(
 
 	if _, exists := b.subs[name]; exists {
 		return fmt.Errorf("subscriber %q already exists", name)
+	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
 	}
 
 	subDir := filepath.Join(b.root, name)
