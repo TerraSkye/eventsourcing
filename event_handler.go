@@ -15,8 +15,12 @@ type EventHandler interface {
 
 // NewEventHandlerFunc returns fn as an [EventHandler], for quickly wrapping
 // a function without defining a separate type. fn is called for every event
-// it is invoked with, unfiltered by type; use [OnEvent] instead if you only
-// want to handle one concrete event type.
+// it is invoked with, unfiltered by type. The returned handler cannot be
+// registered with an [EventGroupProcessor] — that requires each handler to
+// report the single event type name it handles, which a handler for every
+// event type has no one value for — so use [OnEvent] instead if you want a
+// handler usable there, or if you only want to handle one concrete event
+// type.
 //
 // Example Usage:
 //
@@ -24,10 +28,7 @@ type EventHandler interface {
 //	    fmt.Println("Received event:", TypeName(ev))
 //	    return nil
 //	})
-//
-//	// Can be used in an EventHandlerGroup
-//	group := NewEventGroupProcessor(handler)
-//	group.Handle(ctx, MyEvent{ID: "123"})
+//	err := bus.Subscribe(ctx, "logger", handler)
 func NewEventHandlerFunc(fn func(ctx context.Context, event Event) error) EventHandler {
 	return eventHandlerFunc(fn)
 }

@@ -198,3 +198,41 @@ func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
 		t.Errorf("StreamFilter() after RegisterEventByName = %v, want %v", names, expected)
 	}
 }
+
+// TestNewEventHandlerFunc_NotUsableInGroupProcessor is a regression test for
+// GitHub issue #36: NewEventHandlerFunc's own godoc example showed its
+// result being passed to NewEventGroupProcessor, which panics because the
+// returned handler has no single EventName to route by (unlike a handler
+// built with OnEvent). The fix corrected the misleading example rather than
+// the panic — a handler that processes every event type, unfiltered,
+// genuinely cannot report the one event name EventGroupProcessor routes by.
+// This test documents that this panic is expected, and that
+// NewEventHandlerFunc's handler works fine on its own (e.g. via a direct
+// Handle call, as the corrected godoc example shows via EventBus.Subscribe).
+func TestNewEventHandlerFunc_NotUsableInGroupProcessor(t *testing.T) {
+	handler := NewEventHandlerFunc(func(ctx context.Context, ev Event) error {
+		return nil
+	})
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected NewEventGroupProcessor to panic on a NewEventHandlerFunc handler")
+		}
+	}()
+	NewEventGroupProcessor(handler)
+}
+
+func TestNewEventHandlerFunc_UsableDirectly(t *testing.T) {
+	var handled Event
+	handler := NewEventHandlerFunc(func(ctx context.Context, ev Event) error {
+		handled = ev
+		return nil
+	})
+
+	if err := handler.Handle(context.Background(), CartCreated{ID: "123"}); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if handled != (CartCreated{ID: "123"}) {
+		t.Errorf("handled = %v, want %v", handled, CartCreated{ID: "123"})
+	}
+}
