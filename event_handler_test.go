@@ -168,6 +168,10 @@ func TestEventGroupProcessor_DuplicateHandlerPanics(t *testing.T) {
 	)
 }
 
+// TestEventGroupProcessor_StreamFilter_Sorted asserts StreamFilter returns
+// every registered name (see [EventNamesFor]) for each handled type, sorted
+// — including every alias a single concrete event struct is registered
+// under, such as the ItemAddedV2 alias added below for ItemAdded.
 func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
 	registryMu.Lock()
 	registry = map[string]func() Event{}
@@ -196,6 +200,33 @@ func TestEventGroupProcessor_StreamFilter_Sorted(t *testing.T) {
 	expected = []string{"CartCreated", "ItemAdded", "ItemAddedV2"}
 	if !reflect.DeepEqual(names, expected) {
 		t.Errorf("StreamFilter() after RegisterEventByName = %v, want %v", names, expected)
+	}
+}
+
+// TestEventGroupProcessor_StreamFilter_UnregisteredFallsBackToEventType is a
+// regression test for GitHub issue #55: a handled type never passed to
+// RegisterEvent/RegisterEventByType used to be silently omitted from
+// StreamFilter, since the old implementation only ever consulted the global
+// registry. It must fall back to that type's own EventType() instead of
+// being dropped.
+func TestEventGroupProcessor_StreamFilter_UnregisteredFallsBackToEventType(t *testing.T) {
+	registryMu.Lock()
+	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
+	registryMu.Unlock()
+
+	RegisterEvent(&CartCreated{})
+	// ItemAdded intentionally left unregistered.
+
+	group := NewEventGroupProcessor(
+		OnEvent(func(ctx context.Context, ev *ItemAdded) error { return nil }),
+		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
+	)
+
+	names := group.StreamFilter()
+	expected := []string{"CartCreated", "ItemAdded"}
+	if !reflect.DeepEqual(names, expected) {
+		t.Errorf("StreamFilter() = %v, want %v", names, expected)
 	}
 }
 

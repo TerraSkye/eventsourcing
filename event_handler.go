@@ -140,15 +140,28 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	return h.Handle(ctx, ev)
 }
 
-// StreamFilter returns the sorted, registered names (see [EventNamesFor])
-// of every event type this group has a handler for — useful, for example,
-// as the filter passed to [EventBus.Subscribe] via a filtering
-// [SubscriberOption].
+// StreamFilter returns the sorted names of every event type this group has
+// a handler for — useful, for example, as the filter passed to
+// [EventBus.Subscribe] via a filtering [SubscriberOption]. For a handled
+// type registered in the global event registry (see [EventNamesFor]) it
+// includes every name that type is registered under, since one concrete
+// event struct can be registered under several names (for example after a
+// rename, via [RegisterEventByName]) and a subscriber needs to match all of
+// them. For a handled type that isn't registered at all — registration is
+// only needed by stores that rehydrate events by name, and has no bearing
+// on what a group actually handles — it falls back to that type's own
+// [Event.EventType], so an unregistered handled type is never silently
+// dropped from the filter.
 func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
 	for _, h := range p.handlers {
 		if ei, ok := h.(interface{ EventInstance() Event }); ok {
-			out = append(out, EventNamesFor(ei.EventInstance())...)
+			instance := ei.EventInstance()
+			if names := EventNamesFor(instance); len(names) > 0 {
+				out = append(out, names...)
+			} else {
+				out = append(out, instance.EventType())
+			}
 		}
 	}
 	sort.Strings(out) // deterministic order
