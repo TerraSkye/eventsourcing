@@ -269,16 +269,13 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 				if rebuildSpan != nil {
 					rebuildSpan.End()
 				}
-				if err == io.EOF {
-					return nil, io.EOF
-				}
-			} else {
-				EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-				if rebuildSpan != nil {
-					rebuildSpan.RecordError(err)
-					rebuildSpan.SetStatus(codes.Error, err.Error())
-					rebuildSpan.End()
-				}
+				return nil, io.EOF
+			}
+			EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
+			if rebuildSpan != nil {
+				rebuildSpan.RecordError(err)
+				rebuildSpan.SetStatus(codes.Error, err.Error())
+				rebuildSpan.End()
 			}
 			return nil, err
 		}
