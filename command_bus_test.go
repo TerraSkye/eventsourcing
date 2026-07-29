@@ -237,7 +237,7 @@ func TestNewCommandBus(t *testing.T) {
 		want int
 	}{
 		{
-			name: "a minumum of 1 shard is present",
+			name: "a minimum of 1 shard is present",
 			args: args{
 				bufferSize: 1,
 				shardCount: 0,
