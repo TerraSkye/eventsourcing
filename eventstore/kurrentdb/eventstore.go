@@ -352,7 +352,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		Direction:      kurrentdb.Forwards,
 		From:           kurrentdb.Start{},
 		ResolveLinkTos: true,
-	}, 0)
+	}, 5000)
 
 	if err != nil {
 		return nil, err
