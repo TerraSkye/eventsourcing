@@ -59,6 +59,15 @@ func TestErrBusinessRuleViolation_Error(t *testing.T) {
 	}
 }
 
+func TestErrBusinessRuleViolation_Error_NilCause(t *testing.T) {
+	err := ErrBusinessRuleViolation{}
+
+	want := "business rule violation"
+	if got := err.Error(); got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
 func TestErrBusinessRuleViolation_Unwrap(t *testing.T) {
 	inner := errors.New("item out of stock")
 	err := ErrBusinessRuleViolation{Err: inner}

@@ -75,14 +75,18 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 				}
 				var businessViolation *eventsourcing.ErrBusinessRuleViolation
 				if errors.As(err, &businessViolation) {
-					span.SetAttributes(AttrErrorMessage.String(businessViolation.Cause().Error()))
+					causeMessage := "business rule violation"
+					if cause := businessViolation.Cause(); cause != nil {
+						causeMessage = cause.Error()
+					}
+					span.SetAttributes(AttrErrorMessage.String(causeMessage))
 					span.SetStatus(codes.Ok, "")
 					span.AddEvent("business_rule_violation", trace.WithAttributes(
 						AttrCommandType.String(commandType),
 						AttrAggregateID.String(cmd.AggregateID()),
 						AttrStreamID.String(result.StreamID),
 						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-						AttrErrorMessage.String(businessViolation.Cause().Error()),
+						AttrErrorMessage.String(causeMessage),
 					))
 					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 					return result, err
@@ -185,14 +189,18 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 			var bussinessViolation *eventsourcing.ErrBusinessRuleViolation
 			if errors.As(err, &bussinessViolation) {
 
-				span.SetAttributes(AttrErrorMessage.String(bussinessViolation.Cause().Error()))
+				causeMessage := "business rule violation"
+				if cause := bussinessViolation.Cause(); cause != nil {
+					causeMessage = cause.Error()
+				}
+				span.SetAttributes(AttrErrorMessage.String(causeMessage))
 				span.SetStatus(codes.Ok, "")
 				span.AddEvent("business_rule_violation", trace.WithAttributes(
 					AttrCommandType.String(commandType),
 					AttrAggregateID.String(cmd.AggregateID()),
 					AttrStreamID.String(result.StreamID),
 					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-					AttrErrorMessage.String(bussinessViolation.Cause().Error()),
+					AttrErrorMessage.String(causeMessage),
 				))
 				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
 				return result, err

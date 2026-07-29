@@ -73,6 +73,9 @@ type ErrBusinessRuleViolation struct {
 }
 
 func (e ErrBusinessRuleViolation) Error() string {
+	if e.Err == nil {
+		return "business rule violation"
+	}
 	return fmt.Sprintf("business rule violation :%s", e.Err.Error())
 }
 
