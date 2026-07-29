@@ -172,3 +172,23 @@ func TestContextGetters(t *testing.T) {
 		})
 	}
 }
+
+// TestWithEnvelope_NilEvent is a regression test for GitHub issue #60:
+// WithEnvelope called env.Event.AggregateID() with no nil check, panicking
+// on an Envelope whose Event is nil, unlike every other *FromContext getter
+// in this file, which degrades gracefully to a documented zero value.
+func TestWithEnvelope_NilEvent(t *testing.T) {
+	env := &Envelope{
+		StreamID: "some-stream",
+		Event:    nil,
+	}
+
+	ctx := WithEnvelope(t.Context(), env)
+
+	if got := AggregateIDFromContext(ctx); got != "" {
+		t.Errorf("AggregateIDFromContext() = %q, want \"\"", got)
+	}
+	if got := StreamIDFromContext(ctx); got != "some-stream" {
+		t.Errorf("StreamIDFromContext() = %q, want %q", got, "some-stream")
+	}
+}
