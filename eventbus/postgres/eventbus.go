@@ -112,8 +112,11 @@ func newLockPool(pool *pgxpool.Pool) *pgxpool.Pool {
 // Use adds middlewares that wrap every handler registered afterward via
 // Subscribe. As required by [cqrs.EventBus], it must be called before
 // Subscribe: middlewares added after a given subscriber is registered do
-// not apply to that subscriber.
+// not apply to that subscriber. Use and Subscribe are both safe to call
+// concurrently.
 func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.middlewares = append(b.middlewares, middlewares...)
 }
 
@@ -130,12 +133,6 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 		return errors.New("handler cannot be nil")
 	}
 
-	wrapped := handler
-	for i := len(b.middlewares) - 1; i >= 0; i-- {
-		wrapped = b.middlewares[i](wrapped)
-	}
-	handler = wrapped
-
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -145,6 +142,12 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 	if _, exists := b.subs[name]; exists {
 		return fmt.Errorf("subscriber %q already exists", name)
 	}
+
+	wrapped := handler
+	for i := len(b.middlewares) - 1; i >= 0; i-- {
+		wrapped = b.middlewares[i](wrapped)
+	}
+	handler = wrapped
 
 	subOpts := &subscriberOptions{}
 	for _, o := range opts {
