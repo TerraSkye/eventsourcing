@@ -1,0 +1,80 @@
+site_name: eventsourcing
+site_description: A Go library for building event-sourced systems with CQRS support.
+site_url: https://terraskye.github.io/eventsourcing/
+repo_url: https://github.com/TerraSkye/eventsourcing
+repo_name: TerraSkye/eventsourcing
+edit_uri: edit/master/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Tutorials:
+      - Getting Started: tutorials/index.md
+      - "1. Your First Command": tutorials/01-first-command.md
+      - "2. Your First Query": tutorials/02-first-query.md
+      - "3. Business Rules": tutorials/03-business-rules.md
+      - "4. Real-time Projections": tutorials/04-projections.md
+      - "5. Background Processing": tutorials/05-background-processing.md
+  - How-to guides:
+      - Handle concurrency conflicts: how-to/handle-concurrency.md
+      - Add metadata to events: how-to/add-event-metadata.md
+      - Customise stream names: how-to/custom-stream-names.md
+      - The aggregate variant: how-to/share-state-with-aggregate.md
+      - Register events: how-to/register-events.md
+      - Version events: how-to/version-events.md
+      - Use middleware: how-to/use-middleware.md
+      - Use KurrentDB: how-to/use-kurrentdb.md
+      - Add OpenTelemetry tracing: how-to/add-opentelemetry.md
+      - Test event-sourced code: how-to/test-event-sourced-code.md
+  - Reference:
+      - Core interfaces: reference/interfaces.md
+      - CommandHandler: reference/command-handler.md
+      - EventHandler & EventGroupProcessor: reference/event-handler.md
+      - QueryBus & QueryGateway: reference/query-bus.md
+      - CommandBus: reference/command-bus.md
+      - Stream states: reference/stream-states.md
+      - Event registry: reference/event-registry.md
+      - Iterator: reference/iterator.md
+      - Context helpers: reference/context.md
+      - Errors: reference/errors.md
+      - Implementations:
+          - memory.EventStore: reference/implementations/memory-store.md
+          - memory.EventBus: reference/implementations/memory-eventbus.md
+          - postgres.EventStore: reference/implementations/postgres-store.md
+          - postgres.EventBus: reference/implementations/postgres-eventbus.md
+  - Explanation:
+      - Event sourcing concepts: explanation/event-sourcing.md
+      - CQRS: explanation/cqrs.md
+      - The decide/evolve pattern: explanation/decide-evolve.md
+      - Concurrency and optimistic locking: explanation/concurrency.md
+      - Vertical slice architecture: explanation/vertical-slice-architecture.md

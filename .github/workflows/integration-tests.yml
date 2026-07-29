@@ -1,0 +1,26 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  schedule:
+    # Nightly at 03:00 UTC
+    - cron: "0 3 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run all tests (including testcontainers-based integration tests)
+        run: go test -race -v -timeout 20m -tags=integration ./...
