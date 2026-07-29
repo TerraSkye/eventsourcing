@@ -100,7 +100,9 @@ func (b *FileEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) 
 // event; pass [WithFilterEvents] to restrict delivery to specific event
 // types. It returns an error if handler is nil, the bus is already closed,
 // name is already registered, or the subscriber directory cannot be
-// created. The subscription is removed automatically when ctx is canceled.
+// created. The subscription is removed automatically when ctx is canceled,
+// or when the bus is closed — neither leaves a goroutine behind, even if
+// ctx is long-lived (e.g. context.Background()).
 func (b *FileEventBus) Subscribe(
 	ctx context.Context,
 	name string,
@@ -151,8 +153,16 @@ func (b *FileEventBus) Subscribe(
 	b.wg.Add(1)
 	go b.runSubscriber(workerCtx, s, subDir)
 
+	// workerCtx is a child of ctx, so its Done channel closes whenever
+	// either the caller cancels ctx (auto-unsubscribe) or Close/
+	// removeSubscriber calls cancel directly — one signal to watch for
+	// both triggers, rather than parking on the caller's ctx alone, which
+	// never fires (and leaks this goroutine) for a long-lived ctx such as
+	// context.Background().
+	b.wg.Add(1)
 	go func() {
-		<-ctx.Done()
+		defer b.wg.Done()
+		<-workerCtx.Done()
 		b.removeSubscriber(name)
 	}()
 
