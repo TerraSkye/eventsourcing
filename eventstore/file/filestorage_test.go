@@ -320,3 +320,118 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadStreamFrom_RevisionAtStreamHead is a regression test for GitHub
+// issue #42: loadFromDir's Revision guard used >= where a start index needs
+// >, so asking for the revision a stream is currently at — "I am caught up,
+// give me anything newer" — returned ErrInvalidRevision instead of an empty
+// iterator. Revision(0) against an empty-but-existing stream made it
+// impossible to create a new aggregate through NewCommandHandler configured
+// with WithStreamState(Revision(0)).
+func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		eventCount int
+	}{
+		{name: "fresh stream, revision 0", eventCount: 0},
+		{name: "one event, revision 1", eventCount: 1},
+		{name: "three events, revision 3", eventCount: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewFileStore(dir)
+			if err != nil {
+				t.Fatalf("NewFileStore: %v", err)
+			}
+			defer store.Close()
+
+			if tt.eventCount > 0 {
+				events := make([]cqrs.Envelope, tt.eventCount)
+				for i := range events {
+					events[i] = envelopeFor("order-1", uint64(i), "item")
+				}
+				if _, err := store.Save(ctx, events, cqrs.Any{}); err != nil {
+					t.Fatalf("setup save: %v", err)
+				}
+			} else {
+				// Isolate the off-by-one from the unrelated "stream directory was
+				// never created" case: create the (empty) stream directory directly.
+				if err := os.MkdirAll(store.streamDir("order-1"), 0o755); err != nil {
+					t.Fatalf("setup mkdir: %v", err)
+				}
+			}
+
+			iter, err := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(tt.eventCount))
+			if err != nil {
+				t.Fatalf("LoadStreamFrom(Revision(%d)) on a stream with %d events: "+
+					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
+			}
+
+			count := 0
+			for iter.Next(ctx) {
+				count++
+			}
+			if err := iter.Err(); err != nil {
+				t.Fatalf("iterator error: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected 0 events past the head, got %d", count)
+			}
+		})
+	}
+}
+
+// TestLoadFromAll_RevisionAtHead is the LoadFromAll counterpart of
+// TestLoadStreamFrom_RevisionAtStreamHead: the same off-by-one guard backs
+// both, so it affects global-log reads too.
+func TestLoadFromAll_RevisionAtHead(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		eventCount int
+	}{
+		{name: "empty store, position 0", eventCount: 0},
+		{name: "two events, position 2", eventCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := NewFileStore(dir)
+			if err != nil {
+				t.Fatalf("NewFileStore: %v", err)
+			}
+			defer store.Close()
+
+			for i := 0; i < tt.eventCount; i++ {
+				if _, err := store.Save(ctx, []cqrs.Envelope{
+					envelopeFor("order-1", uint64(i), "item"),
+				}, cqrs.Any{}); err != nil {
+					t.Fatalf("setup save: %v", err)
+				}
+			}
+
+			iter, err := store.LoadFromAll(ctx, cqrs.Revision(tt.eventCount))
+			if err != nil {
+				t.Fatalf("LoadFromAll(Revision(%d)) with %d events stored: "+
+					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
+			}
+
+			count := 0
+			for iter.Next(ctx) {
+				count++
+			}
+			if err := iter.Err(); err != nil {
+				t.Fatalf("iterator error: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected 0 events past the head, got %d", count)
+			}
+		})
+	}
+}

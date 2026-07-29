@@ -357,7 +357,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
 func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(f.streamDir(id), cqrs.StreamExists{})
+	return f.loadFromDir(f.streamDir(id), cqrs.StreamExists{}, false)
 }
 
 // LoadStreamFrom returns a lazy iterator over the events in the stream
@@ -369,7 +369,7 @@ func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 // beginning of the stream. It also returns a non-nil error if the requested
 // revision is beyond the stream's current length.
 func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(f.streamDir(id), version)
+	return f.loadFromDir(f.streamDir(id), version, false)
 }
 
 // LoadFromAll returns a lazy iterator over every event saved across all
@@ -378,14 +378,21 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 // [FilesStore.LoadStreamFrom], but against the global sequence rather than a
 // single stream.
 func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(filepath.Join(f.baseDir, allDirName), version)
+	return f.loadFromDir(filepath.Join(f.baseDir, allDirName), version, true)
 }
 
 // loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
 // and LoadFromAll: it lists dir, applies the precondition or starting offset
 // described by from, and returns a lazy iterator over the decoded events in
 // filename order.
-func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+//
+// oneIndexed distinguishes the two numbering conventions files in dir are
+// named by: a stream directory's files are named after Envelope.Version,
+// which starts at 0, while the "all" directory's files are named after
+// Envelope.GlobalVersion, which starts at 1 — so a Revision(N) start
+// position (meaning "N events already seen") must skip versions < N in the
+// 0-indexed case, but versions <= N in the 1-indexed one.
+func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState, oneIndexed bool) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// A stream's directory is only created lazily, on its first successful
 	// Save, so a never-saved stream (a perfectly normal thing to load, e.g.
 	// via Any{} or NoStream{} for a brand-new aggregate) has no directory at
@@ -417,7 +424,12 @@ func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Itera
 			)
 		}
 	case cqrs.Revision:
-		if int(from.ToRawInt64()) >= len(files) {
+		// A start index equal to the stream's length is valid — it means
+		// "give me anything newer than what I've already seen", the same
+		// half-open convention Save itself relies on when it accepts
+		// Revision(currentVersion) as the expected revision to append
+		// against. Only a position beyond the stream's length is invalid.
+		if int(from.ToRawInt64()) > len(files) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
 				dir, from, len(files), cqrs.ErrInvalidRevision,
@@ -441,7 +453,11 @@ func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState) (*cqrs.Itera
 				continue
 			}
 			ver, _ := strconv.ParseUint(parts[0], 10, 64)
-			if ver < offset {
+			if oneIndexed {
+				if ver <= offset {
+					continue
+				}
+			} else if ver < offset {
 				continue
 			}
 
