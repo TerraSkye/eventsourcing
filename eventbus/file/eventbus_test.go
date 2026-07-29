@@ -2,8 +2,11 @@ package file
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +105,63 @@ func TestFileEventBusClose_LetsInFlightHandlerFinish(t *testing.T) {
 	case <-closeDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close never returned")
+	}
+}
+
+// countGoroutinesCreatedBy reports the number of goroutines in a full stack
+// dump whose "created by" line contains substr.
+func countGoroutinesCreatedBy(substr string) int {
+	buf := make([]byte, 4<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), substr)
+}
+
+// TestSubscribe_CtxWatcherGoroutineLeaksAfterClose is a regression test for
+// GitHub issue #27: Subscribe's ctx-watcher goroutine used to block on
+// <-ctx.Done() alone, which never fires for a long-lived ctx such as
+// context.Background() (used by every other test in this file, and by every
+// example in the repo) — leaking one goroutine per Subscribe call for the
+// rest of the process's life, unaffected by Close.
+func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
+	const n = 20
+	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/file.(*FileEventBus).Subscribe"
+
+	root := t.TempDir()
+	bus, err := NewFileEventBus(root)
+	if err != nil {
+		t.Fatalf("NewFileEventBus: %v", err)
+	}
+
+	before := countGoroutinesCreatedBy(createdBy)
+
+	noop := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error {
+		return nil
+	})
+
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("sub-%d", i)
+		if err := bus.Subscribe(context.Background(), name, noop); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+
+	// Let the fsnotify watchers come up before closing.
+	time.Sleep(200 * time.Millisecond)
+
+	if err := bus.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Give any well-behaved goroutines a chance to exit.
+	time.Sleep(300 * time.Millisecond)
+	runtime.GC()
+
+	after := countGoroutinesCreatedBy(createdBy)
+
+	// Correct behaviour: once Close() has fully torn down the bus, no
+	// ctx-watcher goroutines from Subscribe should remain running.
+	leaked := after - before
+	if leaked > 0 {
+		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
 	}
 }
