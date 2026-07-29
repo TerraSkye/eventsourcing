@@ -137,7 +137,7 @@ func (b *FileEventBus) Subscribe(
 		return err
 	}
 
-	workerCtx, cancel := context.WithCancel(context.Background())
+	workerCtx, cancel := context.WithCancel(ctx)
 
 	s := &subscriber{
 		name:    name,
@@ -209,8 +209,17 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 // runSubscriber first replays any event files already present in dir (crash
 // recovery), then watches dir with fsnotify and processes each new file as
 // it appears, until ctx is canceled.
+//
+// ctx governs this loop only, not an individual handler call: canceling it
+// (via Close or removeSubscriber) stops the loop from picking up any further
+// file, but a processFile call already in progress runs with
+// context.WithoutCancel(ctx) — carrying over any values set on ctx (e.g. by
+// the caller of Subscribe) without inheriting its cancellation — so it
+// completes rather than being cut short by a shutdown racing its execution.
 func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir string) {
 	defer b.wg.Done()
+
+	handlerCtx := context.WithoutCancel(ctx)
 
 	// Crash-recovery: process any existing files
 	processDir := func() {
@@ -222,7 +231,7 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 			if e.IsDir() {
 				continue
 			}
-			b.processFile(ctx, s, filepath.Join(dir, e.Name()))
+			b.processFile(handlerCtx, s, filepath.Join(dir, e.Name()))
 		}
 	}
 	processDir()
@@ -247,7 +256,7 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 				if strings.HasSuffix(ev.Name, ".tmp") {
 					continue
 				}
-				b.processFile(ctx, s, ev.Name)
+				b.processFile(handlerCtx, s, ev.Name)
 			}
 
 		case <-watcher.Errors:
@@ -256,9 +265,11 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 	}
 }
 
-// processFile reads and decodes the envelope at path, invokes s.handler,
-// and deletes the file only if the handler returns nil. On any error the
-// file is left in place for the next event or subscriber restart to retry.
+// processFile reads and decodes the envelope at path, invokes s.handler with
+// ctx (see runSubscriber for why this is decoupled from the subscriber's
+// loop-shutdown signal), and deletes the file only if the handler returns
+// nil. On any error the file is left in place for the next event or
+// subscriber restart to retry.
 func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -292,16 +303,18 @@ func (b *FileEventBus) removeSubscriber(name string) {
 	}
 }
 
-// Close cancels every subscriber and waits for their worker goroutines to
-// finish before closing the Errors channel.
-//
-// TODO: unlike the memory, postgres, and kurrentdb EventBus
-// implementations, Close does not check b.closed before proceeding, so
-// calling Close a second time will attempt to close(b.errs) again and
-// panic. Either guard this like the sibling implementations or document
-// that Close here must only be called once.
+// Close stops every subscriber from picking up further events and waits for
+// their worker goroutines to finish before closing the Errors channel. A
+// handler call already in progress when Close is invoked always runs to
+// completion (see runSubscriber); Dispatch and Subscribe already reject new
+// work once the bus is closed, so nothing new is accepted in the meantime.
+// Calling Close more than once is a no-op.
 func (b *FileEventBus) Close() error {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
 	b.closed = true
 	for _, s := range b.subs {
 		s.cancel()
