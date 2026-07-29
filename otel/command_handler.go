@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -141,7 +142,11 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
 		ctx = eventsourcing.WithCausation(ctx, commandType)
-		attr := append(baseAttributes, AttrAggregateID.String(cmd.AggregateID()))
+		// Clone before appending: baseAttributes is shared across every call
+		// to this handler, and appending directly to it would alias its
+		// backing array across concurrent calls whenever it has spare
+		// capacity, racing on it (see GitHub issue #59).
+		attr := append(slices.Clone(baseAttributes), AttrAggregateID.String(cmd.AggregateID()))
 
 		if cfg.GetAttributes != nil {
 			attr = append(attr, cfg.GetAttributes(ctx)...)
