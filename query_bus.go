@@ -41,6 +41,18 @@ type HandlerOption func(*handlerSettings)
 type handlerSettings struct {
 }
 
+// queryKey returns the registry key for query type T and result type R. It
+// formats (*T)(nil) and (*R)(nil) — not fmt.Sprintf("%T", *new(R)): the
+// latter erases R's static type when R is an interface, since *new(R) is
+// then a nil interface value carrying no dynamic type, and %T renders every
+// such value as the same "<nil>" string regardless of R. A pointer to R does
+// not have this problem: *R is a concrete pointer type in its own right even
+// when R is an interface, so %T reports it correctly (e.g. "*io.Reader")
+// without needing reflect.TypeOf to recover R's static type explicitly.
+func queryKey[T Query, R any]() string {
+	return fmt.Sprintf("%T|%T", (*T)(nil), (*R)(nil))
+}
+
 // RegisterQueryHandlerFunc registers a plain function as a query handler.
 // Type parameters are inferred from the function signature. Prefer this over
 // RegisterQueryHandler when registering method values from a provider struct.
@@ -65,7 +77,7 @@ func RegisterQueryHandlerFunc[T Query, R any](bus *QueryBus, fn queryHandlerFunc
 //
 //	RegisterQueryHandler(bus, myHandler)
 func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T, R], opts ...HandlerOption) {
-	key := fmt.Sprintf("%T|%T", *new(T), *new(R))
+	key := queryKey[T, R]()
 
 	bus.mu.Lock()
 	defer bus.mu.Unlock()

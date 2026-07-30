@@ -36,21 +36,20 @@ type GenericQueryGateway[T Query, R any] = QueryGateway[T, R]
 //	listGateway := NewQueryGateway[ListTasks, *TaskList](bus)
 //	findGateway := NewQueryGateway[ListTasks, *Task](bus)
 func NewQueryGateway[T Query, R any](bus *QueryBus) QueryGateway[T, R] {
-	var zero T
-	key := fmt.Sprintf("%T|%T", zero, *new(R))
+	key := queryKey[T, R]()
 	bus.addRequestee(key)
 
 	return func(ctx context.Context, qry T) (R, error) {
 		h, ok := bus.handlerFor(key)
 		if !ok {
 			var zero R
-			return zero, fmt.Errorf("no handler registered for query %T -> %T %w", qry, *new(R), ErrHandlerNotFound)
+			return zero, fmt.Errorf("no handler registered for query %T -> %T %w", qry, (*R)(nil), ErrHandlerNotFound)
 		}
 
 		handler, ok := h.(QueryHandler[T, R])
 		if !ok {
 			var zero R
-			return zero, fmt.Errorf("handler type mismatch for query %T -> %T", qry, *new(R))
+			return zero, fmt.Errorf("handler type mismatch for query %T -> %T", qry, (*R)(nil))
 		}
 
 		return handler.HandleQuery(ctx, qry)
