@@ -9,10 +9,10 @@ import (
 )
 
 type HTTPHandler struct {
-	handler eventsourcing.CommandHandler[CreateTask]
+	handler eventsourcing.Dispatcher
 }
 
-func NewHTTPHandler(handler eventsourcing.CommandHandler[CreateTask]) *HTTPHandler {
+func NewHTTPHandler(handler eventsourcing.Dispatcher) *HTTPHandler {
 	return &HTTPHandler{handler: handler}
 }
 
@@ -35,7 +35,7 @@ func (h *HTTPHandler) Handle(c *gin.Context) {
 		CreatedBy:   uuid.New(), // replace with user from auth context
 	}
 
-	result, err := h.handler(c.Request.Context(), cmd)
+	result, err := h.handler.Dispatch(c.Request.Context(), cmd)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

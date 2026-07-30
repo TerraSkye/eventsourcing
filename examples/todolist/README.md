@@ -27,15 +27,15 @@ go run .
 
 ```bash
 # Create a task
-TASK_ID=$(curl -s -X POST http://localhost:8080/api/v1/tasks \
+TASK_ID=$(curl -s -X POST http://localhost:9000/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{"title": "Buy groceries"}' | jq -r '.task_id')
 
 # List tasks — updates in real time via the event bus projector
-curl -s http://localhost:8080/api/v1/tasks | jq .
+curl -s http://localhost:9000/api/v1/tasks | jq .
 
 # Complete it
-curl -X POST "http://localhost:8080/api/v1/tasks/$TASK_ID/complete"
+curl -X POST "http://localhost:9000/api/v1/tasks/$TASK_ID/complete"
 
 # Completed tasks are auto-archived 5 seconds later (30 days in production —
 # see processors/archivetasks) by a background processor reacting to

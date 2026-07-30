@@ -4,7 +4,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	cqrs "github.com/terraskye/eventsourcing"
 )
+
+var _ cqrs.Event = (*TaskArchived)(nil)
+
+func init() {
+	cqrs.RegisterEvent(&TaskArchived{})
+}
 
 // TaskArchived is emitted when a completed task is auto-archived.
 type TaskArchived struct {

@@ -14,12 +14,12 @@ import (
 // command after a configurable delay — a saga/policy that closes the loop
 // between events and new commands.
 type Processor struct {
-	handler eventsourcing.CommandHandler[archivetask.ArchiveTask]
-	delay   time.Duration // configurable — use 30*24*time.Hour in production
+	bus   eventsourcing.Dispatcher
+	delay time.Duration // configurable — use 30*24*time.Hour in production
 }
 
-func NewProcessor(handler eventsourcing.CommandHandler[archivetask.ArchiveTask], delay time.Duration) *Processor {
-	return &Processor{handler: handler, delay: delay}
+func NewProcessor(bus eventsourcing.Dispatcher, delay time.Duration) *Processor {
+	return &Processor{delay: delay, bus: bus}
 }
 
 // OnTaskCompleted is called when a task is completed.
@@ -29,7 +29,8 @@ func (p *Processor) OnTaskCompleted(ctx context.Context, e *events.TaskCompleted
 		select {
 		case <-time.After(p.delay):
 			cmd := archivetask.ArchiveTask{TaskID: e.TaskID}
-			if _, err := p.handler(context.Background(), cmd); err != nil {
+
+			if _, err := p.bus.Dispatch(context.Background(), cmd); err != nil {
 				log.Printf("archive task %s: %v", e.TaskID, err)
 			}
 		case <-ctx.Done():

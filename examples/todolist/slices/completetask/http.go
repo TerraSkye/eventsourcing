@@ -9,11 +9,11 @@ import (
 )
 
 type HTTPHandler struct {
-	handler eventsourcing.CommandHandler[CompleteTask]
+	handler eventsourcing.Dispatcher
 }
 
-func NewHTTPHandler(h eventsourcing.CommandHandler[CompleteTask]) *HTTPHandler {
-	return &HTTPHandler{handler: h}
+func NewHTTPHandler(handler eventsourcing.Dispatcher) *HTTPHandler {
+	return &HTTPHandler{handler: handler}
 }
 
 func (h *HTTPHandler) Handle(c *gin.Context) {
@@ -28,7 +28,7 @@ func (h *HTTPHandler) Handle(c *gin.Context) {
 		CompletedBy: uuid.New(), // replace with user from auth context
 	}
 
-	if _, err := h.handler(c.Request.Context(), cmd); err != nil {
+	if _, err := h.handler.Dispatch(c.Request.Context(), cmd); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

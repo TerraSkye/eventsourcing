@@ -58,10 +58,20 @@ func (p *Projector) OnTaskCompleted(_ context.Context, e *events.TaskCompleted) 
 	return nil
 }
 
+// TaskArchived is called by the event bus when a TaskCompleted event arrives.
+func (p *Projector) OnTaskArchived(_ context.Context, e *events.TaskArchived) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	delete(p.tasks, e.TaskID.String())
+	return nil
+}
+
 // EventHandlers returns the typed handlers to register on the event bus.
 func (p *Projector) EventHandlers() *eventsourcing.EventGroupProcessor {
 	return eventsourcing.NewEventGroupProcessor(
 		eventsourcing.OnEvent(p.OnTaskCreated),
 		eventsourcing.OnEvent(p.OnTaskCompleted),
+		eventsourcing.OnEvent(p.OnTaskArchived),
 	)
 }
