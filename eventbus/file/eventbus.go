@@ -208,7 +208,22 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 		return nil
 	}
 
-	data, err := marshalStoredEvent(env)
+	eventData, err := json.Marshal(env.Event)
+	if err != nil {
+		return fmt.Errorf("marshal event data: %w", err)
+	}
+
+	data, err := json.Marshal(storedEvent{
+		EventID:       env.EventID,
+		StreamID:      env.StreamID,
+		Metadata:      env.Metadata,
+		EventType:     env.Event.EventType(),
+		Data:          eventData,
+		Version:       env.Version,
+		GlobalVersion: env.GlobalVersion,
+		OccurredAt:    env.OccurredAt,
+	})
+
 	if err != nil {
 		return err
 	}
@@ -294,14 +309,41 @@ func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path stri
 		return
 	}
 
-	env, err := unmarshalStoredEvent(data)
-	if err != nil {
+	var storedEv storedEvent
+	if err := json.Unmarshal(data, &storedEv); err != nil {
 		b.sendErr(fmt.Errorf("subscriber %q: decode %s: %w", s.name, path, err))
 		return
 	}
 
-	if err := s.handler.Handle(ctx, env.Event); err != nil {
-		return // retry later
+	eventData, err := eventsourcing.NewEventByName(storedEv.EventType)
+
+	if err != nil {
+		// Wrap and propagate as EventStoreError
+		b.sendErr(fmt.Errorf("subscriber %q: decode %s: cannot create event %q: %w", s.name, path, storedEv.EventType, err))
+		return
+	}
+
+	if err := json.Unmarshal(storedEv.Data, &eventData); err != nil {
+		b.sendErr(fmt.Errorf("subscriber %q: decode %s: cannot unmarshal event %q: %w", s.name, path, storedEv.EventType, err))
+		return
+	}
+
+	envelope := &eventsourcing.Envelope{
+		EventID:       storedEv.EventID,
+		StreamID:      storedEv.StreamID,
+		Event:         eventData,
+		Metadata:      storedEv.Metadata,
+		Version:       storedEv.Version,
+		GlobalVersion: storedEv.GlobalVersion,
+		OccurredAt:    storedEv.OccurredAt,
+	}
+
+	if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
+		var skippedErr *eventsourcing.ErrSkippedEvent
+		if !errors.As(err, &skippedErr) {
+			b.sendErr(fmt.Errorf("subscriber %q: %s: %w", s.name, path, err))
+			return
+		}
 	}
 
 	_ = os.Remove(path)
@@ -371,51 +413,4 @@ type storedEvent struct {
 	Version       uint64          `json:"version"`
 	GlobalVersion uint64          `json:"global_version"`
 	OccurredAt    time.Time       `json:"occurred_at"`
-}
-
-// marshalStoredEvent encodes env as its on-disk storedEvent representation.
-func marshalStoredEvent(env *eventsourcing.Envelope) ([]byte, error) {
-	data, err := json.Marshal(env.Event)
-	if err != nil {
-		return nil, fmt.Errorf("marshal event data: %w", err)
-	}
-
-	return json.Marshal(storedEvent{
-		EventID:       env.EventID,
-		StreamID:      env.StreamID,
-		Metadata:      env.Metadata,
-		EventType:     env.Event.EventType(),
-		Data:          data,
-		Version:       env.Version,
-		GlobalVersion: env.GlobalVersion,
-		OccurredAt:    env.OccurredAt,
-	})
-}
-
-// unmarshalStoredEvent decodes data as a storedEvent and reconstructs the
-// [eventsourcing.Envelope] it represents, including its concrete Event type.
-func unmarshalStoredEvent(data []byte) (*eventsourcing.Envelope, error) {
-	var stored storedEvent
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return nil, fmt.Errorf("unmarshal stored event: %w", err)
-	}
-
-	ev, err := eventsourcing.NewEventByName(stored.EventType)
-	if err != nil {
-		return nil, fmt.Errorf("create event %q: %w", stored.EventType, err)
-	}
-
-	if err := json.Unmarshal(stored.Data, &ev); err != nil {
-		return nil, fmt.Errorf("unmarshal event %q: %w", stored.EventType, err)
-	}
-
-	return &eventsourcing.Envelope{
-		EventID:       stored.EventID,
-		StreamID:      stored.StreamID,
-		Metadata:      stored.Metadata,
-		Event:         ev,
-		Version:       stored.Version,
-		GlobalVersion: stored.GlobalVersion,
-		OccurredAt:    stored.OccurredAt,
-	}, nil
 }
