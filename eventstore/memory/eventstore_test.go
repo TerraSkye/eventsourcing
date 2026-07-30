@@ -734,3 +734,119 @@ func TestLoadFromAll_Any(t *testing.T) {
 		}
 	})
 }
+// TestLoadStreamFrom_RevisionAtStreamHead is a regression test for GitHub
+// issue #50: LoadStreamFrom's Revision guard used >= where a start index
+// needs >, so asking for the revision a stream is currently at — "I am
+// caught up, give me anything newer" — returned ErrInvalidRevision instead
+// of an empty iterator. Revision(0) against a fresh (never-saved) stream
+// made it impossible to create a new aggregate through NewCommandHandler
+// configured with WithStreamState(Revision(0)).
+func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
+	tests := []struct {
+		name       string
+		eventCount int
+	}{
+		{name: "fresh stream, revision 0", eventCount: 0},
+		{name: "one event, revision 1", eventCount: 1},
+		{name: "three events, revision 3", eventCount: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := memory.NewMemoryStore(10)
+			defer store.Close()
+
+			if tt.eventCount > 0 {
+				events := make([]cqrs.Envelope, tt.eventCount)
+				for i := range events {
+					events[i] = newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i})
+				}
+				if _, err := store.Save(context.Background(), events, cqrs.Any{}); err != nil {
+					t.Fatalf("setup save: %v", err)
+				}
+			}
+
+			// The stream is at revision tt.eventCount. Saving against it is legal,
+			// so loading from it must be too.
+			iter, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.Revision(tt.eventCount))
+			if err != nil {
+				t.Fatalf("LoadStreamFrom(Revision(%d)) on a stream with %d events: "+
+					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
+			}
+
+			if loaded := collectAll(t, iter); len(loaded) != 0 {
+				t.Errorf("expected 0 events past the head, got %d", len(loaded))
+			}
+		})
+	}
+}
+
+// TestLoadFromAll_RevisionAtHead is the LoadFromAll counterpart of
+// TestLoadStreamFrom_RevisionAtStreamHead: the same off-by-one guard backed
+// both.
+func TestLoadFromAll_RevisionAtHead(t *testing.T) {
+	tests := []struct {
+		name       string
+		eventCount int
+	}{
+		{name: "empty store, position 0", eventCount: 0},
+		{name: "two events, position 2", eventCount: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := memory.NewMemoryStore(10)
+			defer store.Close()
+
+			for i := 0; i < tt.eventCount; i++ {
+				_, _ = store.Save(context.Background(), []cqrs.Envelope{
+					newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i}),
+				}, cqrs.Any{})
+			}
+
+			iter, err := store.LoadFromAll(context.Background(), cqrs.Revision(tt.eventCount))
+			if err != nil {
+				t.Fatalf("LoadFromAll(Revision(%d)) with %d events stored: "+
+					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
+			}
+
+			if loaded := collectAll(t, iter); len(loaded) != 0 {
+				t.Errorf("expected 0 events past the head, got %d", len(loaded))
+			}
+		})
+	}
+}
+
+// --- End-to-end impact: an aggregate can never be created with Revision-based
+// optimistic concurrency, because the very first load of the empty stream fails.
+
+type createOrder struct{ ID string }
+
+func (c createOrder) AggregateID() string { return c.ID }
+func (c createOrder) CommandType() string { return "createOrder" }
+
+func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
+	store := memory.NewMemoryStore(10)
+	defer store.Close()
+
+	handler := cqrs.NewCommandHandler(
+		cqrs.EventStore(store),
+		func() int { return 0 },
+		func(state int, _ *cqrs.Envelope) int { return state + 1 },
+		func(state int, cmd createOrder) ([]cqrs.Event, error) {
+			return []cqrs.Event{OrderCreated{OrderID: cmd.ID, CustomerID: "cust-1"}}, nil
+		},
+		cqrs.WithStreamState(cqrs.Revision(0)),
+	)
+
+	result, err := handler(context.Background(), createOrder{ID: "order-1"})
+	if err != nil {
+		t.Fatalf("creating a brand new aggregate at Revision(0) must succeed, got: %v", err)
+	}
+	if !result.Successful {
+		t.Errorf("expected successful result, got %+v", result)
+	}
+	if errors.Is(err, cqrs.ErrInvalidRevision) {
+		t.Errorf("load of the empty stream rejected the initial revision")
+	}
+}

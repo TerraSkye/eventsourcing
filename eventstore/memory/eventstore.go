@@ -45,12 +45,18 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.Str
 	// LoadStreamFrom's own default: case. Computing an offset from
 	// version.ToRawInt64() unconditionally previously misread Any{}'s -1
 	// (and StreamExists{}'s -2) as a huge uint64 offset.
+	//
+	// A start index equal to the number of events already stored is valid —
+	// it means "give me anything newer than what I've already seen", the
+	// same half-open convention Save itself relies on when it accepts
+	// Revision(currentVersion) as the expected revision to append against.
+	// Only a position beyond that is invalid.
 	var offset uint64
 	switch v := version.(type) {
 	case eventsourcing.NoStream:
 		// Behaves like revision 0.
 	case eventsourcing.Revision:
-		if int(v.ToRawInt64()) >= len(allEvents) {
+		if int(v.ToRawInt64()) > len(allEvents) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
 				"all", v, len(allEvents), eventsourcing.ErrInvalidRevision,
@@ -203,7 +209,9 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 			)
 		}
 	case eventsourcing.Revision:
-		if int(version.ToRawInt64()) >= len(events) {
+		// A start index equal to the stream's length is valid — see the
+		// identical reasoning in LoadFromAll.
+		if int(version.ToRawInt64()) > len(events) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
 				id, version, len(events), eventsourcing.ErrInvalidRevision,
