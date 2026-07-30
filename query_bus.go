@@ -88,6 +88,9 @@ func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T,
 // handlers are wired up, to catch a missing registration before it can
 // surface as a runtime error.
 func (q *QueryBus) Validate() error {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	errs := make([]error, 0)
 	for requestee := range q.requestees {
 		if _, ok := q.handlers[requestee]; !ok {
@@ -99,4 +102,22 @@ func (q *QueryBus) Validate() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// addRequestee registers key as a requestee under bus.mu, so it is safe to
+// call concurrently with itself, [RegisterQueryHandler], and [QueryBus.Validate].
+func (q *QueryBus) addRequestee(key string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.requestees[key] = struct{}{}
+}
+
+// handlerFor returns the handler registered for key, and reports whether one
+// exists. The lock is held only for the map lookup, never for the handler
+// call, so a slow handler cannot block RegisterQueryHandler.
+func (q *QueryBus) handlerFor(key string) (any, bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	h, ok := q.handlers[key]
+	return h, ok
 }

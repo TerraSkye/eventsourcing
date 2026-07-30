@@ -38,10 +38,10 @@ type GenericQueryGateway[T Query, R any] = QueryGateway[T, R]
 func NewQueryGateway[T Query, R any](bus *QueryBus) QueryGateway[T, R] {
 	var zero T
 	key := fmt.Sprintf("%T|%T", zero, *new(R))
-	bus.requestees[key] = struct{}{}
+	bus.addRequestee(key)
 
 	return func(ctx context.Context, qry T) (R, error) {
-		h, ok := bus.handlers[key]
+		h, ok := bus.handlerFor(key)
 		if !ok {
 			var zero R
 			return zero, fmt.Errorf("no handler registered for query %T -> %T %w", qry, *new(R), ErrHandlerNotFound)
