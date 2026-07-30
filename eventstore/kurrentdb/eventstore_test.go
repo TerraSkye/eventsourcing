@@ -2,7 +2,9 @@ package kurrentdb_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"testing"
@@ -135,5 +137,59 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	if len(resumed) != 0 {
 		t.Errorf("expected 0 events when resuming from the last consumed revision %d, got %d: re-delivered event(s) %v",
 			lastVersion, len(resumed), resumed)
+	}
+}
+
+// TestLoadFromAll_HangsPastLastEvent is a regression test for GitHub issue
+// #44: LoadFromAll passed count=0 to (*kurrentdb.Client).ReadAll, unlike
+// LoadStream/LoadStreamFrom in the same file, which both pass 5000. Against
+// a real server, count=0 does not bound the read — once the iterator
+// consumed every currently-existing event, Next blocked forever instead of
+// returning false.
+func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "check-loadfromall-hangs"
+
+	// Save 3 events so the $all stream has a known non-empty tail.
+	for i := 0; i < 3; i++ {
+		if _, err := store.Save(ctx, []cqrs.Envelope{{
+			StreamID:   streamID,
+			Event:      &CheckEvent{N: i},
+			Metadata:   map[string]any{},
+			OccurredAt: time.Now(),
+		}}, cqrs.Any{}); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+	if err != nil {
+		t.Fatalf("load from all: %v", err)
+	}
+
+	// Drain every event currently in the $all stream. Once exhausted, Next
+	// MUST return false (with iter.Err() == nil) rather than blocking forever.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for iter.Next(ctx) {
+		}
+	}()
+
+	select {
+	case <-done:
+		// The point of this test is that the drain loop terminates at all
+		// (the bug was that it never did). $all also carries KurrentDB's own
+		// internal events (e.g. "$metadata"), which this store's registry
+		// was never meant to decode, so a non-EOF error here is expected and
+		// not itself a failure — only a timeout is.
+		if err := iter.Err(); err != nil && !errors.Is(err, io.EOF) {
+			t.Logf("iterator ended with a non-EOF error (expected for unregistered system events in $all): %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("LoadFromAll's iterator did not terminate within 15s after exhausting the $all stream: " +
+			"Next() blocks forever instead of returning false, because LoadFromAll passes count=0 to " +
+			"(*kurrentdb.Client).ReadAll (eventstore.go)")
 	}
 }
