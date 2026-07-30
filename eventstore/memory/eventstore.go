@@ -29,31 +29,36 @@ type MemoryStore struct {
 
 // LoadFromAll returns a lazy iterator over every event ever saved, across all
 // streams, in the order they were appended, starting at the position
-// identified by version. version is expected to be an
-// [eventsourcing.Revision] (or [eventsourcing.NoStream], which behaves like
-// revision 0); it returns a non-nil error if that position is beyond the
-// number of events currently stored.
+// identified by version. An [eventsourcing.Revision] starts at that index
+// (or [eventsourcing.NoStream], which behaves like revision 0); any other
+// [eventsourcing.StreamState], including [eventsourcing.Any], reads from the
+// beginning. It returns a non-nil error if the requested revision is beyond
+// the number of events currently stored.
 func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	allEvents := m.global // global slice of all events
 
-	if int(version.ToRawInt64()) >= len(allEvents) {
-		return nil, fmt.Errorf(
-			"load stream %q: requested %d but stream has %d: %w",
-			"all", version, len(allEvents), eventsourcing.ErrInvalidRevision,
-		)
+	// Only eventsourcing.Revision (and eventsourcing.NoStream, treated as
+	// revision 0) carry a meaningful numeric offset; every other
+	// StreamState, including Any{}, means "from the beginning" — matching
+	// LoadStreamFrom's own default: case. Computing an offset from
+	// version.ToRawInt64() unconditionally previously misread Any{}'s -1
+	// (and StreamExists{}'s -2) as a huge uint64 offset.
+	var offset uint64
+	switch v := version.(type) {
+	case eventsourcing.NoStream:
+		// Behaves like revision 0.
+	case eventsourcing.Revision:
+		if int(v.ToRawInt64()) >= len(allEvents) {
+			return nil, fmt.Errorf(
+				"load stream %q: requested %d but stream has %d: %w",
+				"all", v, len(allEvents), eventsourcing.ErrInvalidRevision,
+			)
+		}
+		offset = uint64(v.ToRawInt64())
+	default:
 	}
-
-	// TODO: unlike LoadStreamFrom, this does not type-switch on version, so
-	// eventsourcing.Any.ToRawInt64() (-1) and eventsourcing.StreamExists.ToRawInt64()
-	// (-2) are cast directly to uint64 below, producing a huge offset that
-	// indexes allEvents out of range and panics instead of returning an
-	// error (confirmed: LoadFromAll(ctx, eventsourcing.Any{}) panics with
-	// "index out of range" on the first Next() call, even against an empty
-	// store). Only eventsourcing.Revision and eventsourcing.NoStream (0)
-	// currently work correctly.
-	var offset = uint64(version.ToRawInt64())
 
 	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
 		if ctx.Err() != nil {
