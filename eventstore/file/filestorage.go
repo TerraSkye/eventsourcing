@@ -3,8 +3,10 @@ package file
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -180,10 +182,21 @@ func (f *FilesStore) streamDir(id string) string {
 // check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
 // the stream not to exist yet, [cqrs.StreamExists] requires that it already
 // does, and a [cqrs.Revision] requires the stream's current length to match
-// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. All
-// events must have the same StreamID, or Save returns a non-nil error
-// without appending anything. On success it returns a [cqrs.AppendResult]
-// whose NextExpectedVersion is the stream's new length.
+// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. Save
+// also returns a [cqrs.StreamRevisionConflictError] if the global version it
+// assigns an event collides with one a concurrent writer already claimed
+// (see watchGlobalSequence) — its ActualRevision is then the colliding
+// global version rather than a stream length, but the reaction is the same
+// either way: retry the whole Save. All events must have the same
+// StreamID, or Save returns a non-nil error without appending anything.
+//
+// events is written as a single unit: if any event fails to marshal or
+// write, or its global version collides, every file and symlink already
+// written for this call is removed before Save returns, rather than left
+// as a partial batch on disk. Only once every event has been durably
+// written does Save publish them on Events, so a subscriber never observes
+// part of a batch that later failed. On success it returns a
+// [cqrs.AppendResult] whose NextExpectedVersion is the stream's new length.
 //
 // TODO: each event is written to a file named after its own Version field
 // (e.g. "0000000002-Foo.json"), but Save never assigns that field itself —
@@ -243,10 +256,24 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
+	// written accumulates every path created for this call, in creation
+	// order, so a failure partway through can undo exactly what this call
+	// itself wrote — f.globalSeq is deliberately not rolled back alongside
+	// it: those global versions were momentarily visible on disk, so a peer
+	// instance's watcher may already have observed them, and reissuing them
+	// on the next attempt would recreate the same conflict.
+	written := make([]string, 0, len(events)*2)
+	rollback := func() {
+		for i := len(written) - 1; i >= 0; i-- {
+			_ = os.Remove(written[i])
+		}
+	}
+
 	// Append events
 	for i := range events {
 		select {
 		case <-ctx.Done():
+			rollback()
 			return cqrs.AppendResult{Successful: false, StreamID: streamID}, ctx.Err()
 		default:
 		}
@@ -259,6 +286,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 		eventData, err := json.Marshal(events[i].Event)
 		if err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event data: %w", err)
 		}
 
@@ -275,31 +303,46 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 		serializedData, err := json.Marshal(z)
 		if err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event: %w", err)
 		}
 
 		if err := os.WriteFile(path, serializedData, 0o644); err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
+		written = append(written, path)
+
 		// symlink to all/
 		all := filepath.Join(f.baseDir, allDirName, fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
 
 		rel, _ := filepath.Rel(filepath.Join(f.baseDir, allDirName), path)
 
 		if err := os.Symlink(rel, all); err != nil {
-			return cqrs.AppendResult{
-				StreamID:   streamID,
-				Successful: false,
-			}, err
+			rollback()
+			if errors.Is(err, fs.ErrExist) {
+				return cqrs.AppendResult{StreamID: streamID, Successful: false}, &cqrs.StreamRevisionConflictError{
+					Stream:           streamID,
+					ExpectedRevision: revision,
+					ActualRevision:   cqrs.Revision(events[i].GlobalVersion),
+				}
+			}
+			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
+		written = append(written, all)
 
+		currentVersion++
+	}
+
+	// Only publish once the whole batch is durably on disk, so a
+	// subscriber never sees part of a batch that a later event in it then
+	// failed and rolled back.
+	for i := range events {
 		select {
 		case f.bus <- &events[i]:
 		default:
-			// Drop error if channel full
+			// Drop event if channel full
 		}
-
-		currentVersion++
 	}
 
 	return cqrs.AppendResult{
