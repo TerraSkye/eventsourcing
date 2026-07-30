@@ -263,10 +263,16 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 // io.EOF, i.e. a normal end of stream, so a caller cannot tell a genuine
 // failure apart from a complete read.
 func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+	// cqrs.Revision(N) means "N events already consumed, resume strictly
+	// after N" — the same "exclusive" contract eventstore/memory and
+	// eventstore/file both implement — but kurrentdb.StreamRevision{Value: N}
+	// is KurrentDB's native, inclusive-of-N read position. Add 1 to convert
+	// between the two conventions; Revision(0) still falls through to
+	// kurrentdb.Start{} below, which already means the same thing.
 	var from kurrentdb.StreamPosition
 	if version.ToRawInt64() > 0 {
 		from = kurrentdb.StreamRevision{
-			Value: uint64(version.ToRawInt64()),
+			Value: uint64(version.ToRawInt64()) + 1,
 		}
 	} else {
 		from = kurrentdb.Start{}
