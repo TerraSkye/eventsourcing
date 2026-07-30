@@ -642,3 +642,50 @@ func TestConcurrent_SaveAndLoad(t *testing.T) {
 	<-done
 	<-done
 }
+
+// TestClose_CalledTwice_Panics is a regression test for GitHub issue #48:
+// Close unconditionally called close(m.bus), so calling it a second time
+// panicked with "close of closed channel", contrary to the EventStore
+// contract that Close must be idempotent.
+func TestClose_CalledTwice_Panics(t *testing.T) {
+	store := memory.NewMemoryStore(10)
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("first Close: unexpected error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("second Close panicked: %v (EventStore godoc requires Close to be idempotent)", r)
+		}
+	}()
+
+	if err := store.Close(); err != nil {
+		t.Errorf("second Close: unexpected error: %v", err)
+	}
+}
+
+// TestSave_AfterClose_Panics is a regression test for GitHub issue #48:
+// Save's non-blocking send to m.bus only guarded against a full channel,
+// not a closed one, so any Save call after Close panicked with "send on
+// closed channel" instead of returning an error.
+func TestSave_AfterClose_Panics(t *testing.T) {
+	store := memory.NewMemoryStore(10)
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: unexpected error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Save after Close panicked: %v", r)
+		}
+	}()
+
+	_, err := store.Save(context.Background(), []cqrs.Envelope{
+		{StreamID: "order-1", Event: nil},
+	}, cqrs.Any{})
+	if err == nil {
+		t.Error("expected an error saving to a closed store, got nil")
+	}
+}

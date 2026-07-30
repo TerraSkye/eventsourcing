@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -20,6 +21,7 @@ var _ eventsourcing.EventStore = (*MemoryStore)(nil)
 type MemoryStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
+	closed bool
 	bus    chan *eventsourcing.Envelope
 	global []*eventsourcing.Envelope
 	events map[string][]*eventsourcing.Envelope
@@ -83,6 +85,10 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.Str
 func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		return eventsourcing.AppendResult{Successful: false}, errors.New("save events: event store is closed")
+	}
 
 	if len(events) == 0 {
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
@@ -228,14 +234,17 @@ func (m *MemoryStore) Events() <-chan *eventsourcing.Envelope {
 }
 
 // Close discards all stored events and closes the channel returned by
-// Events. After Close, the MemoryStore must not be used again.
-//
-// TODO: this is not idempotent, contrary to the eventsourcing.EventStore
-// contract, which asks implementations to make Close safe to call more than
-// once — a second call panics with "close of closed channel" (confirmed).
+// Events. After Close, Save returns an error instead of appending. Calling
+// Close more than once is a no-op.
 func (m *MemoryStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+
 	m.events = make(map[string][]*eventsourcing.Envelope)
 	close(m.bus)
 	return nil
