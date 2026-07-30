@@ -258,3 +258,65 @@ func TestSave_GlobalSequenceConflictRollsBackBatch(t *testing.T) {
 	default:
 	}
 }
+
+// TestLoadStreamFrom_NeverCreatedStream is a regression test for GitHub
+// issue #41: loadFromDir called os.ReadDir on a stream's directory before
+// looking at the requested StreamState. A stream's directory is only
+// created lazily inside Save, on its first successful write, so loading a
+// brand-new aggregate ID failed with a raw *fs.PathError for every
+// StreamState, including Any{} and NoStream{}, which both document success
+// in this exact situation.
+func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Any_should_yield_empty_iterator", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+
+		iter, err := store.LoadStreamFrom(ctx, "brand-new-aggregate", cqrs.Any{})
+		if err != nil {
+			t.Fatalf("Any{} on a never-saved stream: expected no error, got: %v", err)
+		}
+		if iter.Next(ctx) {
+			t.Fatalf("expected an empty iterator for a never-saved stream")
+		}
+	})
+
+	t.Run("NoStream_should_yield_empty_iterator", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+
+		iter, err := store.LoadStreamFrom(ctx, "brand-new-aggregate", cqrs.NoStream{})
+		if err != nil {
+			t.Fatalf("NoStream{} on a never-saved stream: expected no error (stream genuinely does not exist), got: %v", err)
+		}
+		if iter.Next(ctx) {
+			t.Fatalf("expected an empty iterator for a never-saved stream")
+		}
+	})
+
+	t.Run("StreamExists_should_wrap_ErrStreamNotFound", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := NewFileStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+
+		_, err = store.LoadStreamFrom(ctx, "brand-new-aggregate", cqrs.StreamExists{})
+		if err == nil {
+			t.Fatalf("expected an error for StreamExists{} on a never-saved stream")
+		}
+		if !errors.Is(err, cqrs.ErrStreamNotFound) {
+			t.Fatalf("expected err to wrap cqrs.ErrStreamNotFound, got: %v", err)
+		}
+	})
+}
