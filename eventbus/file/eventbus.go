@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -207,7 +208,22 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 		return nil
 	}
 
-	data, err := json.Marshal(env)
+	eventData, err := json.Marshal(env.Event)
+	if err != nil {
+		return fmt.Errorf("marshal event data: %w", err)
+	}
+
+	data, err := json.Marshal(storedEvent{
+		EventID:       env.EventID,
+		StreamID:      env.StreamID,
+		Metadata:      env.Metadata,
+		EventType:     env.Event.EventType(),
+		Data:          eventData,
+		Version:       env.Version,
+		GlobalVersion: env.GlobalVersion,
+		OccurredAt:    env.OccurredAt,
+	})
+
 	if err != nil {
 		return err
 	}
@@ -285,23 +301,61 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 // ctx (see runSubscriber for why this is decoupled from the subscriber's
 // loop-shutdown signal), and deletes the file only if the handler returns
 // nil. On any error the file is left in place for the next event or
-// subscriber restart to retry.
+// subscriber restart to retry; a decode error is also reported on Errors()
+// so it isn't entirely silent.
 func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 
-	var env eventsourcing.Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
+	var storedEv storedEvent
+	if err := json.Unmarshal(data, &storedEv); err != nil {
+		b.sendErr(fmt.Errorf("subscriber %q: decode %s: %w", s.name, path, err))
 		return
 	}
 
-	if err := s.handler.Handle(ctx, env.Event); err != nil {
-		return // retry later
+	eventData, err := eventsourcing.NewEventByName(storedEv.EventType)
+
+	if err != nil {
+		// Wrap and propagate as EventStoreError
+		b.sendErr(fmt.Errorf("subscriber %q: decode %s: cannot create event %q: %w", s.name, path, storedEv.EventType, err))
+		return
+	}
+
+	if err := json.Unmarshal(storedEv.Data, &eventData); err != nil {
+		b.sendErr(fmt.Errorf("subscriber %q: decode %s: cannot unmarshal event %q: %w", s.name, path, storedEv.EventType, err))
+		return
+	}
+
+	envelope := &eventsourcing.Envelope{
+		EventID:       storedEv.EventID,
+		StreamID:      storedEv.StreamID,
+		Event:         eventData,
+		Metadata:      storedEv.Metadata,
+		Version:       storedEv.Version,
+		GlobalVersion: storedEv.GlobalVersion,
+		OccurredAt:    storedEv.OccurredAt,
+	}
+
+	if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
+		var skippedErr *eventsourcing.ErrSkippedEvent
+		if !errors.As(err, &skippedErr) {
+			b.sendErr(fmt.Errorf("subscriber %q: %s: %w", s.name, path, err))
+			return
+		}
 	}
 
 	_ = os.Remove(path)
+}
+
+// sendErr sends err on the Errors channel, dropping it if the channel's
+// buffer is full rather than blocking the caller.
+func (b *FileEventBus) sendErr(err error) {
+	select {
+	case b.errs <- err:
+	default:
+	}
 }
 
 // removeSubscriber cancels and unregisters the named subscriber. It is a
@@ -341,4 +395,22 @@ func (b *FileEventBus) Close() error {
 	b.wg.Wait()
 	close(b.errs)
 	return nil
+}
+
+// storedEvent is the on-disk JSON representation of a dispatched
+// [eventsourcing.Envelope]. Envelope.Event is a bare interface with no
+// custom (un)marshaller, so it cannot round-trip through encoding/json on
+// its own; storedEvent keeps the event payload as raw JSON alongside an
+// EventType discriminator, which unmarshalStoredEvent uses to reconstruct
+// the concrete type via [eventsourcing.NewEventByName] — the same scheme
+// eventstore/file uses for the same reason.
+type storedEvent struct {
+	EventID       uuid.UUID       `json:"event_id"`
+	StreamID      string          `json:"stream_id"`
+	Metadata      map[string]any  `json:"metadata"`
+	EventType     string          `json:"event_type"`
+	Data          json.RawMessage `json:"data"`
+	Version       uint64          `json:"version"`
+	GlobalVersion uint64          `json:"global_version"`
+	OccurredAt    time.Time       `json:"occurred_at"`
 }
