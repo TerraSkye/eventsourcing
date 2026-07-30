@@ -3,8 +3,10 @@ package file
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
 	cqrs "github.com/terraskye/eventsourcing"
 )
@@ -40,21 +43,135 @@ type FilesStore struct {
 	closed    bool
 	bus       chan *cqrs.Envelope
 	globalSeq uint64
+	watcher   *fsnotify.Watcher
+	watchDone chan struct{}
 }
 
 // NewFileStore creates a [FilesStore] rooted at dir, creating dir and its
-// reserved subdirectories if they do not already exist.
+// reserved subdirectories if they do not already exist. If dir already
+// contains events from a previous instance, the global sequence used to
+// number new events (see Save) resumes after the highest one already on
+// disk, rather than restarting at zero.
+//
+// A background watcher then keeps that sequence in sync with allDir for the
+// life of the store (see watchGlobalSequence), not just at startup: if
+// another FilesStore instance is writing into the same directory
+// concurrently, its symlinks bump this store's globalSeq too, so the two
+// don't reissue each other's versions.
 func NewFileStore(dir string) (*FilesStore, error) {
-	if err := os.MkdirAll(filepath.Join(dir, allDirName), 0o755); err != nil {
+	allDir := filepath.Join(dir, allDirName)
+	if err := os.MkdirAll(allDir, 0o755); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(dir, streamsDirName), 0o755); err != nil {
 		return nil, err
 	}
-	return &FilesStore{
-		baseDir: dir,
-		bus:     make(chan *cqrs.Envelope, 100),
-	}, nil
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("create watcher: %w", err)
+	}
+
+	// Attached before the recovery listing below, so any symlink a
+	// concurrent writer completes during that listing is queued rather
+	// than missed — watchGlobalSequence picks it up once it starts,
+	// exactly like every later write.
+	if err := watcher.Add(allDir); err != nil {
+		watcher.Close()
+		return nil, fmt.Errorf("watch %s: %w", allDir, err)
+	}
+
+	globalSeq, err := highestGlobalVersion(allDir)
+	if err != nil {
+		watcher.Close()
+		return nil, fmt.Errorf("recover global sequence: %w", err)
+	}
+
+	f := &FilesStore{
+		baseDir:   dir,
+		bus:       make(chan *cqrs.Envelope, 100),
+		globalSeq: globalSeq,
+		watcher:   watcher,
+		watchDone: make(chan struct{}),
+	}
+
+	go f.watchGlobalSequence()
+
+	return f, nil
+}
+
+// highestGlobalVersion returns the highest global version already recorded
+// in allDir (named "%010d-<EventType>.json"; see Save), or 0 if allDir is
+// empty.
+func highestGlobalVersion(allDir string) (uint64, error) {
+	entries, err := os.ReadDir(allDir)
+	if err != nil {
+		return 0, err
+	}
+
+	var highest uint64
+	for _, e := range entries {
+		if v, ok := parseGlobalVersion(e.Name()); ok && v > highest {
+			highest = v
+		}
+	}
+	return highest, nil
+}
+
+// watchGlobalSequence keeps f.globalSeq in sync with allDir for the life of
+// the store: whenever a new symlink appears there — from this store's own
+// Save or from a peer FilesStore instance writing into the same directory
+// concurrently — its encoded global version is folded into f.globalSeq if
+// higher, so the next Save (by either instance, once it also observes the
+// other's writes) resumes past it instead of reissuing it. It returns once
+// f.watcher is closed (see Close).
+func (f *FilesStore) watchGlobalSequence() {
+	defer close(f.watchDone)
+
+	for {
+		select {
+		case ev, ok := <-f.watcher.Events:
+			if !ok {
+				return
+			}
+			if ev.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
+				continue
+			}
+			v, ok := parseGlobalVersion(filepath.Base(ev.Name))
+			if !ok {
+				continue
+			}
+			f.mu.Lock()
+			if v > f.globalSeq {
+				f.globalSeq = v
+			}
+			f.mu.Unlock()
+
+		case _, ok := <-f.watcher.Errors:
+			if !ok {
+				return
+			}
+		}
+	}
+}
+
+// parseGlobalVersion extracts the global version encoded in a filename of
+// the form "%010d-<EventType>.json" (see Save), reporting ok=false if name
+// doesn't match that pattern.
+func parseGlobalVersion(name string) (uint64, bool) {
+	name, ok := strings.CutSuffix(name, ".json")
+	if !ok {
+		return 0, false
+	}
+	numPart, _, ok := strings.Cut(name, "-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(numPart, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 func (f *FilesStore) streamDir(id string) string {
@@ -65,10 +182,21 @@ func (f *FilesStore) streamDir(id string) string {
 // check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
 // the stream not to exist yet, [cqrs.StreamExists] requires that it already
 // does, and a [cqrs.Revision] requires the stream's current length to match
-// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. All
-// events must have the same StreamID, or Save returns a non-nil error
-// without appending anything. On success it returns a [cqrs.AppendResult]
-// whose NextExpectedVersion is the stream's new length.
+// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. Save
+// also returns a [cqrs.StreamRevisionConflictError] if the global version it
+// assigns an event collides with one a concurrent writer already claimed
+// (see watchGlobalSequence) — its ActualRevision is then the colliding
+// global version rather than a stream length, but the reaction is the same
+// either way: retry the whole Save. All events must have the same
+// StreamID, or Save returns a non-nil error without appending anything.
+//
+// events is written as a single unit: if any event fails to marshal or
+// write, or its global version collides, every file and symlink already
+// written for this call is removed before Save returns, rather than left
+// as a partial batch on disk. Only once every event has been durably
+// written does Save publish them on Events, so a subscriber never observes
+// part of a batch that later failed. On success it returns a
+// [cqrs.AppendResult] whose NextExpectedVersion is the stream's new length.
 //
 // TODO: each event is written to a file named after its own Version field
 // (e.g. "0000000002-Foo.json"), but Save never assigns that field itself —
@@ -128,10 +256,24 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
+	// written accumulates every path created for this call, in creation
+	// order, so a failure partway through can undo exactly what this call
+	// itself wrote — f.globalSeq is deliberately not rolled back alongside
+	// it: those global versions were momentarily visible on disk, so a peer
+	// instance's watcher may already have observed them, and reissuing them
+	// on the next attempt would recreate the same conflict.
+	written := make([]string, 0, len(events)*2)
+	rollback := func() {
+		for i := len(written) - 1; i >= 0; i-- {
+			_ = os.Remove(written[i])
+		}
+	}
+
 	// Append events
 	for i := range events {
 		select {
 		case <-ctx.Done():
+			rollback()
 			return cqrs.AppendResult{Successful: false, StreamID: streamID}, ctx.Err()
 		default:
 		}
@@ -144,6 +286,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 		eventData, err := json.Marshal(events[i].Event)
 		if err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event data: %w", err)
 		}
 
@@ -160,31 +303,46 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 		serializedData, err := json.Marshal(z)
 		if err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, fmt.Errorf("marshal event: %w", err)
 		}
 
 		if err := os.WriteFile(path, serializedData, 0o644); err != nil {
+			rollback()
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
+		written = append(written, path)
+
 		// symlink to all/
 		all := filepath.Join(f.baseDir, allDirName, fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
 
 		rel, _ := filepath.Rel(filepath.Join(f.baseDir, allDirName), path)
 
 		if err := os.Symlink(rel, all); err != nil {
-			return cqrs.AppendResult{
-				StreamID:   streamID,
-				Successful: false,
-			}, err
+			rollback()
+			if errors.Is(err, fs.ErrExist) {
+				return cqrs.AppendResult{StreamID: streamID, Successful: false}, &cqrs.StreamRevisionConflictError{
+					Stream:           streamID,
+					ExpectedRevision: revision,
+					ActualRevision:   cqrs.Revision(events[i].GlobalVersion),
+				}
+			}
+			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
 		}
+		written = append(written, all)
 
+		currentVersion++
+	}
+
+	// Only publish once the whole batch is durably on disk, so a
+	// subscriber never sees part of a batch that a later event in it then
+	// failed and rolled back.
+	for i := range events {
 		select {
 		case f.bus <- &events[i]:
 		default:
-			// Drop error if channel full
+			// Drop event if channel full
 		}
-
-		currentVersion++
 	}
 
 	return cqrs.AppendResult{
@@ -329,16 +487,25 @@ func (f *FilesStore) Events() <-chan *cqrs.Envelope {
 	return f.bus
 }
 
-// Close closes the channel returned by Events. After Close, Save returns an
-// error instead of appending. Calling Close more than once is a no-op.
+// Close stops the background watcher (see watchGlobalSequence) and closes
+// the channel returned by Events. After Close, Save returns an error
+// instead of appending. Calling Close more than once is a no-op.
 func (f *FilesStore) Close() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	if f.closed {
+		f.mu.Unlock()
 		return nil
 	}
 	f.closed = true
+	f.mu.Unlock()
+
+	// Closing the watcher unblocks watchGlobalSequence's read of
+	// f.watcher.Events; wait for it to return before closing f.bus so no
+	// goroutine is left running past Close. f.mu must not be held across
+	// this wait: watchGlobalSequence itself needs to acquire it to apply
+	// any event still in flight when Close was called.
+	f.watcher.Close()
+	<-f.watchDone
 
 	close(f.bus)
 	return nil

@@ -2,6 +2,10 @@ package file
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	cqrs "github.com/terraskye/eventsourcing"
@@ -134,5 +138,123 @@ func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
 	}, cqrs.NoStream{})
 	if err == nil {
 		t.Error("expected an error saving to a closed store, got nil")
+	}
+}
+
+// TestFileStoreGlobalSequenceSurvivesReopen is a regression test for GitHub
+// issue #40: globalSeq started at 0 on every NewFileStore call and was never
+// recovered from the events already on disk, so reopening a store over an
+// existing directory re-issued global versions that were already taken —
+// causing Save to fail with "file exists" (same event type as an existing
+// event) or silently produce duplicate GlobalVersion values (different
+// event type).
+func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	first, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	res, err := first.Save(ctx, []cqrs.Envelope{envelopeFor("cart-1", 0, "first")}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("first Save: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("first Save unsuccessful")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen the same directory, as a process restart would.
+	second, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("reopen NewFileStore: %v", err)
+	}
+	defer second.Close()
+
+	res, err = second.Save(ctx, []cqrs.Envelope{envelopeFor("cart-2", 0, "second")}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("Save after reopen: %v", err)
+	}
+	if !res.Successful {
+		t.Fatalf("Save after reopen unsuccessful")
+	}
+
+	// Both events must be reachable from all/ with distinct global versions.
+	entries, err := os.ReadDir(filepath.Join(dir, allDirName))
+	if err != nil {
+		t.Fatalf("ReadDir(all): %v", err)
+	}
+	if len(entries) != 2 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("all/ has %d entries %v, want 2", len(entries), names)
+	}
+}
+
+// TestSave_GlobalSequenceConflictRollsBackBatch is a regression test for the
+// combination of two behaviors Save relies on for correctness under
+// concurrent writers sharing a directory: a global version collision must
+// surface as a [cqrs.StreamRevisionConflictError] a caller can recognize and
+// retry (the same way NewCommandHandler's retry loop already does for
+// stream-level conflicts), and the batch that hit it must not leave any of
+// its earlier, individually-successful writes behind — Save either commits
+// the whole batch or none of it.
+func TestSave_GlobalSequenceConflictRollsBackBatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	got := make(chan *cqrs.Envelope, 10)
+	go func() {
+		for ev := range store.Events() {
+			got <- ev
+		}
+	}()
+
+	// Pre-claim the global version the second event in the batch below will
+	// be assigned (globalSeq starts at 0, so the first event takes 1 and the
+	// second takes 2), simulating a peer instance that won that race.
+	collidingPath := filepath.Join(dir, allDirName, fmt.Sprintf("%010d-%s.json", 2, "allCollisionEvent"))
+	if err := os.Symlink("/nonexistent", collidingPath); err != nil {
+		t.Fatalf("pre-create colliding symlink: %v", err)
+	}
+
+	_, err = store.Save(ctx, []cqrs.Envelope{
+		envelopeFor("cart-3", 0, "first"),
+		envelopeFor("cart-3", 1, "second"),
+	}, cqrs.NoStream{})
+	if err == nil {
+		t.Fatal("expected a conflict error, got nil")
+	}
+	var conflict *cqrs.StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected *cqrs.StreamRevisionConflictError, got %T: %v", err, err)
+	}
+
+	// The first event's own write succeeded before the second one collided;
+	// it must have been rolled back along with the second, not left behind.
+	entries, _ := os.ReadDir(store.streamDir("cart-3"))
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("batch not fully rolled back, stream dir has: %v", names)
+	}
+
+	select {
+	case ev := <-got:
+		t.Fatalf("Events received an envelope from a failed batch: %+v", ev)
+	default:
 	}
 }
