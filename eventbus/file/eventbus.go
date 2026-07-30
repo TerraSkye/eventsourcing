@@ -142,6 +142,20 @@ func (b *FileEventBus) Subscribe(
 		return err
 	}
 
+	// The watcher must be attached before Subscribe returns: fsnotify only
+	// reports events written after Add succeeds, so this is what
+	// guarantees no write to subDir is missed once Subscribe has
+	// returned. Files already present are handled separately, by
+	// runSubscriber's initial directory sweep.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	if err := watcher.Add(subDir); err != nil {
+		watcher.Close()
+		return err
+	}
+
 	workerCtx, cancel := context.WithCancel(ctx)
 
 	s := &subscriber{
@@ -154,7 +168,7 @@ func (b *FileEventBus) Subscribe(
 	b.subs[name] = s
 
 	b.wg.Add(1)
-	go b.runSubscriber(workerCtx, s, subDir)
+	go b.runSubscriber(workerCtx, s, subDir, watcher)
 
 	// workerCtx is a child of ctx, so its Done channel closes whenever
 	// either the caller cancels ctx (auto-unsubscribe) or Close/
@@ -219,9 +233,11 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 	return nil
 }
 
-// runSubscriber first replays any event files already present in dir (crash
-// recovery), then watches dir with fsnotify and processes each new file as
-// it appears, until ctx is canceled.
+// runSubscriber replays any event files already present in dir (crash
+// recovery), then processes each new file reported by watcher until ctx is
+// canceled. watcher is already attached to dir (see Subscribe), so it
+// reports every file written to dir from that point on; closing it is this
+// goroutine's responsibility.
 //
 // ctx governs this loop only, not an individual handler call: canceling it
 // (via Close or removeSubscriber) stops the loop from picking up any further
@@ -229,34 +245,21 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 // context.WithoutCancel(ctx) — carrying over any values set on ctx (e.g. by
 // the caller of Subscribe) without inheriting its cancellation — so it
 // completes rather than being cut short by a shutdown racing its execution.
-func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir string) {
+func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir string, watcher *fsnotify.Watcher) {
 	defer b.wg.Done()
+	defer watcher.Close()
 
 	handlerCtx := context.WithoutCancel(ctx)
 
 	// Crash-recovery: process any existing files
-	processDir := func() {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
+	entries, err := os.ReadDir(dir)
+	if err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
 			b.processFile(handlerCtx, s, filepath.Join(dir, e.Name()))
 		}
-	}
-	processDir()
-
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return
-	}
-	defer watcher.Close()
-
-	if err := watcher.Add(dir); err != nil {
-		return
 	}
 
 	for {
