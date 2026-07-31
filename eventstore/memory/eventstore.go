@@ -153,6 +153,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	for i := range events {
 		m.events[streamId] = append(m.events[streamId], &events[i])
 		m.global = append(m.global, &events[i])
+		events[i].GlobalVersion = uint64(len(m.global))
 		currentVersion++
 
 		select {
