@@ -116,6 +116,10 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 	return queryHandlerFunc[T, R](func(ctx context.Context, qry T) (R, error) {
 		result, err := anyNext(ctx, qry)
 		if err != nil {
+
+			if v, ok := result.(R); ok {
+				return v, err
+			}
 			var zero R
 			return zero, err
 		}

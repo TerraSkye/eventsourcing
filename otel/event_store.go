@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"io"
+	"maps"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -66,7 +67,17 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 		AttrStreamVersion.Int64(revision.ToRawInt64()),
 	)
 
-	ctx, span := tracer.Start(ctx, "append eventstore",
+	spanName := "append eventstore"
+	if t.cfg.Operation != "" {
+		spanName = t.cfg.Operation
+	}
+	if t.cfg.GetOperation != nil {
+		if op := t.cfg.GetOperation(ctx, spanName); op != "" {
+			spanName = op
+		}
+	}
+
+	ctx, span := tracer.Start(ctx, spanName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(spanAttrs...),
 	)
@@ -80,9 +91,9 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 		otel.GetTextMapPropagator().Inject(ctx, carrier)
 		for i := range events {
 
-			if events[i].Metadata == nil {
-				events[i].Metadata = map[string]any{}
-			}
+			md := make(map[string]any, len(events[i].Metadata)+len(carrier)+2)
+			maps.Copy(md, events[i].Metadata)
+			events[i].Metadata = md
 
 			if causationId != "" {
 				events[i].Metadata["causation_id"] = causationId

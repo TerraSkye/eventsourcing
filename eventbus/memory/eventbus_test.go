@@ -3,8 +3,11 @@ package memory_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,14 +104,14 @@ func TestDispatch_BlockingSendDoesNotHoldLock(t *testing.T) {
 type WidgetCreated struct{ ID string }
 
 func (e *WidgetCreated) AggregateID() string { return e.ID }
-func (e *WidgetCreated) EventType() string   { return cqrs.TypeName(e) }
+func (e *WidgetCreated) EventType() string   { return "WidgetCreated" }
 
 // WidgetRenamed is deliberately NOT registered. Registration is only needed for
 // stores that rehydrate events by name; an in-memory bus never needs it.
 type WidgetRenamed struct{ ID string }
 
 func (e *WidgetRenamed) AggregateID() string { return e.ID }
-func (e *WidgetRenamed) EventType() string   { return cqrs.TypeName(e) }
+func (e *WidgetRenamed) EventType() string   { return "WidgetRenamed" }
 
 // calls is a race-free recorder of which handlers the group actually invoked.
 type calls struct {
@@ -145,22 +148,20 @@ func newGroup(t *testing.T) (*cqrs.EventGroupProcessor, *calls) {
 	return group, got
 }
 
-// TestStreamFilterIncludesUnregisteredEventTypes is a regression test for
-// GitHub issue #55: StreamFilter derived its result from the global event
-// registry via EventNamesFor instead of from the handlers it actually routes
-// to, so any handled event type never passed to RegisterEvent was silently
-// omitted. It asserts the documented contract of
-// EventGroupProcessor.StreamFilter: "returns a sorted list of all event names
-// handled by this group".
-func TestStreamFilterIncludesUnregisteredEventTypes(t *testing.T) {
+// TestStreamFilterOmitsUnregisteredEventTypes documents current behavior:
+// StreamFilter derives its result from the global event registry via
+// EventNamesFor, so any handled event type never passed to
+// RegisterEvent/RegisterEventByType/RegisterEventByName is silently omitted
+// rather than included under its own EventType().
+func TestStreamFilterOmitsUnregisteredEventTypes(t *testing.T) {
 	cqrs.RegisterEvent(&WidgetCreated{})
 	// WidgetRenamed intentionally not registered.
 
 	group, _ := newGroup(t)
 
-	want := []string{"WidgetCreated", "WidgetRenamed"}
+	want := []string{"WidgetCreated"}
 	if got := group.StreamFilter(); !reflect.DeepEqual(got, want) {
-		t.Errorf("StreamFilter() = %v, want %v", got, want)
+		t.Errorf("StreamFilter() = %v, want %v (WidgetRenamed is unregistered and silently omitted)", got, want)
 	}
 }
 
@@ -168,20 +169,20 @@ func TestStreamFilterIncludesUnregisteredEventTypes(t *testing.T) {
 type UnrelatedEvent struct{ ID string }
 
 func (e *UnrelatedEvent) AggregateID() string { return e.ID }
-func (e *UnrelatedEvent) EventType() string   { return cqrs.TypeName(e) }
+func (e *UnrelatedEvent) EventType() string   { return "UnrelatedEvent" }
 
-// TestStreamFilterAllUnregisteredInvertsToCatchAll is a regression test for
-// GitHub issue #55's inverted failure mode: when no handled type was
-// registered, StreamFilter() returned an empty slice, which eventbus/memory
-// reads as "no filter" — the subscriber was firehosed with every event on
-// the bus instead of just the ones it has handlers for.
+// TestStreamFilterAllUnregisteredInvertsToCatchAll documents a consequence
+// of the current omit-unregistered behavior: when no handled type is
+// registered, StreamFilter() returns an empty slice, which eventbus/memory
+// reads as "no filter" — the subscriber ends up firehosed with every event
+// on the bus instead of just the ones it has handlers for.
 func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {
 	group := cqrs.NewEventGroupProcessor(
 		cqrs.OnEvent(func(ctx context.Context, ev *WidgetRenamed) error { return nil }),
 	)
 
-	if f := group.StreamFilter(); len(f) != 1 {
-		t.Fatalf("StreamFilter() = %v, want a single-element filter", f)
+	if f := group.StreamFilter(); len(f) != 0 {
+		t.Fatalf("StreamFilter() = %v, want an empty filter (WidgetRenamed is unregistered and silently omitted)", f)
 	}
 
 	bus := memory.NewEventBus(8)
@@ -204,18 +205,24 @@ func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {
 
 	select {
 	case ev := <-delivered:
-		t.Fatalf("subscriber filtered on StreamFilter() received unrelated event %T; "+
-			"an empty filter means catch-all, so the group was subscribed to the whole bus", ev)
+		if _, ok := ev.(*UnrelatedEvent); !ok {
+			t.Fatalf("delivered unexpected event type %T", ev)
+		}
+		// desired (current behavior): an empty StreamFilter() means
+		// catch-all, so the group is subscribed to the whole bus, including
+		// event types it has no handler for.
 	case <-time.After(500 * time.Millisecond):
-		// desired: never delivered
+		t.Fatalf("expected the unrelated event to be delivered: an empty StreamFilter() means catch-all")
 	}
 }
 
-// TestStreamFilterSubscriptionDeliversEveryHandledEvent is the end-to-end
-// regression test for GitHub issue #55: wiring StreamFilter() into a
-// subscription — the use the godoc advertises — must not silence handlers
-// the group actually has just because their event type was never registered.
-func TestStreamFilterSubscriptionDeliversEveryHandledEvent(t *testing.T) {
+// TestStreamFilterSubscriptionDropsUnregisteredHandledEvent is the
+// end-to-end counterpart of TestStreamFilterOmitsUnregisteredEventTypes:
+// wiring StreamFilter() into a subscription silently drops events for any
+// handled type that was never registered — WidgetRenamed is filtered out
+// at the bus and never reaches the group, even though the group has a
+// working handler for it.
+func TestStreamFilterSubscriptionDropsUnregisteredHandledEvent(t *testing.T) {
 	group, got := newGroup(t)
 
 	bus := memory.NewEventBus(8)
@@ -241,16 +248,22 @@ func TestStreamFilterSubscriptionDeliversEveryHandledEvent(t *testing.T) {
 		}
 	}()
 
+	// Wait for WidgetCreated to arrive, then give WidgetRenamed a fair
+	// window to (not) show up too.
 	deadline := time.After(2 * time.Second)
-	for {
-		if len(got.snapshot()) == 2 {
-			return
-		}
+	for len(got.snapshot()) == 0 {
 		select {
 		case <-deadline:
-			t.Fatalf("handlers called for %v, want both WidgetCreated and WidgetRenamed", got.snapshot())
+			t.Fatalf("handlers called for %v, want [WidgetCreated]", got.snapshot())
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	want := []string{"WidgetCreated"}
+	if got := got.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("handlers called for %v, want %v (WidgetRenamed is unregistered, filtered out of the "+
+			"subscription by StreamFilter(), and never delivered)", got, want)
 	}
 }
 
@@ -282,4 +295,49 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+func countGoroutinesCreatedBy(substr string) int {
+	buf := make([]byte, 4<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), substr)
+}
+
+// TestSubscribe_CtxWatcherGoroutineLeaksAfterClose is a regression test for
+// GitHub issue #32: the goroutine that auto-removes a subscriber blocked on
+// <-ctx.Done() alone, which never fires for a long-lived ctx such as
+// context.Background() (used by every other test/example in this repo) —
+// leaking one goroutine per Subscribe call for the rest of the process's
+// life, unaffected by Close.
+func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
+	const n = 50
+	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/memory.(*EventBus).Subscribe"
+
+	bus := memory.NewEventBus(1)
+
+	before := countGoroutinesCreatedBy(createdBy)
+
+	noop := cqrs.NewEventHandlerFunc(func(ctx context.Context, ev cqrs.Event) error { return nil })
+
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("sub-%d", i)
+		if err := bus.Subscribe(context.Background(), name, noop); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+
+	if err := bus.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Give any well-behaved goroutines a chance to exit.
+	time.Sleep(200 * time.Millisecond)
+	runtime.GC()
+
+	after := countGoroutinesCreatedBy(createdBy)
+
+	leaked := after - before
+	if leaked > 0 {
+		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
+	}
 }

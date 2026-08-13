@@ -435,3 +435,116 @@ func TestLoadFromAll_RevisionAtHead(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent documents a bug: unlike
+// [eventstore/memory.MemoryStore] and [eventstore/postgres]'s implementation
+// of the same [cqrs.EventStore] interface, FilesStore.LoadStreamFrom treats
+// Revision(N) as an INCLUSIVE start position (returns the event whose
+// Version equals N again) instead of an EXCLUSIVE one (only events with
+// Version > N).
+//
+// This matters because [cqrs.NewCommandHandler] (command_handler.go) always
+// numbers a stream's events starting at 1 — nextVersion := lastVersion + 1
+// where lastVersion starts at its zero value — and, on a save conflict, sets
+// revision to Revision(lastly-evolved event's Version) before reloading and
+// retrying incrementally rather than from scratch. That retry path depends
+// on LoadStreamFrom(id, Revision(N)) excluding the event already folded into
+// state; FilesStore including it again would double-apply that event to the
+// aggregate's state on every conflict retry.
+//
+// See .bug/eventstore-file-loadstreamfrom-revision-off-by-one-includes-seen-event.md.
+func TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent(t *testing.T) {
+
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	// Mirror NewCommandHandler's real numbering convention: the first event
+	// saved to a stream gets Version 1, not 0.
+	events := []cqrs.Envelope{
+		envelopeFor("order-1", 1, "item-1"),
+		envelopeFor("order-1", 2, "item-2"),
+	}
+	if _, err := store.Save(ctx, events, cqrs.Any{}); err != nil {
+		t.Fatalf("setup save: %v", err)
+	}
+
+	// "I have already evolved the event at Version 1; give me anything
+	// newer" must return only the Version-2 event.
+	iter, err := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(1))
+	if err != nil {
+		t.Fatalf("LoadStreamFrom(Revision(1)): %v", err)
+	}
+
+	var versions []uint64
+	for iter.Next(ctx) {
+		versions = append(versions, iter.Value().Version)
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+
+	if len(versions) != 1 || versions[0] != 2 {
+		t.Errorf("LoadStreamFrom(Revision(1)) = versions %v, want [2] (the already-seen Version-1 event must not be repeated)", versions)
+	}
+}
+
+// TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents is a
+// regression test for a bug where loadFromDir relies on os.ReadDir's
+// lexical filename sort to reproduce append order, but Save names each
+// event's file "%010d-<EventType>.json" from its own Version field. %010d
+// only zero-pads up to 10 digits; a Version of 10,000,000,000 or higher
+// needs an 11th digit, so its filename is longer than — and therefore, per
+// Go's byte-wise string comparison, lexically less than — any file for a
+// Version that still fits in 10 digits, even one appended long before it.
+// LoadStream then yields that later event first.
+//
+// This file's own pre-existing TODO on Save already documents that the
+// Version field is caller-supplied and never assigned or validated by Save
+// itself, so a real Version this large is reachable without needing to
+// actually append ten billion events to trigger it.
+//
+// See .bug/eventstore-file-large-version-lexical-sort-breaks-order.md.
+func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T) {
+
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	// Two Save calls, each appending one event, in ascending Version order —
+	// exactly like two ordinary sequential appends, just at a version range
+	// that crosses the 10-digit boundary %010d pads to.
+	if _, err := store.Save(ctx, []cqrs.Envelope{envelopeFor("order-1", 9999999999, "first")}, cqrs.Any{}); err != nil {
+		t.Fatalf("save 1: %v", err)
+	}
+	if _, err := store.Save(ctx, []cqrs.Envelope{envelopeFor("order-1", 10000000000, "second")}, cqrs.Any{}); err != nil {
+		t.Fatalf("save 2: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, "order-1")
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+
+	var versions []uint64
+	for iter.Next(ctx) {
+		versions = append(versions, iter.Value().Version)
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+
+	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
+		t.Errorf("LoadStream order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -298,5 +299,111 @@ func TestLoadFromAll_IgnoresInFlightTransactions(t *testing.T) {
 	}
 	if events[1].StreamID != "stream-B" {
 		t.Errorf("expected stream-B second, got %s", events[1].StreamID)
+	}
+}
+
+// TestLoadFromAll_HugeRevisionReplaysEntireStoreInsteadOfNothing documents a
+// bug: LoadFromAll's doc comment says a cqrs.Revision(n) position means
+// "starting after the position identified by version" - so a caller that
+// believes it has already consumed an enormous number of events (e.g. via a
+// corrupted/bogus checkpoint, or the unsigned-underflow scenario the
+// analogous eventstore/memory bug used to hit before it was fixed) should,
+// at worst, get an empty iterator back, since no real global position can
+// exceed such a value.
+//
+// Instead, LoadFromAll does:
+//
+//	fromID := version.ToRawInt64()  // int64(uint64) conversion
+//	... WHERE id > $1 ...
+//
+// For any Revision >= 1<<63, ToRawInt64()'s int64(r) conversion produces a
+// negative number. Since every real `id` in the events table is a positive
+// bigserial, "id > <negative>" matches every row - so instead of returning
+// nothing, LoadFromAll silently replays the entire store from the beginning.
+// This is the LoadFromAll sibling of the already-filed
+// eventstore-postgres-loadstreamfrom-huge-revision-replays-entire-stream bug (same root cause,
+// same file, different function - that report only exercises LoadStreamFrom).
+func TestLoadFromAll_HugeRevisionReplaysEntireStoreInsteadOfNothing(t *testing.T) {
+
+	pool := newPool(t)
+	store := pgstore.NewEventStore(pool)
+	ctx := context.Background()
+
+	_, err := store.Save(ctx, []cqrs.Envelope{
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+	}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// A caller believes it has already processed math.MaxUint64 events (far
+	// beyond the 3 actually stored globally) and asks to resume strictly
+	// after that position - it should see nothing new.
+	iter, err := store.LoadFromAll(ctx, cqrs.Revision(math.MaxUint64))
+	if err != nil {
+		t.Fatalf("LoadFromAll: %v", err)
+	}
+	events := collectAll(t, iter)
+
+	if len(events) != 0 {
+		t.Fatalf("documents bug: LoadFromAll(Revision(MaxUint64)) replayed %d event(s) from the "+
+			"beginning of the store instead of returning none (int64(MaxUint64) == -1, so "+
+			"'id > -1' matches every row)", len(events))
+	}
+}
+
+// TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing documents
+// a bug: eventstore.LoadStreamFrom's doc comment says a cqrs.Revision(n) means
+// "events after [position] n are returned" - so a caller who believes it has
+// already processed an enormous number of events (e.g. via an unsigned
+// underflow bug computing n, or simply a corrupted/bogus checkpoint) should,
+// at worst, get an empty iterator back, since no real stream position can
+// exceed such a value.
+//
+// Instead, LoadStreamFrom's default branch does:
+//
+//	fromPos := version.ToRawInt64()  // int64(uint64) conversion
+//	... WHERE stream_position > $2 ...
+//
+// For any Revision >= 1<<63, ToRawInt64()'s int64(r) conversion produces a
+// *negative* number. Since every real stream_position is positive, "stream_position
+// > <negative>" matches every row in the stream - so instead of returning
+// nothing (or erroring), LoadStreamFrom silently replays the *entire* stream
+// from the beginning. This is the opposite of the documented "resume where
+// you left off" semantics and, unlike the already-known sibling issue in
+// eventstore/memory (which panics) and eventstore/file (which returns an
+// empty stream), this manifests as silent full-stream reprocessing - the
+// most dangerous of the three failure modes for a real caller (e.g. a
+// projector replaying every event again from position 0).
+func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testing.T) {
+
+	pool := newPool(t)
+	store := pgstore.NewEventStore(pool)
+	ctx := context.Background()
+
+	_, err := store.Save(ctx, []cqrs.Envelope{
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+	}, cqrs.NoStream{})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// A caller believes it has already processed math.MaxUint64 events (a
+	// value far beyond the 3 actually stored) and asks to resume strictly
+	// after that position - it should see nothing new.
+	iter, err := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(math.MaxUint64))
+	if err != nil {
+		t.Fatalf("LoadStreamFrom: %v", err)
+	}
+	events := collectAll(t, iter)
+
+	if len(events) != 0 {
+		t.Fatalf("documents bug: LoadStreamFrom(Revision(MaxUint64)) replayed %d event(s) from the "+
+			"beginning of the stream instead of returning none (int64(MaxUint64) == -1, so "+
+			"'stream_position > -1' matches every row)", len(events))
 	}
 }

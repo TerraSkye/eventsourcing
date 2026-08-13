@@ -66,7 +66,18 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		originalCtx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
 		originalSpanContext := trace.SpanContextFromContext(originalCtx)
 
-		ctx, span := tracer.Start(ctx, "process event",
+		defaultOperation := "process event"
+		if cfg.Operation != "" {
+			defaultOperation = cfg.Operation
+		}
+		operation := defaultOperation
+		if cfg.GetOperation != nil {
+			if op := cfg.GetOperation(ctx, defaultOperation); op != "" {
+				operation = op
+			}
+		}
+
+		ctx, span := tracer.Start(ctx, operation,
 			trace.WithSpanKind(trace.SpanKindInternal),
 			trace.WithLinks(trace.Link{
 				SpanContext: originalSpanContext,

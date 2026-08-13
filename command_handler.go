@@ -187,7 +187,7 @@ func NewCommandHandler[T any, C Command](
 			events, err := decide(state, command)
 
 			if err != nil {
-				return AppendResult{Successful: false, StreamID: streamID},
+				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): business rule violation: %w", command, command.AggregateID(), streamID, NewBusinessRuleViolation(err)))
 			}
 
@@ -231,17 +231,21 @@ func NewCommandHandler[T any, C Command](
 
 			if err != nil {
 				var conflict *StreamRevisionConflictError
+
 				if errors.As(err, &conflict) {
+					actual, _ := conflict.ActualRevision.(Revision)
 					if autoConverge {
 						// Retry: reload from `revision` and try again.
-						return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID}, conflict
+
+						return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
+							fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict)
 					}
 					// The caller asserted a specific stream expectation
 					// (Revision or NoStream); a conflict means that
 					// expectation was violated, so it is reported back
 					// directly instead of being retried against a different
 					// target.
-					return AppendResult{Successful: false, NextExpectedVersion: lastVersion + 1, StreamID: streamID},
+					return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
 						backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict))
 				}
 				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): failed to save event: %w", command, command.AggregateID(), streamID, err))
@@ -290,7 +294,12 @@ type handlerOptions struct {
 //
 //	handler := NewCommandHandler(store, initialState, evolve, decide, WithStreamState(NoStream{}))
 func WithStreamState(rev StreamState) CommandHandlerOption {
-	return func(cfg *handlerOptions) { cfg.Revision = rev }
+	return func(cfg *handlerOptions) {
+		if cfg == nil {
+			return
+		}
+		cfg.Revision = rev
+	}
 }
 
 // WithRetryStrategy sets the [backoff.BackOff] a [NewCommandHandler] uses to
@@ -308,7 +317,12 @@ func WithStreamState(rev StreamState) CommandHandlerOption {
 //
 //	handler := NewCommandHandler(store, initialState, evolve, decide, WithRetryStrategy(myBackoff))
 func WithRetryStrategy(strategy backoff.BackOff) CommandHandlerOption {
-	return func(cfg *handlerOptions) { cfg.RetryStrategy = strategy }
+	return func(cfg *handlerOptions) {
+		if strategy == nil {
+			return
+		}
+		cfg.RetryStrategy = strategy
+	}
 }
 
 // WithMetadataExtractor adds fn to the metadata functions a
@@ -334,6 +348,9 @@ func WithMetadataExtractor(fn func(ctx context.Context) map[string]any) CommandH
 //	handler := NewCommandHandler(store, initialState, evolve, decide, WithStreamNamer(myStreamNamer))
 func WithStreamNamer(namer StreamNamer) CommandHandlerOption {
 	return func(h *handlerOptions) {
+		if namer == nil {
+			return
+		}
 		h.StreamNamer = namer
 	}
 }

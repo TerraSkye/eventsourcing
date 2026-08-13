@@ -8,8 +8,11 @@ import (
 
 	otelapi "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/embedded"
-	"go.opentelemetry.io/otel/metric/noop"
+	metricembedded "go.opentelemetry.io/otel/metric/embedded"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
+	traceembedded "go.opentelemetry.io/otel/trace/embedded"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // durationRecorder captures every value recorded through this package's
@@ -24,9 +27,69 @@ import (
 // with its own recorder.
 var durationRecorder = &recorder{}
 
+// spanNameRecorder captures every span name this package's shared `tracer`
+// is asked to Start, for the same reason durationRecorder exists: the
+// package-level tracer only delegates to a real TracerProvider the first
+// time one is installed via otel.SetTracerProvider, so tests that need to
+// read back span names must share one instance, installed exactly once here.
+var spanNameRecorder = &spanRecorder{}
+
 func TestMain(m *testing.M) {
 	otelapi.SetMeterProvider(recMeterProvider{rec: durationRecorder})
+	otelapi.SetTracerProvider(recTracerProvider{rec: spanNameRecorder})
 	os.Exit(m.Run())
+}
+
+// spanRecorder captures the name of every span started through a
+// recTracerProvider, for tests that need to assert on the actual span name a
+// tracer.Start call used.
+type spanRecorder struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (r *spanRecorder) add(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.names = append(r.names, name)
+}
+
+// since returns the span names recorded since the call that produced from
+// (typically len(r.names) captured before the operation under test ran).
+func (r *spanRecorder) since(from int) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.names)-from)
+	copy(out, r.names[from:])
+	return out
+}
+
+func (r *spanRecorder) len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.names)
+}
+
+type recTracer struct {
+	tracenoop.Tracer
+	rec *spanRecorder
+}
+
+func (t recTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	t.rec.add(spanName)
+	return t.Tracer.Start(ctx, spanName, opts...)
+}
+
+// recTracerProvider is a [trace.TracerProvider] that records the name of
+// every span it's asked to start, for tests to assert on afterward.
+// Everything else it produces is a no-op.
+type recTracerProvider struct {
+	traceembedded.TracerProvider
+	rec *spanRecorder
+}
+
+func (p recTracerProvider) Tracer(_ string, _ ...trace.TracerOption) trace.Tracer {
+	return recTracer{rec: p.rec}
 }
 
 // recorder captures histogram values recorded through a recMeterProvider,
@@ -61,7 +124,7 @@ func (r *recorder) valuesFor(name string) []float64 {
 }
 
 type recHistogram struct {
-	noop.Float64Histogram
+	metricnoop.Float64Histogram
 	name string
 	rec  *recorder
 }
@@ -71,7 +134,7 @@ func (h recHistogram) Record(_ context.Context, v float64, _ ...metric.RecordOpt
 }
 
 type recMeter struct {
-	noop.Meter
+	metricnoop.Meter
 	rec *recorder
 }
 
@@ -83,7 +146,7 @@ func (m recMeter) Float64Histogram(name string, _ ...metric.Float64HistogramOpti
 // Float64Histogram value it's asked to record, for tests to assert on
 // afterward. Everything else it produces is a no-op.
 type recMeterProvider struct {
-	embedded.MeterProvider
+	metricembedded.MeterProvider
 	rec *recorder
 }
 

@@ -18,15 +18,46 @@ import (
 // eventstore is a KurrentDB-backed [cqrs.EventStore], delegating stream
 // storage, ordering, and revision checks to the KurrentDB server itself.
 type eventstore struct {
-	client *kurrentdb.Client
+	client     *kurrentdb.Client
+	newBackoff func() backoff.BackOff
 }
 
 // NewEventStore returns a KurrentDB-backed [cqrs.EventStore] that uses db for
 // all operations.
-func NewEventStore(db *kurrentdb.Client) cqrs.EventStore {
-	return &eventstore{
-		client: db,
+func NewEventStore(db *kurrentdb.Client, opts ...Option) cqrs.EventStore {
+	e := &eventstore{
+		client:     db,
+		newBackoff: defaultSaveBackoff,
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+// Option configures an [eventstore] returned by [NewEventStore].
+type Option func(*eventstore)
+
+// WithBackoff overrides the [backoff.BackOff] Save uses to retry transient
+// gRPC errors, in place of the default described on Save's doc comment.
+// newBackoff is called once per Save call, so it must return a fresh,
+// zero-state backoff.BackOff each time rather than a shared, already-used
+// instance.
+func WithBackoff(newBackoff func() backoff.BackOff) Option {
+	return func(e *eventstore) {
+		e.newBackoff = newBackoff
+	}
+}
+
+// defaultSaveBackoff is the backoff Save retries transient gRPC errors with
+// unless overridden via [WithBackoff]: up to 30s, to allow for an
+// in-progress leader election.
+func defaultSaveBackoff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = 30 * time.Second
+	b.InitialInterval = 100 * time.Millisecond
+	b.MaxInterval = 2 * time.Second
+	return b
 }
 
 // Save appends events to the stream they share, translating revision into
@@ -37,7 +68,7 @@ func NewEventStore(db *kurrentdb.Client) cqrs.EventStore {
 // have the same StreamID, or Save returns a non-nil error without contacting
 // the server. The append is retried with backoff on transient gRPC errors
 // (such as those from an in-progress leader election), for up to 30 seconds
-// or 10 attempts. On success it returns a [cqrs.AppendResult] whose
+// by default — see [WithBackoff] to override. On success it returns a [cqrs.AppendResult] whose
 // NextExpectedVersion is the stream's new revision as reported by KurrentDB.
 //
 // TODO: on a revision conflict, the returned cqrs.StreamRevisionConflictError
@@ -112,11 +143,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
-	// Configure backoff with longer max elapsed time for leader elections
-	expBackoff := backoff.NewExponentialBackOff()
-	expBackoff.MaxElapsedTime = 30 * time.Second // Allow up to 30s for leader election
-	expBackoff.InitialInterval = 100 * time.Millisecond
-	expBackoff.MaxInterval = 2 * time.Second
+	expBackoff := e.newBackoff()
 
 	result, err := backoff.RetryNotifyWithData(func() (*kurrentdb.WriteResult, error) {
 		result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
@@ -134,7 +161,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		}
 		return result, err
 
-	}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 10), func(err error, duration time.Duration) {
+	}, expBackoff, func(err error, duration time.Duration) {
 		fmt.Printf("Retry attempt failed for stream %s: %v, retrying in %s", streamID, err, duration)
 	})
 	//todo use the revision here

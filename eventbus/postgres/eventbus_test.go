@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -413,5 +416,91 @@ func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
 		return true
 	}) {
 		t.Fatalf("not all %d subscribers received the event within timeout (deadlock?)", numSubscribers)
+	}
+}
+
+// TestUse_RacesWithSubscribe is a regression test for GitHub issue #35: Use
+// appended to b.middlewares with no synchronization at all, and Subscribe
+// read b.middlewares before acquiring b.mu, so calling Use concurrently with
+// Subscribe was a data race under `go test -race`.
+func TestUse_RacesWithSubscribe(t *testing.T) {
+	pool := newPool(t)
+	bus := pgbus.NewEventBus(pool, 50*time.Millisecond)
+	t.Cleanup(func() { _ = bus.Close() })
+
+	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			bus.Use(func(next cqrs.EventHandler) cqrs.EventHandler {
+				return next
+			})
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			// Same name every time: only the first call actually registers a
+			// subscriber, but every call reads b.middlewares before that
+			// check, which is enough to race against the writer above.
+			_ = bus.Subscribe(context.Background(), "sub", handler)
+		}
+	}()
+
+	wg.Wait()
+}
+
+func countGoroutinesCreatedBy(substr string) int {
+	buf := make([]byte, 4<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), substr)
+}
+
+// TestSubscribe_CtxWatcherGoroutineLeaksAfterClose is a regression test for
+// GitHub issue #34: the goroutine that auto-removes a subscriber blocked on
+// <-ctx.Done() alone, which never fires for a long-lived ctx such as
+// context.Background() (used by every other test/example in this repo) —
+// leaking one goroutine per Subscribe call for the rest of the process's
+// life, unaffected by Close.
+func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
+	const n = 20
+	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/postgres.(*EventBus).Subscribe"
+
+	pool := newPool(t)
+	bus := pgbus.NewEventBus(pool, 50*time.Millisecond)
+
+	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+		return nil
+	})
+
+	before := countGoroutinesCreatedBy(createdBy)
+
+	for i := 0; i < n; i++ {
+		name := "leak-sub-" + strconv.Itoa(i)
+		if err := bus.Subscribe(context.Background(), name, handler); err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+	}
+
+	if err := bus.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Give any well-behaved goroutines a chance to exit.
+	time.Sleep(500 * time.Millisecond)
+	runtime.GC()
+
+	after := countGoroutinesCreatedBy(createdBy)
+
+	leaked := after - before
+	if leaked > 0 {
+		t.Fatalf("expected 0 leaked ctx-watcher goroutines after Close, got %d (before=%d after=%d)", leaked, before, after)
 	}
 }

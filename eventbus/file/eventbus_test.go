@@ -2,6 +2,7 @@ package file
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -275,5 +276,174 @@ func TestFileEventBusDeliversDispatchedEvent(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Fatalf("handler never received the dispatched event; undelivered files still on disk: %v", names)
+	}
+}
+
+// TestFileEventBusCrashRecoverySkipsTmpFiles documents a bug: see
+// .bug/eventbus-file-crash-recovery-sweep-processes-tmp-files.md.
+//
+// Dispatch writes each event atomically via a write-then-rename dance
+// (path+".tmp", then os.Rename to path), and runSubscriber's fsnotify loop
+// explicitly skips any ".tmp"-suffixed path so it never treats an in-flight
+// write as a deliverable event. But runSubscriber's crash-recovery sweep
+// (the os.ReadDir(dir) loop that replays files already present when
+// Subscribe is called) applies no such filter: it hands every non-directory
+// entry — including a stray ".tmp" file left by a Dispatch that wrote its
+// data but had not yet renamed it (a live race, or a crash exactly between
+// the two syscalls) — straight to processFile, which decodes it, delivers
+// it to the handler, and deletes it from its ".tmp" path. That races the
+// in-flight Dispatch's own os.Rename(tmp, path) call, which then fails
+// (silently — Dispatch discards the error) because its source file is
+// already gone, so the canonical ".json" file the naming scheme expects
+// never comes to exist.
+func TestFileEventBusCrashRecoverySkipsTmpFiles(t *testing.T) {
+
+	root := t.TempDir()
+	bus, err := NewFileEventBus(root)
+	if err != nil {
+		t.Fatalf("NewFileEventBus: %v", err)
+	}
+	t.Cleanup(func() { _ = bus.Close() })
+
+	subDir := filepath.Join(root, "sub1")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	// Simulate the exact state Dispatch's write-then-rename dance passes
+	// through: a fully-written ".tmp" file that has not (yet) been renamed
+	// to its final ".json" name — e.g. because Dispatch is paused right
+	// between the WriteFile and Rename calls, or because the process
+	// crashed in that window on a prior run.
+	eventData, err := json.Marshal(orderPlaced{ID: "order-1", Total: 42})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
+	stored, err := json.Marshal(storedEvent{
+		EventID:   uuid.New(),
+		StreamID:  "order-1",
+		EventType: "order_placed",
+		Data:      eventData,
+		Version:   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal storedEvent: %v", err)
+	}
+	tmpPath := filepath.Join(subDir, "00000000000000000001.json.tmp")
+	if err := os.WriteFile(tmpPath, stored, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	delivered := make(chan struct{}, 1)
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error {
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+
+	if err := bus.Subscribe(context.Background(), "sub1", handler); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	select {
+	case <-delivered:
+		t.Fatalf("crash-recovery sweep delivered a %q file, matching the live fsnotify path's "+
+			"explicit skip of such files would have left it untouched", filepath.Base(tmpPath))
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if _, err := os.Stat(tmpPath); err != nil {
+		t.Fatalf("stat %s: %v (crash-recovery sweep deleted a still-in-flight .tmp file)", tmpPath, err)
+	}
+}
+
+// TestDispatch_ConcurrentCallsLoseEventsToFilenameCollision documents a bug:
+// see .bug/eventbus-file-dispatch-concurrent-filename-collision-loses-events.md.
+//
+// Dispatch names each subscriber's file solely from the wall-clock time of
+// the call — fmt.Sprintf("%020d.json", time.Now().UnixNano()) — with no
+// per-event uniqueness (no EventID, no counter). time.Now().UnixNano() is not
+// guaranteed unique between calls; two goroutines calling Dispatch at
+// genuinely the same nanosecond derive the identical filename for the same
+// subscriber directory. os.Rename(tmp, path) then silently replaces
+// whichever file got there first — even one still awaiting pickup by the
+// subscriber's fsnotify watcher — so the earlier event is never delivered
+// and leaves no trace on disk.
+func TestDispatch_ConcurrentCallsLoseEventsToFilenameCollision(t *testing.T) {
+
+	root := t.TempDir()
+	bus, err := NewFileEventBus(root)
+	if err != nil {
+		t.Fatalf("NewFileEventBus: %v", err)
+	}
+	t.Cleanup(func() { _ = bus.Close() })
+
+	var mu sync.Mutex
+	received := make(map[string]bool)
+
+	err = bus.Subscribe(
+		context.Background(),
+		"sub",
+		eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error {
+			if op, ok := ev.(*orderPlaced); ok {
+				mu.Lock()
+				received[op.ID] = true
+				mu.Unlock()
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	// Let the subscriber's fsnotify watcher come up.
+	time.Sleep(200 * time.Millisecond)
+
+	const goroutines = 16
+	const perGoroutine = 500
+	total := goroutines * perGoroutine
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				id := fmt.Sprintf("order-%d-%d", g, i)
+				env := &eventsourcing.Envelope{
+					EventID:    uuid.New(),
+					StreamID:   id,
+					Event:      orderPlaced{ID: id, Total: i},
+					OccurredAt: time.Now().UTC(),
+				}
+				if err := bus.Dispatch(env); err != nil {
+					t.Errorf("Dispatch: %v", err)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Give the subscriber time to process every file that actually made it
+	// to disk before checking how many distinct events it saw.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(received)
+		mu.Unlock()
+		if n >= total {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != total {
+		t.Fatalf("dispatched %d events concurrently, only %d were delivered — %d were silently "+
+			"lost to Dispatch's time.Now().UnixNano() filename collisions", total, len(received), total-len(received))
 	}
 }

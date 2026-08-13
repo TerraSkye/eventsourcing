@@ -41,8 +41,11 @@ type CommandBus struct {
 	handlers    map[string]CommandHandler[Command]
 	queues      []chan queuedCommand
 	stopCh      chan struct{}
+	drainCh     chan struct{}
 	stopOnce    sync.Once
+	drainOnce   sync.Once
 	wg          sync.WaitGroup
+	enqueueWG   sync.WaitGroup
 	mu          sync.RWMutex
 	shardCount  int
 	middlewares []CommandHandlerMiddleware
@@ -66,6 +69,7 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus {
 		handlers:    make(map[string]CommandHandler[Command]),
 		middlewares: make([]CommandHandlerMiddleware, 0),
 		stopCh:      make(chan struct{}),
+		drainCh:     make(chan struct{}),
 		shardCount:  shardCount,
 	}
 
@@ -94,6 +98,17 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	// stopCh. Stop takes the write lock to close, so it waits out every reader here
 	// and every Add happens-before the close. Concurrent dispatches hold the read
 	// lock together and do not serialize.
+	//
+	// enqueueWG is a second, narrower counter covering only the enqueue
+	// attempt below, not the full dispatch. Stop waits for it to drain before
+	// telling workers it's safe to exit: since this Add is under the same
+	// lock as the stopCh check, Stop cannot observe enqueueWG at zero while a
+	// Dispatch that saw stopCh open is still able to reach the send below, so
+	// a worker can never disappear out from under a send already in flight.
+	// The enqueue select itself deliberately stays lock-free -- it can block
+	// on a full channel, and it must stay reachable by Stop's stopCh close so
+	// a Dispatch stuck waiting for buffer space is not left waiting on a
+	// worker that may itself be stuck.
 	b.mu.RLock()
 	select {
 	case <-b.stopCh:
@@ -102,6 +117,7 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	default:
 	}
 	b.wg.Add(1)
+	b.enqueueWG.Add(1)
 	b.mu.RUnlock()
 	defer b.wg.Done()
 
@@ -112,10 +128,13 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	// Enqueue the command with the response channel
 	select {
 	case b.queues[shard] <- queuedCommand{Ctx: ctx, Command: cmd, ResponseCh: responseCh}:
+		b.enqueueWG.Done()
 		// Wait for processing result
 	case <-b.stopCh:
+		b.enqueueWG.Done()
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	case <-ctx.Done():
+		b.enqueueWG.Done()
 		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
 	}
 
@@ -130,7 +149,11 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	}
 }
 
-// worker processes commands from a single shard's queue.
+// worker processes commands from a single shard's queue. It exits on drainCh
+// rather than stopCh: drainCh only closes once Stop has confirmed, via
+// enqueueWG, that no Dispatch can possibly send to this queue again, so a
+// command already sitting in the buffer at that point is guaranteed to still
+// be picked up here rather than abandoned in a channel nothing reads.
 func (b *CommandBus) worker(queue chan queuedCommand) {
 
 	for {
@@ -138,7 +161,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 
 		select {
 		case cmd = <-queue:
-		case <-b.stopCh:
+		case <-b.drainCh:
 			// drain whatever is still queued, then exit
 			select {
 			case cmd = <-queue:
@@ -254,11 +277,19 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 // to call concurrently, but the bus cannot be restarted afterwards.
 func (b *CommandBus) Stop() {
 	// Close under b.mu so it cannot land between Dispatch's stopCh check and its
-	// wg.Add. Once this returns, every subsequent Dispatch observes stopCh closed
-	// and bails out without touching wg, so Wait sees a final count.
+	// wg/enqueueWG Add. Once this returns, every subsequent Dispatch observes
+	// stopCh closed and bails out without touching either WaitGroup, so both
+	// see a final count.
 	b.mu.Lock()
 	b.stopOnce.Do(func() { close(b.stopCh) })
 	b.mu.Unlock()
+
+	// Every Dispatch that got past the check above either sends on its shard
+	// queue, or bails out via stopCh/ctx.Done, before it calls enqueueWG.Done.
+	// Once this returns, no send to any shard queue can ever happen again, so
+	// it's safe to let the workers drain what's left and exit.
+	b.enqueueWG.Wait()
+	b.drainOnce.Do(func() { close(b.drainCh) })
 
 	b.wg.Wait()
 }

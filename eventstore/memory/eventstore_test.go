@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"testing"
 	"time"
 
@@ -395,6 +396,51 @@ func TestLoadStreamFrom_InvalidVersion(t *testing.T) {
 	}
 }
 
+// TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring verifies that a
+// Revision whose uint64 value is >= 2^63 (which becomes negative once
+// ToRawInt64 converts it to int64) is rejected eagerly with
+// cqrs.ErrInvalidRevision, the same way LoadStreamFrom already rejects
+// smaller out-of-range revisions, rather than deferring an error to the
+// iterator or panicking.
+func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
+	store := memory.NewMemoryStore(0)
+	defer store.Close()
+
+	// A Revision whose uint64 value is >= 2^63 becomes negative once
+	// ToRawInt64 converts it to int64 -- here, exactly -1, the same sentinel
+	// LoadStreamFrom's bounds check (and, separately, Any{}.ToRawInt64())
+	// uses. The out-of-range check is expected to catch this and return
+	// cqrs.ErrInvalidRevision eagerly, the same way it already does for
+	// small out-of-range revisions above -- the store never defers this
+	// error to the iterator.
+	rev := cqrs.Revision(math.MaxUint64)
+
+	iter, err := store.LoadStreamFrom(context.Background(), "nonexistent-stream", rev)
+	if iter != nil {
+		t.Fatalf("expected a nil iterator when LoadStreamFrom rejects the revision")
+	}
+	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+		t.Fatalf("expected ErrInvalidRevision, got %v", err)
+	}
+}
+
+// TestLoadFromAll_HugeRevisionPanicsInsteadOfErroring is the LoadFromAll
+// counterpart of TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring.
+func TestLoadFromAll_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
+	store := memory.NewMemoryStore(0)
+	defer store.Close()
+
+	rev := cqrs.Revision(math.MaxUint64)
+
+	iter, err := store.LoadFromAll(context.Background(), rev)
+	if iter != nil {
+		t.Fatalf("expected a nil iterator when LoadFromAll rejects the revision")
+	}
+	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+		t.Fatalf("expected ErrInvalidRevision, got %v", err)
+	}
+}
+
 func TestLoadStreamFrom_StreamExists(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
@@ -734,6 +780,7 @@ func TestLoadFromAll_Any(t *testing.T) {
 		}
 	})
 }
+
 // TestLoadStreamFrom_RevisionAtStreamHead is a regression test for GitHub
 // issue #50: LoadStreamFrom's Revision guard used >= where a start index
 // needs >, so asking for the revision a stream is currently at — "I am
@@ -848,5 +895,100 @@ func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
 	}
 	if errors.Is(err, cqrs.ErrInvalidRevision) {
 		t.Errorf("load of the empty stream rejected the initial revision")
+	}
+}
+
+type closeTestEvent struct {
+	ID string
+}
+
+func (e closeTestEvent) AggregateID() string { return e.ID }
+func (e closeTestEvent) EventType() string   { return "closeTestEvent" }
+
+// TestClose_LeavesGlobalEventsAccessible verifies Close's doc comment
+// promise that "Close discards all stored events" holds for LoadFromAll's
+// global event log, not just per-stream reads.
+func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
+
+	store := memory.NewMemoryStore(10)
+	ctx := context.Background()
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		{StreamID: "s1", Event: closeTestEvent{ID: "s1"}, Version: 1},
+	}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	// Close's doc comment: "Close discards all stored events". LoadFromAll
+	// reads m.global, which Close never clears (unlike m.events, which it
+	// resets to an empty map), so the event saved before Close is still
+	// returned here.
+	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+	if err != nil {
+		t.Fatalf("LoadFromAll failed: %v", err)
+	}
+
+	events, err := iter.All(ctx)
+	if err != nil {
+		t.Fatalf("iter.All failed: %v", err)
+	}
+
+	if len(events) != 0 {
+		t.Fatalf("Close should discard all stored events, but LoadFromAll after Close returned %d event(s)", len(events))
+	}
+}
+
+type aliasTestEvent struct {
+	ID    string
+	Value string
+}
+
+func (e aliasTestEvent) AggregateID() string { return e.ID }
+func (e aliasTestEvent) EventType() string   { return "aliasTestEvent" }
+
+// TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes verifies
+// that Save copies each Envelope value rather than storing a pointer into
+// the caller's events slice, so a caller that reuses the same backing
+// slice across multiple Save calls (a common buffer-reuse pattern) doesn't
+// see every previously "saved" envelope silently change to reflect the
+// latest Save call's contents.
+func TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes(t *testing.T) {
+
+	store := memory.NewMemoryStore(10)
+	ctx := context.Background()
+
+	// A single-element buffer reused across independent Save calls, as a
+	// caller might do to avoid allocating a new slice per aggregate.
+	buf := make([]cqrs.Envelope, 1)
+
+	for i, id := range []string{"agg-1", "agg-2", "agg-3"} {
+		buf[0] = cqrs.Envelope{
+			StreamID: id,
+			Event:    aliasTestEvent{ID: id, Value: id},
+			Version:  uint64(i + 1),
+		}
+		if _, err := store.Save(ctx, buf, cqrs.NoStream{}); err != nil {
+			t.Fatalf("save %q failed: %v", id, err)
+		}
+	}
+
+	// Each stream should independently retain the value it was saved with.
+	for _, id := range []string{"agg-1", "agg-2", "agg-3"} {
+		iter, err := store.LoadStream(ctx, id)
+		if err != nil {
+			t.Fatalf("load stream %q failed: %v", id, err)
+		}
+		envs := collectAll(t, iter)
+		if len(envs) != 1 {
+			t.Fatalf("stream %q: expected 1 event, got %d", id, len(envs))
+		}
+		got := envs[0].Event.(aliasTestEvent).Value
+		if got != id {
+			t.Errorf("stream %q: expected stored event value %q, got %q (corrupted by a later Save reusing the same slice)", id, id, got)
+		}
 	}
 }

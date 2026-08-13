@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -447,3 +448,121 @@ func BenchmarkCommandBusDispatchShards32(b *testing.B) { benchmarkDispatch(b, 32
 // BenchmarkCommandBusDispatchContended oversubscribes GOMAXPROCS 32x so every
 // dispatcher contends for the b.mu that orders wg.Add against Stop's wg.Wait.
 func BenchmarkCommandBusDispatchContended(b *testing.B) { benchmarkDispatch(b, 16, 32) }
+
+type bufferedRaceCmd struct{ ID string }
+
+func (c bufferedRaceCmd) AggregateID() string { return c.ID }
+
+// TestCommandBus_BufferedStopRaceHangsDispatch probes a race between Dispatch
+// and Stop on a *buffered* shard queue (bufferSize > 0, the configuration the
+// NewCommandBus doc example itself uses).
+//
+// Dispatch's enqueue step is a select between sending on the shard channel
+// and stopCh. Once Stop closes stopCh, the worker can observe the (still
+// empty) queue and exit for good -- but a Dispatch goroutine that already
+// passed its *earlier* stopCh check (and so already counted itself in b.wg)
+// can still reach the enqueue select afterward. With a buffered channel, the
+// send there succeeds even with zero readers, so Go's select can pick the
+// send case instead of the also-ready stopCh case. The command is then
+// buffered forever in an abandoned channel: no worker will ever read it, so
+// a Dispatch called with a context that has no deadline (context.Background,
+// extremely common) blocks forever on <-responseCh, and Stop's wg.Wait()
+// blocks forever right alongside it, since that Dispatch call's wg.Done
+// (deferred) never runs.
+//
+// This test hammers that window across many independent buses/goroutines and
+// fails if Stop (or the racing Dispatch) is ever still blocked after a
+// generous deadline -- something that should be impossible per the Stop doc
+// comment ("Dispatch racing Stop either completes normally or fails with an
+// error wrapping ErrCommandBusClosed").
+func TestCommandBus_BufferedStopRaceHangsDispatch(t *testing.T) {
+	const trials = 2000
+
+	for i := range trials {
+		bus := NewCommandBus(1, 1) // buffered shard queue, matches doc example shape
+		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		var dispatchDone int32
+		go func() {
+			_, _ = bus.Dispatch(context.Background(), bufferedRaceCmd{ID: fmt.Sprintf("agg-%d", i)})
+			atomic.StoreInt32(&dispatchDone, 1)
+		}()
+
+		stopDone := make(chan struct{})
+		go func() {
+			bus.Stop()
+			close(stopDone)
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("trial %d: bus.Stop() hung -- a Dispatch is stuck holding wg after its command was "+
+				"enqueued into a shard channel whose worker already exited (dispatchDone=%d)",
+				i, atomic.LoadInt32(&dispatchDone))
+		}
+
+		if atomic.LoadInt32(&dispatchDone) == 0 {
+			// Stop() returned (so wg reached zero) yet the dispatch goroutine
+			// hasn't flipped its flag -- give it a brief grace period for the
+			// scheduler, then fail if it's still not done.
+			deadline := time.After(1500 * time.Millisecond)
+			for atomic.LoadInt32(&dispatchDone) == 0 {
+				select {
+				case <-deadline:
+					t.Fatalf("trial %d: bus.Stop() returned but the concurrent Dispatch never returned", i)
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}
+	}
+}
+
+// TestCommandBus_BufferedStopRaceParallel is the same probe run with many
+// concurrent goroutines per trial to widen the scheduling window further.
+func TestCommandBus_BufferedStopRaceParallel(t *testing.T) {
+	const trials = 50
+	const dispatchersPerTrial = 20
+
+	for i := 0; i < trials; i++ {
+		bus := NewCommandBus(dispatchersPerTrial, 1)
+		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		var wg sync.WaitGroup
+		for d := 0; d < dispatchersPerTrial; d++ {
+			wg.Add(1)
+			go func(d int) {
+				defer wg.Done()
+				_, _ = bus.Dispatch(context.Background(), bufferedRaceCmd{ID: fmt.Sprintf("agg-%d-%d", i, d)})
+			}(d)
+		}
+
+		stopDone := make(chan struct{})
+		go func() {
+			bus.Stop()
+			close(stopDone)
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("trial %d: bus.Stop() hung with %d concurrent dispatchers racing it", i, dispatchersPerTrial)
+		}
+
+		waitDone := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("trial %d: a Dispatch call never returned after Stop completed", i)
+		}
+	}
+}

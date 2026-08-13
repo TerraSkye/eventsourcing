@@ -56,13 +56,13 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.Str
 	case eventsourcing.NoStream:
 		// Behaves like revision 0.
 	case eventsourcing.Revision:
-		if int(v.ToRawInt64()) > len(allEvents) {
+		if v > eventsourcing.Revision(len(allEvents)) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
 				"all", v, len(allEvents), eventsourcing.ErrInvalidRevision,
 			)
 		}
-		offset = uint64(v.ToRawInt64())
+		offset = uint64(v)
 	default:
 	}
 
@@ -70,7 +70,7 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.Str
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if int(offset) >= len(allEvents) {
+		if offset >= uint64(len(allEvents)) {
 			return nil, io.EOF
 		}
 		ev := allEvents[offset]
@@ -151,8 +151,9 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 
 	// Append events
 	for i := range events {
-		m.events[streamId] = append(m.events[streamId], &events[i])
-		m.global = append(m.global, &events[i])
+		ev := events[i]
+		m.events[streamId] = append(m.events[streamId], &ev)
+		m.global = append(m.global, &ev)
 		events[i].GlobalVersion = uint64(len(m.global))
 		currentVersion++
 
@@ -194,7 +195,7 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 
 	var offset uint64
 
-	switch version.(type) {
+	switch v := version.(type) {
 	case eventsourcing.NoStream:
 		if exists {
 			return nil, fmt.Errorf(
@@ -212,13 +213,13 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 	case eventsourcing.Revision:
 		// A start index equal to the stream's length is valid — see the
 		// identical reasoning in LoadFromAll.
-		if int(version.ToRawInt64()) > len(events) {
+		if v > eventsourcing.Revision(len(events)) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
 				id, version, len(events), eventsourcing.ErrInvalidRevision,
 			)
 		}
-		offset = uint64(version.ToRawInt64())
+		offset = uint64(v)
 	default:
 	}
 
@@ -226,7 +227,7 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if int(offset) >= len(events) {
+		if offset >= uint64(len(events)) {
 			return nil, io.EOF
 		}
 		ev := events[offset]
@@ -260,6 +261,7 @@ func (m *MemoryStore) Close() error {
 	m.closed = true
 
 	m.events = make(map[string][]*eventsourcing.Envelope)
+	m.global = make([]*eventsourcing.Envelope, 0)
 	close(m.bus)
 	return nil
 }

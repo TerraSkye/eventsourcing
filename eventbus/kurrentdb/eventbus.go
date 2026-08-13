@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -405,9 +406,15 @@ func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
 		if len(filteredEvents) == 0 {
 			return
 		}
+
+		escaped := make([]string, len(filteredEvents))
+		for i, name := range filteredEvents {
+			escaped[i] = regexp.QuoteMeta(name)
+		}
+
 		opts.Filter = &kurrentdb.SubscriptionFilter{
 			Type:  kurrentdb.EventFilterType,
-			Regex: fmt.Sprintf("^(%s)$", strings.Join(filteredEvents, "|")),
+			Regex: fmt.Sprintf("^(%s)$", strings.Join(escaped, "|")),
 		}
 	}
 }
