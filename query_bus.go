@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // QueryBus is a central registry of query handlers, keyed by their query
@@ -18,7 +19,7 @@ import (
 //	RegisterQueryHandlerFunc(bus, store.ListTasks)
 type QueryBus struct {
 	mu          sync.RWMutex
-	handlers    map[string]any
+	handlers    map[string]registeredQuery
 	requestees  map[string]struct{}
 	middlewares []QueryHandlerMiddleware
 }
@@ -26,19 +27,48 @@ type QueryBus struct {
 // NewQueryBus creates a new, empty QueryBus ready for handler registration.
 func NewQueryBus() *QueryBus {
 	return &QueryBus{
-		handlers:   make(map[string]any),
+		handlers:   make(map[string]registeredQuery),
 		requestees: make(map[string]struct{}),
 	}
 }
 
-// HandlerOption represents an optional configuration function that can
-// modify handler behavior or metadata. Currently reserved for future
-// extensions such as worker pools, timeouts, or rate limiting.
+// HandlerOption configures a handler being registered on a [QueryBus]. See
+// [WithQueryTimeout]; further options may be added for concerns such as worker
+// pools or rate limiting.
 type HandlerOption func(*handlerSettings)
 
 // handlerSettings stores internal configuration for a registered handler.
-// TODO expand with querybus settings
 type handlerSettings struct {
+	// timeout is the default deadline applied to every query dispatched to
+	// this handler, or zero for none. See [WithQueryTimeout].
+	timeout time.Duration
+}
+
+// WithQueryTimeout gives the handler being registered a default deadline:
+// every query dispatched to it runs under a context that expires after d, and
+// the [QueryGateway] stops waiting once it does rather than blocking on a
+// handler that may never return.
+//
+// d is a ceiling, not an override — a caller whose own context expires sooner
+// still wins. A d of zero or less registers no default deadline, which is what
+// registering without this option does.
+//
+// Example Usage:
+//
+//	RegisterQueryHandlerFunc(bus, store.ListTasks, WithQueryTimeout(2*time.Second))
+func WithQueryTimeout(d time.Duration) HandlerOption {
+	return func(settings *handlerSettings) {
+		settings.timeout = d
+	}
+}
+
+// registeredQuery is what a [QueryBus] holds for one (query, result) type
+// pair: the middleware-wrapped handler, kept as an any because its type
+// parameters are not known here, alongside the settings its [HandlerOption]s
+// produced at registration.
+type registeredQuery struct {
+	handler  any
+	settings handlerSettings
 }
 
 // queryKey returns the registry key for query type T and result type R. It
@@ -86,11 +116,14 @@ func RegisterQueryHandler[T Query, R any](bus *QueryBus, handler QueryHandler[T,
 		panic(ErrDuplicateHandler)
 	}
 
-	bus.handlers[key] = wrapQueryHandler[T, R](handler, bus.middlewares)
-
-	meta := &handlerSettings{}
+	settings := handlerSettings{}
 	for _, opt := range opts {
-		opt(meta)
+		opt(&settings)
+	}
+
+	bus.handlers[key] = registeredQuery{
+		handler:  wrapQueryHandler[T, R](handler, bus.middlewares),
+		settings: settings,
 	}
 }
 
@@ -124,10 +157,11 @@ func (q *QueryBus) addRequestee(key string) {
 	q.requestees[key] = struct{}{}
 }
 
-// handlerFor returns the handler registered for key, and reports whether one
-// exists. The lock is held only for the map lookup, never for the handler
-// call, so a slow handler cannot block RegisterQueryHandler.
-func (q *QueryBus) handlerFor(key string) (any, bool) {
+// handlerFor returns the handler registered for key together with its
+// settings, and reports whether one exists. The lock is held only for the map
+// lookup, never for the handler call, so a slow handler cannot block
+// RegisterQueryHandler.
+func (q *QueryBus) handlerFor(key string) (registeredQuery, bool) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	h, ok := q.handlers[key]

@@ -16,7 +16,7 @@
 - [ ] **The same instrument is recorded three different ways.** `:182` and `:240` pass a stream ID;
       `:295` passes `metric.WithAttributes()` — no attributes at all. Whatever the fix, make all three
       call sites identical.
-- [ ] **`err == io.EOF` should be `errors.Is`** (`:166`, `:278`). See `iter.go.md` — an `IterFunc`
+- [ ] **`err == io.EOF` should be `errors.Is`** (`:279`; `:167` is fixed). See `iter.go.md` — an `IterFunc`
       that wraps the sentinel is misclassified as a failure.
 - [ ] **`Save` mutates the caller's slice** (`:96`): `events[i].Metadata = md`. The map itself is
       copied first, so the caller's map is safe, but the new map is written back into the caller's

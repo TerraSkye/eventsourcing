@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestQueryGateway_HandleQuery(t *testing.T) {
@@ -100,5 +101,121 @@ func TestQueryGateway_CancelledContext(t *testing.T) {
 	_, err := gateway(ctx, GetTaskQuery{TaskID: "1"})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("error = %v, want %v", err, context.Canceled)
+	}
+}
+
+// TestQueryGateway_CancelReleasesCaller asserts the gateway returns as soon as
+// the caller's context is cancelled, without waiting for a handler that is
+// still running. Before, the caller was held until the handler returned no
+// matter what its context said.
+func TestQueryGateway_CancelReleasesCaller(t *testing.T) {
+	bus := NewQueryBus()
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q GetTaskQuery) (*TaskResult, error) {
+		<-release // never watches ctx
+		return &TaskResult{Title: "too late"}, nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+
+	start := time.Now()
+	result, err := gateway(ctx, GetTaskQuery{TaskID: "1"})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want one wrapping context.Canceled", err)
+	}
+	if result != nil {
+		t.Errorf("result = %#v, want the zero value once the caller was released", result)
+	}
+	if elapsed > time.Second {
+		t.Errorf("gateway took %v to return, want release at cancellation", elapsed)
+	}
+}
+
+// TestQueryGateway_HandlerPanicReachesCaller asserts that moving the handler
+// call off the caller's goroutine did not turn a panicking handler into a
+// process-wide crash: the panic still surfaces at the call site, where a
+// caller's recover can see it.
+func TestQueryGateway_HandlerPanicReachesCaller(t *testing.T) {
+	bus := NewQueryBus()
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q GetTaskQuery) (*TaskResult, error) {
+		panic("handler exploded")
+	}))
+
+	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+
+	// A cancellable context is what puts the call on its own goroutine.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected the handler's panic to reach the caller")
+		}
+		if r != "handler exploded" {
+			t.Fatalf("recovered %#v, want the handler's own panic value", r)
+		}
+	}()
+
+	_, _ = gateway(ctx, GetTaskQuery{TaskID: "1"})
+}
+
+// TestQueryGateway_PanicOnUncancellableContext asserts the same for the path
+// that skips the goroutine entirely, where the panic unwinds directly.
+func TestQueryGateway_PanicOnUncancellableContext(t *testing.T) {
+	bus := NewQueryBus()
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q GetTaskQuery) (*TaskResult, error) {
+		panic("handler exploded")
+	}))
+
+	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+
+	defer func() {
+		if r := recover(); r != "handler exploded" {
+			t.Fatalf("recovered %#v, want the handler's own panic value", r)
+		}
+	}()
+
+	_, _ = gateway(context.Background(), GetTaskQuery{TaskID: "1"})
+}
+
+// TestQueryGateway_AbandonedHandlerDoesNotBlock asserts the result channel is
+// buffered: a handler that finishes after its caller has gone must be able to
+// deliver and exit rather than leaking a goroutine blocked on the send.
+func TestQueryGateway_AbandonedHandlerDoesNotBlock(t *testing.T) {
+	bus := NewQueryBus()
+
+	release := make(chan struct{})
+	finished := make(chan struct{})
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q GetTaskQuery) (*TaskResult, error) {
+		<-release
+		defer close(finished)
+		return &TaskResult{Title: "too late"}, nil
+	}), WithQueryTimeout(20*time.Millisecond))
+
+	gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+	if _, err := gateway(context.Background(), GetTaskQuery{TaskID: "1"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want one wrapping context.DeadlineExceeded", err)
+	}
+
+	// Let the abandoned handler run to completion; it must get past its
+	// return statement.
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("the abandoned handler never finished; its send blocked on an unbuffered channel")
 	}
 }

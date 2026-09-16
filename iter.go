@@ -2,6 +2,7 @@ package eventsourcing
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -19,6 +20,12 @@ type IterFunc[T any] func(ctx context.Context) (T, error)
 // with Value after each call that returns true; when Next returns false,
 // call Err to distinguish a clean end of iteration (nil) from a failure. See
 // [ExampleNewIteratorFunc].
+//
+// An Iterator is not safe for concurrent use. Next mutates the iterator's
+// state and, through the [IterFunc], whatever state the source keeps to track
+// its position, so concurrent calls to Next — or a call to Next racing with
+// Value, Err or All — will drop or duplicate items. Confine an iterator to a
+// single goroutine, or serialise access to it.
 type Iterator[T any] struct {
 	// nextFunc is the function that produces the next value in the iteration.
 	// It must return:
@@ -49,9 +56,8 @@ func (it *Iterator[T]) Next(ctx context.Context) bool {
 	if err != nil {
 		var zero T
 		it.current = zero
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			it.done = true
-			it.err = nil
 		} else {
 			it.done = true
 			it.err = err
@@ -77,7 +83,14 @@ func (it *Iterator[T]) Err() error {
 
 // All consumes the iterator by calling Next until it returns false,
 // collecting each Value along the way, and returns the collected items
-// along with the result of Err.
+// along with the result of Err. Items collected before a failure are still
+// returned alongside the error.
+//
+// All resumes from the iterator's current position rather than restarting it:
+// on a partly consumed iterator it returns only the items that remain, and on
+// one already exhausted it returns nil, which is indistinguishable from a
+// source that yielded nothing. Call All on a fresh iterator to be sure of
+// getting the whole sequence.
 func (it *Iterator[T]) All(ctx context.Context) ([]T, error) {
 	var results []T
 	for it.Next(ctx) {

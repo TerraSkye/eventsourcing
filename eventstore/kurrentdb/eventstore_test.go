@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	cqrs "github.com/terraskye/eventsourcing"
 	kdbstore "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
 
@@ -372,3 +374,287 @@ func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testi
 			"fell through to kurrentdb.Start{}", len(got))
 	}
 }
+
+// This file covers the serialize -> persist -> deserialize roundtrip for the
+// kurrentdb store: Save json.Marshal's the event into the KurrentDB event's
+// Data (and the metadata into UserMetadata), and LoadStream rebuilds it from
+// the registry. The shared registry/JSON half of that contract is pinned in
+// the root package's serialization_test.go; here the bytes really go through
+// KurrentDB.
+
+type money struct {
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+type lineItem struct {
+	SKU   string   `json:"sku"`
+	Qty   int      `json:"qty"`
+	Price money    `json:"price"`
+	Notes []string `json:"notes"`
+}
+
+type shippingAddress struct {
+	Street  string `json:"street"`
+	Country string `json:"country"`
+}
+
+// roundtripEvent mixes nested structs, a slice of structs, set and nil
+// pointers, maps, a uuid.UUID and a nanosecond-precision time.Time.
+type roundtripEvent struct {
+	OrderID  string            `json:"order_id"`
+	TraceID  uuid.UUID         `json:"trace_id"`
+	PlacedAt time.Time         `json:"placed_at"`
+	Total    money             `json:"total"`
+	Items    []lineItem        `json:"items"`
+	ShipTo   *shippingAddress  `json:"ship_to"`
+	BillTo   *shippingAddress  `json:"bill_to"`
+	Labels   map[string]string `json:"labels"`
+	Discount float64           `json:"discount"`
+	Rushed   bool              `json:"rushed"`
+}
+
+func (e *roundtripEvent) AggregateID() string { return e.OrderID }
+func (e *roundtripEvent) EventType() string   { return "roundtripEvent" }
+
+func init() {
+	cqrs.RegisterEvent(&roundtripEvent{})
+}
+
+func newRoundtripEvent(orderID string) *roundtripEvent {
+	return &roundtripEvent{
+		OrderID:  orderID,
+		TraceID:  uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+		PlacedAt: time.Date(2024, 3, 1, 12, 34, 56, 123456789, time.UTC),
+		Total:    money{Amount: 4999, Currency: "EUR"},
+		Items: []lineItem{
+			{SKU: "WIDGET-1", Qty: 2, Price: money{Amount: 1999, Currency: "EUR"}, Notes: []string{"gift wrap"}},
+			{SKU: "WIDGET-2", Qty: 1, Price: money{Amount: 1001, Currency: "EUR"}},
+		},
+		ShipTo:   &shippingAddress{Street: "Keizersgracht 1", Country: "NL"},
+		BillTo:   nil,
+		Labels:   map[string]string{"channel": "web"},
+		Discount: 12.5,
+		Rushed:   true,
+	}
+}
+
+// TestSerializationRoundtrip_SaveAndLoadStream asserts that a rich event
+// survives Save -> KurrentDB -> LoadStream unchanged, along with the EventID
+// and Metadata around it.
+//
+// Envelope.OccurredAt is deliberately not asserted: this backend does not
+// persist the caller's value at all, it reports the server's CreatedDate on
+// the way out (see eventstore.go, where OccurredAt is set from
+// kEvent.Event.CreatedDate). A timestamp that must survive belongs in the
+// event payload, which is JSON and keeps it to the nanosecond.
+func TestSerializationRoundtrip_SaveAndLoadStream(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "roundtrip-single"
+
+	want := newRoundtripEvent("order-1")
+	eventID := uuid.New()
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		EventID:    eventID,
+		StreamID:   streamID,
+		Event:      want,
+		OccurredAt: time.Now(),
+		Metadata: map[string]any{
+			"user":    "alice",
+			"retries": 3,
+			"trace":   map[string]any{"span": "abc"},
+		},
+	}}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectAll(t, iter)
+	if len(loaded) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(loaded))
+	}
+	got := loaded[0]
+
+	gotEvent, ok := got.Event.(*roundtripEvent)
+	if !ok {
+		t.Fatalf("loaded event is %T, want *roundtripEvent", got.Event)
+	}
+	if !reflect.DeepEqual(gotEvent, want) {
+		t.Fatalf("event changed on the way through kurrentdb:\n got: %#v\nwant: %#v", gotEvent, want)
+	}
+
+	// The pieces DeepEqual would also pass on if the whole substructure went
+	// missing, called out so a regression names itself.
+	if gotEvent.TraceID != want.TraceID {
+		t.Errorf("TraceID = %v, want %v", gotEvent.TraceID, want.TraceID)
+	}
+	if !gotEvent.PlacedAt.Equal(want.PlacedAt) || gotEvent.PlacedAt.Nanosecond() != 123456789 {
+		t.Errorf("PlacedAt = %v, want %v with nanoseconds intact", gotEvent.PlacedAt, want.PlacedAt)
+	}
+	if gotEvent.BillTo != nil {
+		t.Errorf("BillTo = %#v, want a nil pointer to survive as nil", gotEvent.BillTo)
+	}
+	if gotEvent.Items[1].Notes != nil {
+		t.Errorf("Items[1].Notes = %#v, want a nil slice to survive as nil", gotEvent.Items[1].Notes)
+	}
+
+	if got.EventID != eventID {
+		t.Errorf("EventID = %v, want %v", got.EventID, eventID)
+	}
+	if got.StreamID != streamID {
+		t.Errorf("StreamID = %q, want %q", got.StreamID, streamID)
+	}
+
+	// Metadata is a map[string]any, so JSON — not the caller — decides the Go
+	// type of every value: numbers always come back as float64.
+	if got.Metadata["user"] != "alice" {
+		t.Errorf(`Metadata["user"] = %#v, want "alice"`, got.Metadata["user"])
+	}
+	if v, ok := got.Metadata["retries"].(float64); !ok || v != 3 {
+		t.Errorf(`Metadata["retries"] = %#v (%[1]T), want float64(3)`, got.Metadata["retries"])
+	}
+	trace, ok := got.Metadata["trace"].(map[string]any)
+	if !ok {
+		t.Fatalf(`Metadata["trace"] = %#v (%[1]T), want map[string]any`, got.Metadata["trace"])
+	}
+	if trace["span"] != "abc" {
+		t.Errorf(`Metadata["trace"]["span"] = %#v, want "abc"`, trace["span"])
+	}
+}
+
+// TestSerializationRoundtrip_BatchKeepsEventsDistinct asserts that each event
+// in a multi-event batch is decoded into its own instance: a decode that
+// reused one target would leave every loaded event holding the last one's
+// payload.
+func TestSerializationRoundtrip_BatchKeepsEventsDistinct(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "roundtrip-batch"
+
+	var envs []cqrs.Envelope
+	for i := range 3 {
+		ev := newRoundtripEvent("order-2")
+		ev.Total = money{Amount: int64(100 * (i + 1)), Currency: "EUR"}
+		ev.Labels = map[string]string{"seq": string(rune('a' + i))}
+		envs = append(envs, cqrs.Envelope{
+			EventID:    uuid.New(),
+			StreamID:   streamID,
+			Event:      ev,
+			OccurredAt: time.Now(),
+			Metadata:   map[string]any{"seq": i},
+		})
+	}
+
+	if _, err := store.Save(ctx, envs, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectAll(t, iter)
+	if len(loaded) != len(envs) {
+		t.Fatalf("LoadStream returned %d events, want %d", len(loaded), len(envs))
+	}
+
+	for i, got := range loaded {
+		want := envs[i].Event.(*roundtripEvent)
+		gotEvent, ok := got.Event.(*roundtripEvent)
+		if !ok {
+			t.Fatalf("loaded[%d] is %T, want *roundtripEvent", i, got.Event)
+		}
+		if !reflect.DeepEqual(gotEvent, want) {
+			t.Errorf("loaded[%d] = %#v, want %#v", i, gotEvent, want)
+		}
+		if got.EventID != envs[i].EventID {
+			t.Errorf("loaded[%d].EventID = %v, want %v", i, got.EventID, envs[i].EventID)
+		}
+		if v, ok := got.Metadata["seq"].(float64); !ok || int(v) != i {
+			t.Errorf(`loaded[%d].Metadata["seq"] = %#v, want float64(%d)`, i, got.Metadata["seq"], i)
+		}
+	}
+}
+
+// TestSerializationRoundtrip_UnknownFieldInStoredPayload asserts that an event
+// written by an older build — carrying a field the current struct no longer
+// has — still loads, so an additive schema change does not break replay of
+// streams that are already persisted. The stored payload is produced by
+// appending raw JSON under the same event type name, which is exactly what an
+// older build of the application would have written.
+func TestSerializationRoundtrip_UnknownFieldInStoredPayload(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "roundtrip-unknown-fields"
+
+	legacy := legacyPayloadEvent{
+		OrderID:      "order-3",
+		Discount:     7.5,
+		LegacyReason: "promo",
+		Total:        legacyMoney{Amount: 10, Currency: "EUR", VAT: 21},
+	}
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		EventID:    uuid.New(),
+		StreamID:   streamID,
+		Event:      &legacy,
+		OccurredAt: time.Now(),
+		Metadata:   map[string]any{},
+	}}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectAll(t, iter)
+	if len(loaded) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(loaded))
+	}
+
+	// The registry maps the stored name to the *current* struct.
+	got, ok := loaded[0].Event.(*roundtripEvent)
+	if !ok {
+		t.Fatalf("loaded event is %T, want *roundtripEvent", loaded[0].Event)
+	}
+	if got.OrderID != "order-3" {
+		t.Errorf("OrderID = %q, want %q", got.OrderID, "order-3")
+	}
+	if got.Discount != 7.5 {
+		t.Errorf("Discount = %v, want 7.5", got.Discount)
+	}
+	if (got.Total != money{Amount: 10, Currency: "EUR"}) {
+		t.Errorf("Total = %#v, want money{10, EUR}", got.Total)
+	}
+	// Fields absent from the older payload stay at their zero value.
+	if got.Items != nil {
+		t.Errorf("Items = %#v, want nil for a field the stored payload never had", got.Items)
+	}
+	if !got.PlacedAt.IsZero() {
+		t.Errorf("PlacedAt = %v, want the zero time", got.PlacedAt)
+	}
+}
+
+// legacyPayloadEvent writes under roundtripEvent's name but with the field set
+// an older build had: an extra "legacy_reason", an extra "vat" nested inside
+// the total, and none of the fields added since.
+type legacyPayloadEvent struct {
+	OrderID      string      `json:"order_id"`
+	Discount     float64     `json:"discount"`
+	LegacyReason string      `json:"legacy_reason"`
+	Total        legacyMoney `json:"total"`
+}
+
+type legacyMoney struct {
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+	VAT      int    `json:"vat"`
+}
+
+func (e *legacyPayloadEvent) AggregateID() string { return e.OrderID }
+func (e *legacyPayloadEvent) EventType() string   { return "roundtripEvent" }

@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"errors"
 	"io"
 	"maps"
 	"time"
@@ -163,7 +164,7 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 
 		if !iter.Next(ctx) {
 			err := iter.Err()
-			if err == nil || err == io.EOF {
+			if err == nil || errors.Is(err, io.EOF) {
 				EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
 				rebuildSpan.End()
 				return nil, io.EOF
@@ -275,7 +276,7 @@ func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.S
 
 		if !iter.Next(ctx) {
 			err := iter.Err()
-			if err == nil || err == io.EOF {
+			if err == nil || errors.Is(err, io.EOF) {
 				EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
 				if rebuildSpan != nil {
 					rebuildSpan.End()

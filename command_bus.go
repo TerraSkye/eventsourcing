@@ -229,7 +229,7 @@ func (b *CommandBus) handlerFor(cmdName string) (CommandHandler[Command], bool) 
 func (b *CommandBus) selectShard(aggregateID string) int {
 	hash := fnv.New32a()
 	hash.Write([]byte(aggregateID))
-	return int(hash.Sum32()) % b.shardCount
+	return int(hash.Sum32() % uint32(b.shardCount))
 }
 
 // Register installs handler as the handler for command type C on b. The

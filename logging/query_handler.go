@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/terraskye/eventsourcing"
 )
@@ -15,22 +16,34 @@ type queryHandlerLogger[T eventsourcing.Query, R any] struct {
 }
 
 // HandleQuery implements [eventsourcing.QueryHandler] by logging the query's
-// concrete type before delegating to the wrapped handler, and logging the
-// error if that call fails.
+// concrete type and [eventsourcing.Query.ID] before delegating to the wrapped
+// handler, then logging the outcome — success at info, failure at error —
+// with how long the call took.
 func (q *queryHandlerLogger[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
-	qryType := fmt.Sprintf("%T", qry)
-	q.logger.InfoContext(ctx, "Query", "query", qryType)
+	l := q.logger.With(
+		"query", fmt.Sprintf("%T", qry),
+		"queryID", string(qry.ID()),
+	)
+	l.InfoContext(ctx, "Query")
 
+	start := time.Now()
 	result, err := q.next.HandleQuery(ctx, qry)
+	duration := time.Since(start)
+
 	if err != nil {
-		q.logger.ErrorContext(ctx, "Query failed", "query", qryType, "error", err)
+		l.ErrorContext(ctx, "Query failed", "error", err, "duration", duration)
+		return result, err
 	}
 
-	return result, err
+	l.InfoContext(ctx, "Query succeeded", "duration", duration)
+
+	return result, nil
 }
 
 // WithQueryLogging wraps next so that every query it handles is logged: its
-// concrete type before the call, and the error if the call fails.
+// concrete type and ID before the call, and its outcome and duration after,
+// mirroring what the otel package's [github.com/terraskye/eventsourcing/otel.WithQueryTelemetry] records for the
+// same handler.
 func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next eventsourcing.QueryHandler[T, R]) eventsourcing.QueryHandler[T, R] {
 	return &queryHandlerLogger[T, R]{
 		logger: logger,
@@ -39,9 +52,9 @@ func WithQueryLogging[T eventsourcing.Query, R any](logger *slog.Logger, next ev
 }
 
 // QueryLogging returns an [eventsourcing.QueryHandlerMiddleware] that logs
-// every query dispatched through a [eventsourcing.QueryBus]: its type before
-// it runs, and any error it returns. Register it with
-// [eventsourcing.QueryBus.Use] to apply logging to all handlers on the bus.
+// every query dispatched through a [eventsourcing.QueryBus], as described on
+// [WithQueryLogging]. Register it with [eventsourcing.QueryBus.Use] to apply
+// logging to all handlers on the bus.
 func QueryLogging(logger *slog.Logger) eventsourcing.QueryHandlerMiddleware {
 	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
 		return WithQueryLogging(logger, next).HandleQuery

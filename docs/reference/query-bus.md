@@ -27,6 +27,21 @@ bus := eventsourcing.NewQueryBus()
 eventsourcing.RegisterQueryHandler(bus, listTasksHandler)
 ```
 
+### WithQueryTimeout
+
+```go
+func WithQueryTimeout(d time.Duration) HandlerOption
+```
+
+Gives a handler a default deadline. Every query dispatched to it runs under a context that expires after `d`, and the gateway stops waiting once it does:
+
+```go
+eventsourcing.RegisterQueryHandler(bus, listTasksHandler,
+    eventsourcing.WithQueryTimeout(2*time.Second))
+```
+
+`d` is a ceiling, not an override — a caller whose own context expires sooner still wins. Passing zero, or omitting the option, registers no default deadline.
+
 ### Validate
 
 ```go
@@ -89,6 +104,20 @@ task, err := gateway(ctx, GetTask{TaskID: id})
 ```
 
 Creating a gateway registers the `(T, R)` key as a "requestee", which is checked by `bus.Validate()`.
+
+The gateway returns as soon as `ctx` is done, with an error wrapping `ctx.Err()`, rather than blocking on a handler that has not come back:
+
+```go
+ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+defer cancel()
+
+task, err := gateway(ctx, GetTask{TaskID: id})
+if errors.Is(err, context.DeadlineExceeded) {
+    // the handler is still running; its result will be discarded
+}
+```
+
+The handler itself is not interrupted — Go cannot do that. One that honours `ctx` stops on its own; one that ignores it runs to completion off to the side and its result is discarded.
 
 Because `QueryGateway` is a function type, a service struct can hold multiple gateways for the same query type with different result shapes — each independently registered on the bus:
 

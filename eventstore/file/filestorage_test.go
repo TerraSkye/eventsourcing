@@ -2,12 +2,16 @@ package file
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
@@ -546,5 +550,330 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 
 	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
 		t.Errorf("LoadStream order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
+	}
+}
+
+// This file covers the serialize -> persist -> deserialize roundtrip for the
+// file store: FilesStore.Save json.Marshal's the event into a file on disk
+// and LoadStream/LoadFromAll rebuild it from the registry. The shared
+// registry/JSON half of that contract is pinned in the root package's
+// serialization_test.go; here the bytes really go through the filesystem.
+
+type money struct {
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+type lineItem struct {
+	SKU   string   `json:"sku"`
+	Qty   int      `json:"qty"`
+	Price money    `json:"price"`
+	Notes []string `json:"notes"`
+}
+
+type shippingAddress struct {
+	Street  string `json:"street"`
+	Country string `json:"country"`
+}
+
+// roundtripEvent mixes nested structs, a slice of structs, set and nil
+// pointers, maps, a uuid.UUID and a nanosecond-precision time.Time.
+type roundtripEvent struct {
+	OrderID  string            `json:"order_id"`
+	TraceID  uuid.UUID         `json:"trace_id"`
+	PlacedAt time.Time         `json:"placed_at"`
+	Total    money             `json:"total"`
+	Items    []lineItem        `json:"items"`
+	ShipTo   *shippingAddress  `json:"ship_to"`
+	BillTo   *shippingAddress  `json:"bill_to"`
+	Labels   map[string]string `json:"labels"`
+	Discount float64           `json:"discount"`
+	Rushed   bool              `json:"rushed"`
+}
+
+func (e *roundtripEvent) AggregateID() string { return e.OrderID }
+func (e *roundtripEvent) EventType() string   { return "roundtripEvent" }
+
+func init() {
+	cqrs.RegisterEvent(&roundtripEvent{})
+}
+
+func newRoundtripEvent(orderID string) *roundtripEvent {
+	return &roundtripEvent{
+		OrderID:  orderID,
+		TraceID:  uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+		PlacedAt: time.Date(2024, 3, 1, 12, 34, 56, 123456789, time.UTC),
+		Total:    money{Amount: 4999, Currency: "EUR"},
+		Items: []lineItem{
+			{SKU: "WIDGET-1", Qty: 2, Price: money{Amount: 1999, Currency: "EUR"}, Notes: []string{"gift wrap"}},
+			{SKU: "WIDGET-2", Qty: 1, Price: money{Amount: 1001, Currency: "EUR"}},
+		},
+		ShipTo:   &shippingAddress{Street: "Keizersgracht 1", Country: "NL"},
+		BillTo:   nil,
+		Labels:   map[string]string{"channel": "web"},
+		Discount: 12.5,
+		Rushed:   true,
+	}
+}
+
+// TestSerializationRoundtrip_SaveAndLoadStream asserts that a rich event
+// survives Save -> disk -> LoadStream unchanged, and that the envelope
+// metadata around it (EventID, Version, OccurredAt, Metadata) survives too.
+func TestSerializationRoundtrip_SaveAndLoadStream(t *testing.T) {
+	ctx := context.Background()
+
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	want := newRoundtripEvent("order-1")
+	eventID := uuid.New()
+	occurredAt := time.Date(2024, 3, 1, 12, 34, 56, 987654321, time.UTC)
+
+	env := cqrs.Envelope{
+		EventID:    eventID,
+		StreamID:   "order-1",
+		Event:      want,
+		Version:    1,
+		OccurredAt: occurredAt,
+		Metadata: map[string]any{
+			"user":    "alice",
+			"retries": 3,
+			"trace":   map[string]any{"span": "abc"},
+		},
+	}
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{env}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, "order-1")
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectEnvelopes(t, ctx, iter)
+	if len(loaded) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(loaded))
+	}
+	got := loaded[0]
+
+	gotEvent, ok := got.Event.(*roundtripEvent)
+	if !ok {
+		t.Fatalf("loaded event is %T, want *roundtripEvent", got.Event)
+	}
+	if !reflect.DeepEqual(gotEvent, want) {
+		t.Fatalf("event changed on the way through disk:\n got: %#v\nwant: %#v", gotEvent, want)
+	}
+
+	// The pieces DeepEqual would also pass on if the whole substructure went
+	// missing, called out so a regression names itself.
+	if gotEvent.TraceID != want.TraceID {
+		t.Errorf("TraceID = %v, want %v", gotEvent.TraceID, want.TraceID)
+	}
+	if !gotEvent.PlacedAt.Equal(want.PlacedAt) || gotEvent.PlacedAt.Nanosecond() != 123456789 {
+		t.Errorf("PlacedAt = %v, want %v with nanoseconds intact", gotEvent.PlacedAt, want.PlacedAt)
+	}
+	if gotEvent.BillTo != nil {
+		t.Errorf("BillTo = %#v, want a nil pointer to survive as nil", gotEvent.BillTo)
+	}
+
+	if got.EventID != eventID {
+		t.Errorf("EventID = %v, want %v", got.EventID, eventID)
+	}
+	if got.StreamID != "order-1" {
+		t.Errorf("StreamID = %q, want %q", got.StreamID, "order-1")
+	}
+	if got.Version != 1 {
+		t.Errorf("Version = %d, want 1", got.Version)
+	}
+	if !got.OccurredAt.Equal(occurredAt) || got.OccurredAt.Nanosecond() != 987654321 {
+		t.Errorf("OccurredAt = %v, want %v with nanoseconds intact", got.OccurredAt, occurredAt)
+	}
+
+	// Metadata is a map[string]any, so JSON — not the caller — decides the Go
+	// type of every value: numbers always come back as float64.
+	if got.Metadata["user"] != "alice" {
+		t.Errorf(`Metadata["user"] = %#v, want "alice"`, got.Metadata["user"])
+	}
+	if v, ok := got.Metadata["retries"].(float64); !ok || v != 3 {
+		t.Errorf(`Metadata["retries"] = %#v (%[1]T), want float64(3)`, got.Metadata["retries"])
+	}
+	trace, ok := got.Metadata["trace"].(map[string]any)
+	if !ok {
+		t.Fatalf(`Metadata["trace"] = %#v (%[1]T), want map[string]any`, got.Metadata["trace"])
+	}
+	if trace["span"] != "abc" {
+		t.Errorf(`Metadata["trace"]["span"] = %#v, want "abc"`, trace["span"])
+	}
+}
+
+// TestSerializationRoundtrip_BatchKeepsEventsDistinct asserts that each event
+// in a multi-event batch is decoded into its own instance: a factory that
+// returned a shared value, or a decode that reused one target, would leave
+// every loaded event holding the last event's payload.
+func TestSerializationRoundtrip_BatchKeepsEventsDistinct(t *testing.T) {
+	ctx := context.Background()
+
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	var envs []cqrs.Envelope
+	for i := range 3 {
+		ev := newRoundtripEvent("order-2")
+		ev.Total = money{Amount: int64(100 * (i + 1)), Currency: "EUR"}
+		ev.Labels = map[string]string{"seq": string(rune('a' + i))}
+		envs = append(envs, cqrs.Envelope{
+			EventID:    uuid.New(),
+			StreamID:   "order-2",
+			Event:      ev,
+			Version:    uint64(i + 1),
+			OccurredAt: time.Date(2024, 3, 1, 12, 0, i, 0, time.UTC),
+			Metadata:   map[string]any{"seq": i},
+		})
+	}
+
+	if _, err := store.Save(ctx, envs, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, "order-2")
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectEnvelopes(t, ctx, iter)
+	if len(loaded) != len(envs) {
+		t.Fatalf("LoadStream returned %d events, want %d", len(loaded), len(envs))
+	}
+
+	for i, got := range loaded {
+		want := envs[i].Event.(*roundtripEvent)
+		gotEvent, ok := got.Event.(*roundtripEvent)
+		if !ok {
+			t.Fatalf("loaded[%d] is %T, want *roundtripEvent", i, got.Event)
+		}
+		if !reflect.DeepEqual(gotEvent, want) {
+			t.Errorf("loaded[%d] = %#v, want %#v", i, gotEvent, want)
+		}
+		if got.EventID != envs[i].EventID {
+			t.Errorf("loaded[%d].EventID = %v, want %v", i, got.EventID, envs[i].EventID)
+		}
+		if got.Version != envs[i].Version {
+			t.Errorf("loaded[%d].Version = %d, want %d", i, got.Version, envs[i].Version)
+		}
+		if v, ok := got.Metadata["seq"].(float64); !ok || int(v) != i {
+			t.Errorf(`loaded[%d].Metadata["seq"] = %#v, want float64(%d)`, i, got.Metadata["seq"], i)
+		}
+	}
+}
+
+// TestSerializationRoundtrip_UnknownFieldOnDisk asserts that an event written
+// by an older build — carrying a field the current struct no longer has —
+// still loads, so an additive schema change does not break replay of streams
+// that are already on disk.
+func TestSerializationRoundtrip_UnknownFieldOnDisk(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		EventID:  uuid.New(),
+		StreamID: "order-3",
+		Event:    newRoundtripEvent("order-3"),
+		Version:  1,
+	}}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Rewrite the persisted payload the way an older build would have left
+	// it: an extra field that no longer exists on roundtripEvent.
+	rewritePayload(t, dir, "order-3", `{"order_id":"order-3","discount":7.5,"legacy_reason":"promo","total":{"amount":10,"currency":"EUR","vat":21}}`)
+
+	iter, err := store.LoadStream(ctx, "order-3")
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	loaded := collectEnvelopes(t, ctx, iter)
+	if len(loaded) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(loaded))
+	}
+
+	got, ok := loaded[0].Event.(*roundtripEvent)
+	if !ok {
+		t.Fatalf("loaded event is %T, want *roundtripEvent", loaded[0].Event)
+	}
+	if got.OrderID != "order-3" {
+		t.Errorf("OrderID = %q, want %q", got.OrderID, "order-3")
+	}
+	if got.Discount != 7.5 {
+		t.Errorf("Discount = %v, want 7.5", got.Discount)
+	}
+	if (got.Total != money{Amount: 10, Currency: "EUR"}) {
+		t.Errorf("Total = %#v, want money{10, EUR}", got.Total)
+	}
+	// Fields absent from the older payload stay at their zero value.
+	if got.Items != nil {
+		t.Errorf("Items = %#v, want nil for a field the stored payload never had", got.Items)
+	}
+	if !got.PlacedAt.IsZero() {
+		t.Errorf("PlacedAt = %v, want the zero time", got.PlacedAt)
+	}
+}
+
+func collectEnvelopes(t *testing.T, ctx context.Context, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
+	t.Helper()
+
+	var out []*cqrs.Envelope
+	for iter.Next(ctx) {
+		out = append(out, iter.Value())
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	return out
+}
+
+// rewritePayload replaces the "data" member of the single event file in
+// streamID's directory, standing in for an event that an older build of the
+// application wrote with a different payload shape.
+func rewritePayload(t *testing.T, baseDir, streamID, payload string) {
+	t.Helper()
+
+	dir := filepath.Join(baseDir, streamsDirName, streamID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read stream dir %s: %v", dir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("stream %q holds %d files, want exactly 1", streamID, len(entries))
+	}
+
+	path := filepath.Join(dir, entries[0].Name())
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("unmarshal stored event %s: %v", path, err)
+	}
+	stored["data"] = json.RawMessage(payload)
+
+	rewritten, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal rewritten event: %v", err)
+	}
+	if err := os.WriteFile(path, rewritten, 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

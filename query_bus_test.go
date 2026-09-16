@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 type ListTasksQuery struct {
@@ -292,5 +293,142 @@ func TestQueryBus_ValidateWhileRegistering(t *testing.T) {
 
 		close(stop)
 		wg.Wait()
+	}
+}
+
+// slowQuery is the query type used by the timeout tests.
+type slowQuery struct{ ID_ string }
+
+func (q slowQuery) ID() []byte { return []byte(q.ID_) }
+
+// TestWithQueryTimeout_AppliesDeadlineToHandler asserts the per-handler
+// default deadline reaches the handler's own context, so a handler that
+// honours ctx stops on its own.
+func TestWithQueryTimeout_AppliesDeadlineToHandler(t *testing.T) {
+	bus := NewQueryBus()
+
+	deadlines := make(chan time.Duration, 1)
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q slowQuery) (*TaskResult, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadlines <- 0
+			return &TaskResult{Title: "no deadline"}, nil
+		}
+		deadlines <- time.Until(deadline)
+		return &TaskResult{Title: "ok"}, nil
+	}), WithQueryTimeout(time.Minute))
+
+	gateway := NewQueryGateway[slowQuery, *TaskResult](bus)
+	if _, err := gateway(context.Background(), slowQuery{ID_: "1"}); err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+
+	remaining := <-deadlines
+	if remaining <= 0 {
+		t.Fatalf("handler saw no deadline; WithQueryTimeout did not reach its context")
+	}
+	if remaining > time.Minute {
+		t.Errorf("handler deadline is %v away, want at most the minute configured", remaining)
+	}
+}
+
+// TestWithQueryTimeout_ReleasesCallerFromUncooperativeHandler covers the gap
+// this option closes: before it, a handler that never returns held its caller
+// forever. The handler here deliberately ignores ctx, which is the case a
+// deadline on the context alone cannot solve.
+func TestWithQueryTimeout_ReleasesCallerFromUncooperativeHandler(t *testing.T) {
+	bus := NewQueryBus()
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q slowQuery) (*TaskResult, error) {
+		<-release // never watches ctx
+		return &TaskResult{Title: "too late"}, nil
+	}), WithQueryTimeout(20*time.Millisecond))
+
+	gateway := NewQueryGateway[slowQuery, *TaskResult](bus)
+
+	start := time.Now()
+	result, err := gateway(context.Background(), slowQuery{ID_: "1"})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want one wrapping context.DeadlineExceeded", err)
+	}
+	if result != nil {
+		t.Errorf("result = %#v, want the zero value once the deadline passed", result)
+	}
+	if elapsed > time.Second {
+		t.Errorf("gateway took %v to return, want roughly the 20ms deadline", elapsed)
+	}
+}
+
+// TestWithQueryTimeout_CallerDeadlineWinsWhenEarlier asserts the registered
+// timeout is a ceiling rather than an override.
+func TestWithQueryTimeout_CallerDeadlineWinsWhenEarlier(t *testing.T) {
+	bus := NewQueryBus()
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q slowQuery) (*TaskResult, error) {
+		<-release
+		return &TaskResult{Title: "too late"}, nil
+	}), WithQueryTimeout(time.Hour))
+
+	gateway := NewQueryGateway[slowQuery, *TaskResult](bus)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if _, err := gateway(ctx, slowQuery{ID_: "1"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want one wrapping context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("gateway took %v to return, want the caller's 20ms deadline to win over the registered hour", elapsed)
+	}
+}
+
+// TestWithQueryTimeout_NotSetLeavesHandlerUnbounded asserts registering
+// without the option keeps the previous behaviour: no deadline is imposed, and
+// a handler is free to take as long as it likes.
+func TestWithQueryTimeout_NotSetLeavesHandlerUnbounded(t *testing.T) {
+	bus := NewQueryBus()
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q slowQuery) (*TaskResult, error) {
+		if _, ok := ctx.Deadline(); ok {
+			return nil, errors.New("handler was given a deadline it never asked for")
+		}
+		time.Sleep(10 * time.Millisecond)
+		return &TaskResult{Title: "ok"}, nil
+	}))
+
+	gateway := NewQueryGateway[slowQuery, *TaskResult](bus)
+	result, err := gateway(context.Background(), slowQuery{ID_: "1"})
+	if err != nil {
+		t.Fatalf("gateway: %v", err)
+	}
+	if result.Title != "ok" {
+		t.Errorf("Title = %q, want %q", result.Title, "ok")
+	}
+}
+
+// TestWithQueryTimeout_ZeroIsNoDeadline asserts a non-positive duration is
+// treated the same as not passing the option at all.
+func TestWithQueryTimeout_ZeroIsNoDeadline(t *testing.T) {
+	bus := NewQueryBus()
+
+	RegisterQueryHandler(bus, NewQueryHandlerFunc(func(ctx context.Context, q slowQuery) (*TaskResult, error) {
+		if _, ok := ctx.Deadline(); ok {
+			return nil, errors.New("a zero timeout still produced a deadline")
+		}
+		return &TaskResult{Title: "ok"}, nil
+	}), WithQueryTimeout(0))
+
+	gateway := NewQueryGateway[slowQuery, *TaskResult](bus)
+	if _, err := gateway(context.Background(), slowQuery{ID_: "1"}); err != nil {
+		t.Fatalf("gateway: %v", err)
 	}
 }
