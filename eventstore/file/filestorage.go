@@ -357,7 +357,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
 func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(ctx, f.streamDir(id), cqrs.StreamExists{}, false)
+	return f.loadFromDir(ctx, f.streamDir(id), cqrs.StreamExists{})
 }
 
 // LoadStreamFrom returns a lazy iterator over the events in the stream
@@ -369,7 +369,7 @@ func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 // beginning of the stream. It also returns a non-nil error if the requested
 // revision is beyond the stream's current length.
 func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(ctx, f.streamDir(id), version, false)
+	return f.loadFromDir(ctx, f.streamDir(id), version)
 }
 
 // LoadFromAll returns a lazy iterator over every event saved across all
@@ -378,7 +378,7 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 // [FilesStore.LoadStreamFrom], but against the global sequence rather than a
 // single stream.
 func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(ctx, filepath.Join(f.baseDir, allDirName), version, true)
+	return f.loadFromDir(ctx, filepath.Join(f.baseDir, allDirName), version)
 }
 
 // loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
@@ -386,13 +386,11 @@ func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) 
 // described by from, and returns a lazy iterator over the decoded events in
 // filename order.
 //
-// oneIndexed distinguishes the two numbering conventions files in dir are
-// named by: a stream directory's files are named after Envelope.Version,
-// which starts at 0, while the "all" directory's files are named after
-// Envelope.GlobalVersion, which starts at 1 — so a Revision(N) start
-// position (meaning "N events already seen") must skip versions < N in the
-// 0-indexed case, but versions <= N in the 1-indexed one.
-func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState, oneIndexed bool) (*cqrs.Iterator[*cqrs.Envelope], error) {
+// A Revision(N) start position means "N events already seen", so it is
+// exclusive: only versions above N are returned, matching
+// [eventstore/memory.MemoryStore] and the Postgres implementation of the
+// same method. Every other StreamState reads the directory whole.
+func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// A stream's directory is only created lazily, on its first successful
 	// Save, so a never-saved stream (a perfectly normal thing to load, e.g.
 	// via Any{} or NoStream{} for a brand-new aggregate) has no directory at
@@ -406,7 +404,11 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 		files = nil
 	}
 
+	// offset is only meaningful once a Revision has actually been given:
+	// without one there is nothing already seen, and the zero offset must
+	// not be read as "skip version 0".
 	var offset uint64
+	var fromRevision bool
 
 	switch from.(type) {
 	case cqrs.NoStream:
@@ -436,6 +438,7 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 			)
 		}
 		offset = uint64(from.ToRawInt64())
+		fromRevision = true
 	default:
 	}
 
@@ -453,11 +456,7 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 				continue
 			}
 			ver, _ := strconv.ParseUint(parts[0], 10, 64)
-			if oneIndexed {
-				if ver <= offset {
-					continue
-				}
-			} else if ver < offset {
+			if fromRevision && ver <= offset {
 				continue
 			}
 
