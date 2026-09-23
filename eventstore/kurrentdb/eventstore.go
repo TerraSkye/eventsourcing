@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -52,6 +53,14 @@ func WithBackoff(newBackoff func() backoff.BackOff) Option {
 // defaultSaveBackoff is the backoff Save retries transient gRPC errors with
 // unless overridden via [WithBackoff]: up to 30s, to allow for an
 // in-progress leader election.
+// readToEnd is the count passed to the KurrentDB client's read calls. That
+// argument is not a page size the client transparently re-requests past: it
+// is sent verbatim as ReadReq.Options.CountOption.Count, a server-enforced
+// cap on the whole read, after which the server ends the gRPC stream and
+// Recv reports a plain io.EOF — indistinguishable from a real end of
+// stream. Only a count no stream can reach reads every event.
+const readToEnd = math.MaxInt64
+
 func defaultSaveBackoff() backoff.BackOff {
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 30 * time.Second
@@ -212,7 +221,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		Direction:      kurrentdb.Forwards,
 		From:           kurrentdb.Start{},
 		ResolveLinkTos: true,
-	}, 5000)
+	}, readToEnd)
 
 	if err != nil {
 		//TODO enhance error variants
@@ -305,7 +314,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		From:           from,
 		ResolveLinkTos: true,
 	}
-	streamer, err := e.client.ReadStream(ctx, id, opt, 5000)
+	streamer, err := e.client.ReadStream(ctx, id, opt, readToEnd)
 
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -374,7 +383,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		Direction:      kurrentdb.Forwards,
 		From:           kurrentdb.Start{},
 		ResolveLinkTos: true,
-	}, 5000)
+	}, readToEnd)
 
 	if err != nil {
 		return nil, err

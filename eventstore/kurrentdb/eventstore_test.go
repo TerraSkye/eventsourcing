@@ -257,22 +257,28 @@ func init() {
 	cqrs.RegisterEventByType(func() cqrs.Event { return &CountProbeEvent{} })
 }
 
-// TestLoadStream_TruncatesStreamsLargerThanHardcodedCount documents a bug:
-// LoadStream's doc comment promises "a lazy iterator over all events in the
-// stream identified by id", but eventstore.go passes a hardcoded literal
-// 5000 as the `count` argument to (*kurrentdb.Client).ReadStream. That count
-// is not a page/batch size the client transparently re-requests past --
-// KurrentDB's ReadReq.Options.CountOption bounds the entire single-request
-// read server-side (confirmed by reading the vendor client's
+// TestLoadStream_ReturnsEveryEventInLargeStreams is a regression test for the
+// silent truncation a hardcoded count=5000 caused.
+//
+// LoadStream promises "a lazy iterator over all events in the stream
+// identified by id", but eventstore.go passed a literal 5000 as the `count`
+// argument to (*kurrentdb.Client).ReadStream. That count is not a page size
+// the client transparently re-requests past -- KurrentDB's
+// ReadReq.Options.CountOption bounds the entire single-request read
+// server-side (confirmed against the vendored client's
 // toReadStreamRequest/readInternal/ReadStream.Recv: once `count` events are
 // delivered the server ends the gRPC stream, which Recv reports as a plain
-// io.EOF, identical to a real end-of-stream). So a stream with more than
-// 5000 events silently yields only its first 5000 to the caller, with
-// iter.Err() == nil -- indistinguishable from a normal, complete read.
+// io.EOF, identical to a real end of stream). A stream of more than 5000
+// events yielded only its first 5000, with iter.Err() == nil --
+// indistinguishable from a complete read.
 //
-// This test is intentionally slow (appends 5001 events, then reads them
-// back) and is skipped by default; un-skip it to reproduce.
-func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
+// LoadStreamFrom and LoadFromAll were bounded the same way and take the same
+// fix; they are not covered separately here because each case needs its own
+// >5000-event stream.
+func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
+	if testing.Short() {
+		t.Skip("appends and reads back 5001 events")
+	}
 
 	store := kdbstore.NewEventStore(testDB)
 	ctx := context.Background()
@@ -315,10 +321,8 @@ func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
 
 	if count != total {
 		t.Errorf("LoadStream returned %d events for a %d-event stream, want %d "+
-			"(eventstore.go's LoadStream passes a hardcoded count=5000 to "+
-			"(*kurrentdb.Client).ReadStream, silently truncating any stream larger "+
-			"than that instead of returning every event as its doc comment promises)",
-			count, total, total)
+			"(a bounded count truncates the read server-side, and the client "+
+			"reports it as a clean end of stream)", count, total, total)
 	}
 }
 
