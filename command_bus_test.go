@@ -20,11 +20,15 @@ type testCmd struct {
 
 func (c testCmd) AggregateID() string { return c.ID }
 
+func (c testCmd) CommandType() string { return "testCmd" }
+
 type testCmd2 struct {
 	ID string
 }
 
 func (c testCmd2) AggregateID() string { return c.ID }
+
+func (c testCmd2) CommandType() string { return "testCmd2" }
 
 // ---- Tests ----
 
@@ -160,8 +164,8 @@ func TestRegister_DuplicateHandlerPanics(t *testing.T) {
 
 // TestRegister_HandlerTypeMismatchReturnsError covers Register's generated
 // wrapper's own type assertion (cmd.(C)) failing. In normal use this can't
-// happen — the worker only ever looks a handler up by the same %T string
-// Register derived it from — so this calls the wrapper directly (fetched via
+// happen — the worker only ever looks a handler up by the same
+// [Command.CommandType] string Register derived it from — so this calls the wrapper directly (fetched via
 // handlerFor, bypassing the worker's cmdName-matching) with a command of a
 // different concrete type to exercise the defensive check itself.
 func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
@@ -171,7 +175,7 @@ func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
 		return AppendResult{Successful: true}, nil
 	})
 
-	cmdName := fmt.Sprintf("%T", testCmd{})
+	cmdName := testCmd{}.CommandType()
 	h, ok := bus.handlerFor(cmdName)
 	if !ok {
 		t.Fatalf("expected a handler registered for %s", cmdName)
@@ -260,6 +264,8 @@ type stopProbeCmd struct{ ID string }
 
 func (c stopProbeCmd) AggregateID() string { return c.ID }
 
+func (c stopProbeCmd) CommandType() string { return "stopProbeCmd" }
+
 // TestCommandBus_StopDoesNotPanicPendingDispatch asserts that a Dispatch parked
 // on the queue send when Stop runs is either processed or fails with
 // ErrCommandBusClosed. It must never panic the sender, which is what closing the
@@ -330,21 +336,31 @@ type raceCmdA struct{ ID string }
 
 func (c raceCmdA) AggregateID() string { return c.ID }
 
+func (c raceCmdA) CommandType() string { return "raceCmdA" }
+
 type raceCmdB struct{ ID string }
 
 func (c raceCmdB) AggregateID() string { return c.ID }
+
+func (c raceCmdB) CommandType() string { return "raceCmdB" }
 
 type raceCmdC struct{ ID string }
 
 func (c raceCmdC) AggregateID() string { return c.ID }
 
+func (c raceCmdC) CommandType() string { return "raceCmdC" }
+
 type raceCmdD struct{ ID string }
 
 func (c raceCmdD) AggregateID() string { return c.ID }
 
+func (c raceCmdD) CommandType() string { return "raceCmdD" }
+
 type raceCmdE struct{ ID string }
 
 func (c raceCmdE) AggregateID() string { return c.ID }
+
+func (c raceCmdE) CommandType() string { return "raceCmdE" }
 
 // TestCommandBus_RegisterWhileDispatching asserts the concurrency contract the
 // CommandBus godoc promises: the type carries "synchronization mechanisms for
@@ -408,6 +424,8 @@ type benchCmd struct{ ID string }
 
 func (c benchCmd) AggregateID() string { return c.ID }
 
+func (c benchCmd) CommandType() string { return "benchCmd" }
+
 // benchmarkDispatch measures end-to-end Dispatch throughput. Dispatch is
 // synchronous, so this covers the whole round trip: the stopCh check and wg.Add
 // under b.mu, the queue send, worker pickup, the handler, and the response
@@ -452,6 +470,8 @@ func BenchmarkCommandBusDispatchContended(b *testing.B) { benchmarkDispatch(b, 1
 type bufferedRaceCmd struct{ ID string }
 
 func (c bufferedRaceCmd) AggregateID() string { return c.ID }
+
+func (c bufferedRaceCmd) CommandType() string { return "bufferedRaceCmd" }
 
 // TestCommandBus_BufferedStopRaceHangsDispatch probes a race between Dispatch
 // and Stop on a *buffered* shard queue (bufferSize > 0, the configuration the

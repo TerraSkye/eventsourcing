@@ -2,7 +2,6 @@ package logging
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"github.com/terraskye/eventsourcing"
@@ -14,13 +13,12 @@ import (
 // logged as well.
 func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next eventsourcing.CommandHandler[C]) eventsourcing.CommandHandler[C] {
 
-	return func(ctx context.Context, command C) (eventsourcing.AppendResult, error) {
-		cmdType := fmt.Sprintf("%T", command)
-		logger.InfoContext(ctx, "Dispatch", "command", cmdType, "aggregateID", command.AggregateID())
+	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
+		logger.InfoContext(ctx, "Dispatch", "command", cmd.CommandType(), "aggregateID", cmd.AggregateID())
 
-		result, err := next(ctx, command)
+		result, err := next(ctx, cmd)
 		if err != nil {
-			logger.ErrorContext(ctx, "Dispatch failed", "command", cmdType, "aggregateID", command.AggregateID(), "error", err)
+			logger.ErrorContext(ctx, "Dispatch failed", "command", cmd.CommandType(), "aggregateID", cmd.AggregateID(), "error", err)
 		}
 
 		return result, err

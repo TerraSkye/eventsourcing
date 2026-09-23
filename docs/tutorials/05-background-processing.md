@@ -54,6 +54,7 @@ type ArchiveTask struct {
 }
 
 func (c ArchiveTask) AggregateID() string { return c.TaskID.String() }
+func (c ArchiveTask) CommandType() string { return "ArchiveTask" }
 
 type taskState struct {
     Completed bool

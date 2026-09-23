@@ -27,11 +27,10 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 
 	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
 		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-			commandType := fmt.Sprintf("%T", cmd)
-			ctx = eventsourcing.WithCausation(ctx, commandType)
+			ctx = eventsourcing.WithCausation(ctx, cmd.CommandType())
 
 			attr := []attribute.KeyValue{
-				AttrCommandType.String(commandType),
+				AttrCommandType.String(cmd.CommandType()),
 				AttrAggregateID.String(cmd.AggregateID()),
 			}
 			attr = append(attr, cfg.Attributes...)
@@ -40,7 +39,7 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 				attr = append(attr, cfg.GetAttributes(ctx)...)
 			}
 
-			operation := fmt.Sprintf("command.handle %s", commandType)
+			operation := fmt.Sprintf("command.handle %s", cmd.CommandType())
 			if cfg.Operation != "" {
 				operation = cfg.Operation
 			}
@@ -56,8 +55,8 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 			)
 			defer span.End()
 
-			CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-			defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
+			defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
 			startTime := time.Now()
 			result, err := next(ctx, cmd)
 
@@ -65,13 +64,13 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 				AttrStreamID.String(result.StreamID),
 				AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 			)
-			CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(commandType)))
+			CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
 			span.SetAttributes(attr...)
 
 			if err != nil {
 				var conflict *eventsourcing.StreamRevisionConflictError
 				if errors.As(err, &conflict) {
-					ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
+					ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
 					span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
 				}
 				var businessViolation *eventsourcing.ErrBusinessRuleViolation
@@ -83,23 +82,23 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 					span.SetAttributes(AttrErrorMessage.String(causeMessage))
 					span.SetStatus(codes.Ok, "")
 					span.AddEvent("business_rule_violation", trace.WithAttributes(
-						AttrCommandType.String(commandType),
+						AttrCommandType.String(cmd.CommandType()),
 						AttrAggregateID.String(cmd.AggregateID()),
 						AttrStreamID.String(result.StreamID),
 						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 						AttrErrorMessage.String(causeMessage),
 					))
-					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
+					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("failure")))
 					return result, err
 				}
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
-				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
+				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("failure")))
 				return result, err
 			}
 
 			span.SetStatus(codes.Ok, "")
-			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("success")))
+			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("success")))
 			return result, err
 		}
 	}
@@ -128,11 +127,9 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	}
 
 	var zero C
-	commandType := fmt.Sprintf("%T", zero)
+	commandType := zero.CommandType()
 
-	baseAttributes := []attribute.KeyValue{
-		AttrCommandType.String(commandType),
-	}
+	baseAttributes := []attribute.KeyValue{}
 	baseAttributes = append(baseAttributes, cfg.Attributes...)
 
 	defaultOperation := "handle command"
@@ -141,12 +138,15 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	}
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
-		ctx = eventsourcing.WithCausation(ctx, commandType)
+		ctx = eventsourcing.WithCausation(ctx, cmd.CommandType())
 		// Clone before appending: baseAttributes is shared across every call
 		// to this handler, and appending directly to it would alias its
 		// backing array across concurrent calls whenever it has spare
 		// capacity, racing on it (see GitHub issue #59).
-		attr := append(slices.Clone(baseAttributes), AttrAggregateID.String(cmd.AggregateID()))
+		attr := append(slices.Clone(baseAttributes),
+			AttrAggregateID.String(cmd.AggregateID()),
+			AttrCommandType.String(cmd.CommandType()),
+		)
 
 		if cfg.GetAttributes != nil {
 			attr = append(attr, cfg.GetAttributes(ctx)...)

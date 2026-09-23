@@ -15,6 +15,8 @@ type panicProbeCmd struct{}
 
 func (panicProbeCmd) AggregateID() string { return "agg-1" }
 
+func (panicProbeCmd) CommandType() string { return "panicProbeCmd" }
+
 // TestCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic is a regression
 // test for GitHub issue #25: a decide function that signals a business rule
 // violation via a bare &eventsourcing.ErrBusinessRuleViolation{} (no inner
@@ -55,6 +57,8 @@ type raceProbeCmd struct{ id string }
 
 func (c raceProbeCmd) AggregateID() string { return c.id }
 
+func (c raceProbeCmd) CommandType() string { return "raceProbeCmd" }
+
 // TestWithCommandTelemetry_ConcurrentCallsRaceOnSharedBaseAttributes is a
 // regression test for GitHub issue #59: baseAttributes was built once,
 // outside the returned handler closure, and every call appended directly to
@@ -88,6 +92,8 @@ func TestWithCommandTelemetry_ConcurrentCallsRaceOnSharedBaseAttributes(t *testi
 type durationTestCommand struct{}
 
 func (durationTestCommand) AggregateID() string { return "agg-1" }
+
+func (durationTestCommand) CommandType() string { return "durationTestCommand" }
 
 // TestCommandTelemetryDurationRecordedInSeconds is a regression test for
 // GitHub issue #57: CommandTelemetry recorded
