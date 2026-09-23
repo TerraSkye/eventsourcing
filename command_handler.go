@@ -220,13 +220,23 @@ func NewCommandHandler[T any, C Command](
 
 			// --- Persist events ---
 			// With Any{} or StreamExists{}, save against the revision just
-			// loaded above (Revision(lastVersion)), so a conflict can be
-			// resolved by reloading and retrying. Revision(N) and NoStream{}
-			// pin the stream to an exact point the caller asserted, so they
-			// are saved against unchanged.
+			// loaded above, so a conflict can be resolved by reloading and
+			// retrying. Revision(N) and NoStream{} pin the stream to an
+			// exact point the caller asserted, so they are saved against
+			// unchanged.
+			//
+			// Revision(lastVersion), not revision: a stream that loaded
+			// empty leaves revision at the caller's Any{}, which every
+			// store reads as "skip the check", so the first command against
+			// a new aggregate would save unconditionally and a concurrent
+			// creator would not be detected. lastVersion is 0 there, and
+			// Revision(0) asserts the stream is still empty. It is also
+			// what makes a lost race a StreamRevisionConflictError, which
+			// the retry below converges on — NoStream{} would report
+			// ErrStreamExists instead, which is permanent.
 			saveRevision := options.Revision
 			if autoConverge {
-				saveRevision = revision
+				saveRevision = Revision(lastVersion)
 			}
 			result, err := store.Save(ctx, envelopes, saveRevision)
 
