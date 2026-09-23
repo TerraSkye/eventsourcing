@@ -10,7 +10,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -24,7 +24,7 @@ type eventstore struct {
 
 // NewEventStore returns a KurrentDB-backed [cqrs.EventStore] that uses db for
 // all operations.
-func NewEventStore(db *kurrentdb.Client, opts ...Option) cqrs.EventStore {
+func NewEventStore(db *kurrentdb.Client, opts ...Option) eventsourcing.EventStore {
 	e := &eventstore{
 		client:     db,
 		newBackoff: defaultSaveBackoff,
@@ -85,15 +85,15 @@ func defaultSaveBackoff() backoff.BackOff {
 // anything else is mapped by [mapError]. The KurrentDB error stays in the
 // chain in every case.
 //
-// TODO: a violated [cqrs.Revision] expectation is still reported only as a
+// TODO: a violated [eventsourcing.Revision] expectation is still reported only as a
 // wrapped client error, not as a [cqrs.StreamRevisionConflictError], so
 // callers that retry on conflict — NewCommandHandler among them — do not
 // recognise it. Translating it needs the stream's actual revision, which the
 // client carries only for its StreamRevisionConflict code and not for the
 // WrongExpectedVersion an ordinary append failure returns.
-func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
+func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
-		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
+		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
 
 	var streamID = events[0].StreamID
@@ -101,11 +101,11 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	// Validate all events are for same stream
 	for i, env := range events {
 		if env.StreamID != streamID {
-			return cqrs.AppendResult{
+			return eventsourcing.AppendResult{
 					StreamID: streamID,
 				}, fmt.Errorf(
 					"save events to stream %q: %w: event %d has different stream ID %q",
-					streamID, cqrs.ErrInvalidEventBatch, i, env.StreamID,
+					streamID, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
 				)
 		}
 	}
@@ -116,7 +116,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		eventData, err := json.Marshal(ev.Event)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal event data %s",
 				streamID, err, i, ev.Event.EventType(),
 			)
@@ -125,7 +125,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		metaData, err := json.Marshal(ev.Metadata)
 
 		if err != nil {
-			return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal meta data %s",
 				streamID, err, i, ev.Event.EventType(),
 			)
@@ -143,17 +143,17 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	var streamState kurrentdb.StreamState
 	// Handle revision enforcement
 	switch rev := revision.(type) {
-	case cqrs.Any:
+	case eventsourcing.Any:
 		streamState = kurrentdb.Any{}
-	case cqrs.NoStream:
+	case eventsourcing.NoStream:
 		streamState = kurrentdb.NoStream{}
-	case cqrs.StreamExists:
+	case eventsourcing.StreamExists:
 		streamState = kurrentdb.StreamExists{}
-	case cqrs.Revision:
+	case eventsourcing.Revision:
 		streamState = kurrentdb.Revision(uint64(rev.ToRawInt64()))
 	default:
-		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, cqrs.ErrInvalidRevision)
-		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
+		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, eventsourcing.ErrInvalidRevision)
+		return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
 	expBackoff := e.newBackoff()
@@ -184,14 +184,14 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 		// the same sentinel the other implementations use, so callers can
 		// match it without knowing which store is underneath.
 		if expectation := expectationError(streamID, revision, err); expectation != nil {
-			return cqrs.AppendResult{Successful: false, StreamID: streamID}, expectation
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, expectation
 		}
 
-		return cqrs.AppendResult{Successful: false, StreamID: streamID},
+		return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
 			mapError(fmt.Sprintf("save events to stream %q", streamID), err)
 	}
 
-	return cqrs.AppendResult{
+	return eventsourcing.AppendResult{
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: result.NextExpectedVersion,
@@ -209,7 +209,7 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 // the server only reports the missing stream once the first event is
 // requested. Every other failure reaches Err too, mapped through
 // [mapError]; only a genuine end of stream ends iteration with a nil Err.
-func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (e eventstore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction:      kurrentdb.Forwards,
 		From:           kurrentdb.Start{},
@@ -220,7 +220,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 	}
 
-	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
+	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// mapError passes io.EOF through untouched, so a clean end of
@@ -230,7 +230,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		}
 
 		// Convert KurrentDB event to cqrs.EventData
-		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
+		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
 			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
@@ -245,7 +245,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 			metadata = make(map[string]any) // fallback to empty map
 		}
 
-		envelope := &cqrs.Envelope{
+		envelope := &eventsourcing.Envelope{
 			EventID:       kEvent.Event.EventID,
 			StreamID:      kEvent.Event.StreamID,
 			Event:         ev,
@@ -282,7 +282,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 // handler load a brand-new aggregate. Every other failure ends iteration
 // with an error, mapped through [mapError]; use [LoadStream] when a missing
 // stream should be reported as [cqrs.ErrStreamNotFound].
-func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	// cqrs.Revision(N) means "N events already consumed, resume strictly
 	// after N" — the same "exclusive" contract eventstore/memory and
 	// eventstore/file both implement — but kurrentdb.StreamRevision{Value: N}
@@ -309,7 +309,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 	}
 
-	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
+	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// This method does not enforce existence preconditions, so an
@@ -323,7 +323,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		}
 
 		// Convert KurrentDB event to cqrs.EventData
-		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
+		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
 			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
@@ -338,7 +338,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 			metadata = make(map[string]any) // fallback to empty map
 		}
 
-		envelope := &cqrs.Envelope{
+		envelope := &eventsourcing.Envelope{
 			EventID:       kEvent.Event.EventID,
 			StreamID:      kEvent.Event.StreamID,
 			Event:         ev,
@@ -367,7 +367,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 // beginning of the $all stream regardless of the position passed in, so
 // there is currently no way to resume a previous LoadFromAll from where it
 // left off (already flagged in the code below).
-func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (e eventstore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	//TODO fix `from`
 
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
@@ -380,7 +380,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		return nil, mapError("load from all", err)
 	}
 
-	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
+	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// io.EOF signals a normal end of stream and passes through
@@ -389,7 +389,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		}
 
 		// Convert KurrentDB event to cqrs.EventData
-		ev, err := cqrs.NewEventByName(kEvent.Event.EventType)
+		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
 		if err != nil {
 			// Wrap and propagate as EventStoreError
 			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
@@ -404,7 +404,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 			metadata = make(map[string]any) // fallback to empty map
 		}
 
-		envelope := &cqrs.Envelope{
+		envelope := &eventsourcing.Envelope{
 			EventID:       kEvent.Event.EventID,
 			StreamID:      kEvent.Event.StreamID,
 			Event:         ev,

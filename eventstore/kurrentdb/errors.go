@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
 // mapError translates err from the KurrentDB client into this package's error
@@ -64,10 +64,10 @@ func sentinelFor(err error) error {
 	case kurrentdb.ErrorCodeResourceNotFound,
 		kurrentdb.ErrorCodeStreamDeleted,
 		kurrentdb.ErrorCodeStreamTombstoned:
-		return cqrs.ErrStreamNotFound
+		return eventsourcing.ErrStreamNotFound
 
 	case kurrentdb.ErrorCodeResourceAlreadyExists:
-		return cqrs.ErrStreamExists
+		return eventsourcing.ErrStreamExists
 
 	default:
 		return nil
@@ -102,7 +102,7 @@ func isNotFound(err error) bool {
 // [kurrentdb.ErrorCodeWrongExpectedVersion] an ordinary append failure
 // produces, where it appears only inside the message text. See
 // .bug/eventstore-kurrentdb-save-revision-conflict-not-translated.md.
-func expectationError(streamID string, revision cqrs.StreamState, err error) error {
+func expectationError(streamID string, revision eventsourcing.StreamState, err error) error {
 	var kErr *kurrentdb.Error
 	if !errors.As(err, &kErr) {
 		return nil
@@ -115,12 +115,12 @@ func expectationError(streamID string, revision cqrs.StreamState, err error) err
 	}
 
 	switch revision.(type) {
-	case cqrs.NoStream:
+	case eventsourcing.NoStream:
 		// The caller required the stream not to exist yet, and it does.
-		return fmt.Errorf("save events to stream %q: %w: %w", streamID, cqrs.ErrStreamExists, err)
-	case cqrs.StreamExists:
+		return fmt.Errorf("save events to stream %q: %w: %w", streamID, eventsourcing.ErrStreamExists, err)
+	case eventsourcing.StreamExists:
 		// The caller required the stream to already exist, and it does not.
-		return fmt.Errorf("save events to stream %q: %w: %w", streamID, cqrs.ErrStreamNotFound, err)
+		return fmt.Errorf("save events to stream %q: %w: %w", streamID, eventsourcing.ErrStreamNotFound, err)
 	default:
 		return nil
 	}
