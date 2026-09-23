@@ -18,6 +18,9 @@ Step-by-step guides to learn event sourcing by building a real application.
 - [Part 4: Real-time Projections](./tutorials/04-projections.md) — event bus and cached projections
 - [Part 5: Background Processing](./tutorials/05-background-processing.md) — processors and sagas
 
+A runnable version of everything built across these parts lives in
+[`examples/todolist`](../examples/todolist/README.md).
+
 ---
 
 ## How-to guides
