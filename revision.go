@@ -1,6 +1,9 @@
 package eventsourcing
 
-import "strconv"
+import (
+	"math"
+	"strconv"
+)
 
 // StreamState expresses a caller's expectation of a stream's revision, for
 // example to an [EventStore.Save] call via [WithStreamState]. [Any],
@@ -38,6 +41,17 @@ func (StreamExists) String() string { return "stream exists" }
 // Revision expects the stream to be at exactly this version.
 type Revision uint64
 
-func (r Revision) ToRawInt64() int64 { return int64(r) }
+// ToRawInt64 panics if r is above [math.MaxInt64]. The raw encoding reserves
+// negative values for the markers [Any] and [StreamExists] returns, so a
+// revision that large has no representation: int64(r) would sign-flip and be
+// read as one of those markers. No stream reaches that many events, so a
+// revision above it is a calculation that has gone wrong — a panic says so
+// where a negative return would quietly change the caller's meaning.
+func (r Revision) ToRawInt64() int64 {
+	if r > math.MaxInt64 {
+		panic("eventsourcing: Revision overflows int64")
+	}
+	return int64(r)
+}
 
 func (r Revision) String() string { return strconv.FormatUint(uint64(r), 10) }
