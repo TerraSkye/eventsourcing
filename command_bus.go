@@ -170,16 +170,14 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 			}
 		}
 
-		cmdName := fmt.Sprintf("%T", cmd.Command)
-
-		h, exists := b.handlerFor(cmdName)
+		h, exists := b.handlerFor(cmd.Command.CommandType())
 
 		if !exists {
 			cmd.ResponseCh <- commandResult{
 				Result: AppendResult{Successful: false},
 				Err: fmt.Errorf(
 					"dispatch command %s for aggregate %q: %w",
-					cmdName, cmd.Command.AggregateID(), ErrHandlerNotRegistered,
+					cmd.Command.CommandType(), cmd.Command.AggregateID(), ErrHandlerNotRegistered,
 				),
 			}
 			continue
@@ -203,8 +201,8 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 						Result: AppendResult{Successful: false},
 						//TODO improve the error. should it just be "UnrecoverableErr when handling Command ?
 						Err: fmt.Errorf(
-							"handling command %T for aggregate %q: %w",
-							cmd.Command, cmd.Command.AggregateID(), err,
+							"handling command %s for aggregate %q: %w",
+							cmd.Command.CommandType(), cmd.Command.AggregateID(), err,
 						),
 					}
 				}
@@ -233,8 +231,8 @@ func (b *CommandBus) selectShard(aggregateID string) int {
 }
 
 // Register installs handler as the handler for command type C on b. The
-// registration key is derived from C with fmt.Sprintf("%T"), so there are no
-// manual type strings to keep in sync. Register panics with
+// registration key is C's [Command.CommandType], so there are no manual type
+// strings to keep in sync. Register panics with
 // [ErrDuplicateHandler] if a handler for C is already registered.
 //
 // The middleware chain is applied here, at registration time, from the
@@ -247,7 +245,7 @@ func (b *CommandBus) selectShard(aggregateID string) int {
 //	err := Register(bus, fooHandler)
 func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	var zero C
-	cmdName := fmt.Sprintf("%T", zero)
+	cmdName := zero.CommandType()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

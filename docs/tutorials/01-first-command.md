@@ -81,6 +81,7 @@ type CreateTask struct {
 }
 
 func (c CreateTask) AggregateID() string { return c.TaskID.String() }
+func (c CreateTask) CommandType() string { return "CreateTask" }
 
 // taskState is the minimal state needed to enforce business rules.
 type taskState struct {

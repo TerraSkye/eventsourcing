@@ -66,7 +66,7 @@ func (a *AuditMiddleware) Middleware(
     next eventsourcing.CommandHandler[eventsourcing.Command],
 ) eventsourcing.CommandHandler[eventsourcing.Command] {
     return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-        a.logger.Info("audit", "topic", a.topic, "command", fmt.Sprintf("%T", cmd))
+        a.logger.Info("audit", "topic", a.topic, "command", cmd.CommandType())
         return next(ctx, cmd)
     }
 }

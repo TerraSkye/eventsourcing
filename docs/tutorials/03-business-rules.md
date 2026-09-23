@@ -59,6 +59,7 @@ type CompleteTask struct {
 }
 
 func (c CompleteTask) AggregateID() string { return c.TaskID.String() }
+func (c CompleteTask) CommandType() string { return "CompleteTask" }
 
 // taskState tracks everything needed to enforce completion rules.
 type taskState struct {

@@ -23,6 +23,7 @@ type testEvent struct {
 
 func (e testEvent) AggregateID() string { return e.agg }
 func (e testEvent) EventType() string   { return e.typ }
+func (e testEvent) CommandType() string { return "testEvent" }
 
 // testIterator wraps the Iterator[*Envelope] constructor helpers.
 func newSliceEnvelopeIterator(envs []*Envelope) *Iterator[*Envelope] {

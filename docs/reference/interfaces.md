@@ -34,10 +34,14 @@ func (e *TaskCreated) EventType() string   { return "TaskCreated" }
 ```go
 type Command interface {
     AggregateID() string
+    CommandType() string
 }
 ```
 
 A `Command` represents intent to change state. It targets a specific aggregate identified by `AggregateID()`.
+
+- `AggregateID()` — returns the ID of the aggregate this command targets. Used to load that aggregate's state and to pick the `CommandBus` shard.
+- `CommandType()` — returns a stable string name used as the `CommandBus` registration and routing key. Must be unique across all registered commands, and must not vary between instances: `Register` reads it off the zero value.
 
 Commands are named in the present tense (`CreateTask`, not `TaskCreated`). They can be rejected by business rules in `decide`.
 
@@ -50,6 +54,7 @@ type CreateTask struct {
 }
 
 func (c CreateTask) AggregateID() string { return c.TaskID.String() }
+func (c CreateTask) CommandType() string { return "CreateTask" }
 ```
 
 ---
