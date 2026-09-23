@@ -153,6 +153,16 @@ func NewCommandHandler[T any, C Command](
 		var state = initialState()
 		// the stream state we will load from, and (when autoConverge) save against
 		var revision = options.Revision
+		if _, pinned := revision.(Revision); pinned {
+			revision = Any{}
+		}
+		// A pinned Revision(N) says where the caller believes the stream
+		// already is, which every store reads as "resume strictly after N".
+		// Loading from it therefore returns nothing on the very streams it
+		// describes, and decide would run against initialState() instead of
+		// the aggregate's real state. Read from the start instead; the
+		// pinned revision is still what the save is checked against below,
+		// so a stream that is not at N is caught there.
 		// the last version loaded from the stream
 		var lastVersion uint64
 		// Retry loop for handling concurrency conflicts
