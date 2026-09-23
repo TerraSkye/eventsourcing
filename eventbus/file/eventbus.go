@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -70,6 +71,11 @@ type FileEventBus struct {
 	wg          sync.WaitGroup
 	errs        chan error
 	middlewares []eventsourcing.EventHandlerMiddleware
+
+	// seq disambiguates two Dispatch calls that read the same nanosecond.
+	// It is only ever touched atomically, so Dispatch keeps taking nothing
+	// but the read lock.
+	seq atomic.Uint64
 }
 
 // NewFileEventBus constructs a [FileEventBus] backed by root, creating the
@@ -236,7 +242,14 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 		}
 
 		dir := filepath.Join(b.root, name)
-		filename := fmt.Sprintf("%020d.json", time.Now().UnixNano())
+		// The timestamp orders the file among its neighbours, since delivery
+		// follows the directory's lexical order; the counter makes the name
+		// unique. Without it two concurrent Dispatch calls landing on the
+		// same nanosecond build the same name, and the second rename
+		// silently replaces the first event's file — including one the
+		// subscriber has not read yet, which is then never delivered and
+		// leaves nothing behind to notice.
+		filename := fmt.Sprintf("%020d-%020d.json", time.Now().UnixNano(), b.seq.Add(1))
 		path := filepath.Join(dir, filename)
 
 		tmp := path + ".tmp"
