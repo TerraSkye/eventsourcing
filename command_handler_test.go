@@ -737,7 +737,7 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 // returns zero events, evolve is never called for the N pre-existing
 // events, and decide is invoked against initialState() instead of the
 // aggregate's real, current state.
-func TestNewCommandHandler_PinnedRevisionSkipsStateFolding(t *testing.T) {
+func TestNewCommandHandler_PinnedRevisionFoldsFullState(t *testing.T) {
 
 	store := &testStore{}
 
@@ -751,13 +751,16 @@ func TestNewCommandHandler_PinnedRevisionSkipsStateFolding(t *testing.T) {
 		{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "e"}, Version: 3},
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		rev, ok := from.(Revision)
-		if !ok {
-			t.Fatalf("expected Revision, got %T", from)
+		// Revision(N) resumes strictly after N; anything else, Any{}
+		// included, reads from the beginning -- the same split every real
+		// implementation makes.
+		var after uint64
+		if rev, ok := from.(Revision); ok {
+			after = uint64(rev)
 		}
 		var out []*Envelope
 		for _, e := range allEvents {
-			if e.Version > uint64(rev) {
+			if e.Version > after {
 				out = append(out, e)
 			}
 		}
