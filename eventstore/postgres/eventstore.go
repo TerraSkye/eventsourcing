@@ -210,7 +210,7 @@ func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 		if exists {
 			return nil, fmt.Errorf("load stream %q: expected empty stream: %w", id, cqrs.ErrStreamExists)
 		}
-		return cqrs.NewSliceIterator([]*cqrs.Envelope{}), nil
+		return cqrs.NewSliceIterator(ctx, []*cqrs.Envelope{}), nil
 
 	case cqrs.StreamExists:
 		var exists bool
@@ -274,9 +274,8 @@ func (s *eventstore) queryRows(ctx context.Context, sql string, args ...any) (*c
 		return nil, err
 	}
 
-	return cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
+	return cqrs.NewIteratorFunc(ctx, func(ctx context.Context) (*cqrs.Envelope, error) {
 		if !rows.Next() {
-			rows.Close()
 			if err := rows.Err(); err != nil {
 				return nil, err
 			}
@@ -284,10 +283,13 @@ func (s *eventstore) queryRows(ctx context.Context, sql string, args ...any) (*c
 		}
 		env, err := scanEnvelope(rows)
 		if err != nil {
-			rows.Close()
+
 			return nil, err
 		}
 		return env, nil
+	}, func() error {
+		rows.Close()
+		return nil
 	}), nil
 }
 

@@ -1,5 +1,7 @@
 package eventsourcing
 
+import "math"
+
 // StreamState expresses a caller's expectation of a stream's revision, for
 // example to an [EventStore.Save] call via [WithStreamState]. [Any],
 // [NoStream], [StreamExists], and [Revision] are the implementations
@@ -30,4 +32,9 @@ func (StreamExists) ToRawInt64() int64 { return -2 } // special marker
 // Revision expects the stream to be at exactly this version.
 type Revision uint64
 
-func (r Revision) ToRawInt64() int64 { return int64(r) }
+func (r Revision) ToRawInt64() int64 {
+	if r > math.MaxInt64 {
+		panic("revision overflows int64")
+	}
+	return int64(r)
+}

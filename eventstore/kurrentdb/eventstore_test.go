@@ -78,7 +78,7 @@ func TestMain(m *testing.M) {
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
 	var out []*cqrs.Envelope
-	for iter.Next(context.Background()) {
+	for iter.Next() {
 		out = append(out, iter.Value())
 	}
 	if err := iter.Err(); err != nil {
@@ -174,7 +174,7 @@ func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for iter.Next(ctx) {
+		for iter.Next() {
 		}
 	}()
 
@@ -257,22 +257,31 @@ func init() {
 	cqrs.RegisterEventByType(func() cqrs.Event { return &CountProbeEvent{} })
 }
 
-// TestLoadStream_TruncatesStreamsLargerThanHardcodedCount documents a bug:
+// TestLoadStream_ReturnsEveryEventInLargeStreams is a regression test for
+// the silent truncation that eventstore.go's hardcoded count=5000 caused.
+//
 // LoadStream's doc comment promises "a lazy iterator over all events in the
-// stream identified by id", but eventstore.go passes a hardcoded literal
-// 5000 as the `count` argument to (*kurrentdb.Client).ReadStream. That count
-// is not a page/batch size the client transparently re-requests past --
-// KurrentDB's ReadReq.Options.CountOption bounds the entire single-request
-// read server-side (confirmed by reading the vendor client's
+// stream identified by id", but all three Load* methods passed a literal
+// 5000 as the `count` argument to (*kurrentdb.Client).ReadStream/ReadAll.
+// That count is not a page/batch size the client transparently re-requests
+// past -- KurrentDB's ReadReq.Options.CountOption bounds the entire
+// single-request read server-side (confirmed by reading the vendor client's
 // toReadStreamRequest/readInternal/ReadStream.Recv: once `count` events are
 // delivered the server ends the gRPC stream, which Recv reports as a plain
 // io.EOF, identical to a real end-of-stream). So a stream with more than
-// 5000 events silently yields only its first 5000 to the caller, with
-// iter.Err() == nil -- indistinguishable from a normal, complete read.
+// 5000 events yielded only its first 5000 to the caller, with iter.Err() ==
+// nil -- indistinguishable from a normal, complete read.
 //
-// This test is intentionally slow (appends 5001 events, then reads them
-// back) and is skipped by default; un-skip it to reproduce.
-func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
+// The fix is eventstore.go's readToEnd count. LoadStreamFrom and LoadFromAll
+// were bounded the same way and take the same fix, but are not covered
+// separately here: every such case needs its own >5000-event stream.
+//
+// This test is intentionally slow -- it appends 5001 events and reads them
+// back -- so it is skipped under -short.
+func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
+	if testing.Short() {
+		t.Skip("appends and reads back 5001 events")
+	}
 
 	store := kdbstore.NewEventStore(testDB)
 	ctx := context.Background()
@@ -306,7 +315,7 @@ func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
 	}
 
 	count := 0
-	for iter.Next(ctx) {
+	for iter.Next() {
 		count++
 	}
 	if err := iter.Err(); err != nil {
@@ -315,9 +324,9 @@ func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
 
 	if count != total {
 		t.Errorf("LoadStream returned %d events for a %d-event stream, want %d "+
-			"(eventstore.go's LoadStream passes a hardcoded count=5000 to "+
-			"(*kurrentdb.Client).ReadStream, silently truncating any stream larger "+
-			"than that instead of returning every event as its doc comment promises)",
+			"(the count passed to (*kurrentdb.Client).ReadStream is bounding the read "+
+			"below the stream's length again, silently truncating it instead of "+
+			"returning every event as LoadStream's doc comment promises)",
 			count, total, total)
 	}
 }
@@ -371,4 +380,298 @@ func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testi
 			"ToRawInt64() sign-flipped negative, so the `version.ToRawInt64() > 0` check in LoadStreamFrom "+
 			"fell through to kurrentdb.Start{}", len(got))
 	}
+}
+
+// TestSave_RevisionConflictNotTranslatedToConflictError documents the bug
+// filed as .bug/eventstore-kurrentdb-save-revision-conflict-not-translated.md.
+//
+// Save tries to translate an optimistic-concurrency failure with
+// `errors.As(err, &conflictErr)` against *kurrentdb.StreamRevisionConflictError.
+// The client only produces that type from rich gRPC status details
+// (ErrorCodeStreamRevisionConflict, code 8); a plain failed append returns
+// &Error{code: ErrorCodeWrongExpectedVersion} (code 7) wrapping a bare
+// fmt.Errorf (client.go:147). The errors.As therefore never matches, Save
+// returns a generic wrapped error, and no caller can detect the conflict --
+// including NewCommandHandler, whose retry loop keys on
+// errors.As(err, &conflict) and otherwise wraps the failure in
+// backoff.Permanent. Optimistic-concurrency retries silently never happen
+// against this store, while eventstore/memory returns a proper
+// *cqrs.StreamRevisionConflictError with both revisions populated.
+func TestSave_RevisionConflictNotTranslatedToConflictError(t *testing.T) {
+	t.Skip("documents bug: eventstore-kurrentdb-save-revision-conflict-not-translated, see .bug/eventstore-kurrentdb-save-revision-conflict-not-translated.md")
+
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "conflict-translation"
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Save(ctx, []cqrs.Envelope{{
+			StreamID: streamID, Event: &CheckEvent{N: i},
+			Metadata: map[string]any{}, OccurredAt: time.Now(),
+		}}, cqrs.Any{}); err != nil {
+			t.Fatalf("seed save %d: %v", i, err)
+		}
+	}
+
+	// The stream is at revision 1; asserting revision 0 is a genuine
+	// optimistic-concurrency conflict.
+	_, err := store.Save(ctx, []cqrs.Envelope{{
+		StreamID: streamID, Event: &CheckEvent{N: 99},
+		Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}}, cqrs.Revision(0))
+	if err == nil {
+		t.Fatal("expected a revision conflict, got nil")
+	}
+
+	var conflict *cqrs.StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("Save returned %v, which is not a *cqrs.StreamRevisionConflictError: "+
+			"NewCommandHandler's retry loop keys on errors.As(err, &conflict), so a "+
+			"concurrency conflict is reported as a permanent failure and never retried", err)
+	}
+	// Whoever fixes the detection must populate both revisions: Error() calls
+	// ToRawInt64() on each, so a nil StreamState panics.
+	if conflict.ExpectedRevision == nil || conflict.ActualRevision == nil {
+		t.Fatalf("conflict has nil revisions (expected=%v actual=%v); Error() panics on nil",
+			conflict.ExpectedRevision, conflict.ActualRevision)
+	}
+	if got := conflict.ActualRevision.ToRawInt64(); got != 1 {
+		t.Errorf("ActualRevision = %d, want 1", got)
+	}
+}
+
+// TestLoadStream_MissingStreamIsReportedNotFound is a regression test for
+// .bug/eventstore-kurrentdb-loadstream-missing-stream-masked-as-empty.md.
+//
+// LoadStream and LoadStreamFrom used to discard every error from
+// streamer.Recv and return io.EOF instead, which cqrs.Iterator translates
+// into a clean end of iteration (Next() == false, Err() == nil). A stream
+// that did not exist -- and equally a connection that dropped halfway
+// through a read -- was indistinguishable from a complete, empty read.
+// LoadStream now reports a missing stream as cqrs.ErrStreamNotFound, the
+// same sentinel eventstore/memory and eventstore/file use.
+func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+
+	iter, err := store.LoadStream(ctx, "stream-that-does-not-exist")
+	if err != nil {
+		if !errors.Is(err, cqrs.ErrStreamNotFound) {
+			t.Fatalf("LoadStream error = %v, want cqrs.ErrStreamNotFound", err)
+		}
+		return // reported at open time: acceptable
+	}
+
+	got := 0
+	for iter.Next() {
+		got++
+	}
+	if got != 0 {
+		t.Fatalf("got %d events from a non-existent stream", got)
+	}
+	if err := iter.Err(); !errors.Is(err, cqrs.ErrStreamNotFound) {
+		t.Fatalf("iter.Err() = %v, want cqrs.ErrStreamNotFound: a missing stream is "+
+			"being reported as a clean, complete, empty read again, so callers cannot "+
+			"tell it apart from an existing empty stream -- nor from a read that failed "+
+			"partway through", err)
+	}
+}
+
+// TestLoadStreamFrom_RevisionZeroRedeliversFirstEvent documents the bug filed
+// as .bug/eventstore-kurrentdb-loadstreamfrom-revision-zero-redelivers-first-event.md.
+//
+// This is the same off-by-one as GitHub issue #45 (see
+// TestLoadStreamFrom_RevisionIsInclusiveNotExclusive), still live for
+// Revision(0). LoadStreamFrom converts the exclusive cqrs.Revision(N) to
+// KurrentDB's inclusive read position with `if version.ToRawInt64() > 0`,
+// so Revision(0) fails the guard and falls through to kurrentdb.Start{} --
+// re-delivering version 0, the event the caller said it had already
+// consumed. The code comment claims Start{} "already means the same thing",
+// which holds only under a count-based reading of Revision, not the
+// exclusive one the passing issue-#45 test pins.
+func TestLoadStreamFrom_RevisionZeroRedeliversFirstEvent(t *testing.T) {
+	t.Skip("documents bug: eventstore-kurrentdb-loadstreamfrom-revision-zero-redelivers-first-event, see .bug/eventstore-kurrentdb-loadstreamfrom-revision-zero-redelivers-first-event.md")
+
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "revision-zero-redelivery"
+
+	// One event, at native KurrentDB revision 0.
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		StreamID: streamID, Event: &CheckEvent{N: 0},
+		Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}}, cqrs.Any{}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Revision(0) means "version 0 already consumed, resume strictly after
+	// it" -- the contract NewCommandHandler relies on via
+	// `revision = Revision(event.Version)`. It must yield nothing.
+	iter, err := store.LoadStreamFrom(ctx, streamID, cqrs.Revision(0))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := collectAll(t, iter)
+	if len(got) != 0 {
+		t.Errorf("LoadStreamFrom(id, Revision(0)) returned %d event(s) (version %d), want 0: "+
+			"the already-consumed first event is re-delivered, so a command retried after a "+
+			"conflict evolves it into the aggregate twice",
+			len(got), got[0].Version)
+	}
+}
+
+// TestLoadFromAll_IgnoresRequestedVersion documents the bug filed as
+// .bug/eventstore-kurrentdb-loadfromall-ignores-version.md.
+//
+// LoadFromAll accepts a version but never reads it: it hardcodes
+// From: kurrentdb.Start{} (the `//TODO fix `from“ in eventstore.go). Every
+// call replays the whole $all stream from the beginning, so a projection or
+// subscription cannot resume from where it left off -- it reprocesses every
+// event ever stored. The EventStore interface documents LoadFromAll as
+// returning "an iterator over events across every stream, starting at
+// version".
+//
+// The proof is the error the read dies on: a position past the end of $all
+// cannot reach the system events that sit at its very beginning, so seeing
+// one decode-fail is itself evidence the read started at Start{}.
+func TestLoadFromAll_IgnoresRequestedVersion(t *testing.T) {
+	t.Skip("documents bug: eventstore-kurrentdb-loadfromall-ignores-version, see .bug/eventstore-kurrentdb-loadfromall-ignores-version.md")
+
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "loadfromall-version"
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.Save(ctx, []cqrs.Envelope{{
+			StreamID: streamID, Event: &CheckEvent{N: i},
+			Metadata: map[string]any{}, OccurredAt: time.Now(),
+		}}, cqrs.Any{}); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+
+	iter, err := store.LoadFromAll(ctx, cqrs.Revision(1<<40))
+	if err != nil {
+		t.Fatalf("load from all: %v", err)
+	}
+
+	got := 0
+	for iter.Next() {
+		got++
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("LoadFromAll(Revision(1<<40)) failed with %v; a read starting past the end "+
+			"of $all could not have reached that event, so `version` was ignored and the "+
+			"read started at kurrentdb.Start{}", err)
+	}
+	if got != 0 {
+		t.Errorf("LoadFromAll(Revision(1<<40)) returned %d events, want 0 for a position "+
+			"beyond the end of $all", got)
+	}
+}
+
+// TestLoadFromAll_FailsOnSystemEvents documents the bug filed as
+// .bug/eventstore-kurrentdb-loadfromall-fails-on-system-events.md.
+//
+// LoadFromAll reads the $all stream, which carries KurrentDB's own system
+// events ($metadata, $statsCollected, ...), and calls cqrs.NewEventByName on
+// every one of them. Nothing registers those types, so the first system
+// event ends the iteration with "event not registered", making LoadFromAll
+// unusable for its documented purpose against a real server.
+// TestLoadFromAll_HangsPastLastEvent already tolerates this error in passing;
+// this test asserts it should not happen at all.
+func TestLoadFromAll_FailsOnSystemEvents(t *testing.T) {
+	t.Skip("documents bug: eventstore-kurrentdb-loadfromall-fails-on-system-events, see .bug/eventstore-kurrentdb-loadfromall-fails-on-system-events.md")
+
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "loadfromall-system-events"
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		StreamID: streamID, Event: &CheckEvent{N: 1},
+		Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}}, cqrs.Any{}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+	if err != nil {
+		t.Fatalf("load from all: %v", err)
+	}
+	for iter.Next() {
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("LoadFromAll over $all ended with %v: KurrentDB's own system events are "+
+			"passed to cqrs.NewEventByName, which has no registration for them, so the "+
+			"iteration dies instead of skipping them", err)
+	}
+}
+
+// TestLoadStreamFrom_MissingStreamIsAnEmptyRead pins the other half of the
+// error-mapping contract: LoadStreamFrom does not enforce existence
+// preconditions, so an absent stream must stay an empty, successful read.
+// This is what lets a command handler load a brand-new aggregate, and it is
+// how Any{} behaves in the memory and file implementations -- mapping the
+// client's not-found error to cqrs.ErrStreamNotFound here would break every
+// first command for a new stream.
+func TestLoadStreamFrom_MissingStreamIsAnEmptyRead(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+
+	for _, version := range []cqrs.StreamState{cqrs.Any{}, cqrs.NoStream{}, cqrs.Revision(0)} {
+		iter, err := store.LoadStreamFrom(ctx, "stream-that-does-not-exist-either", version)
+		if err != nil {
+			t.Fatalf("LoadStreamFrom(%T) error = %v, want an empty read", version, err)
+		}
+		got := collectAll(t, iter)
+		if len(got) != 0 {
+			t.Errorf("LoadStreamFrom(%T) returned %d events for a missing stream, want 0", version, len(got))
+		}
+	}
+}
+
+// TestSave_ExpectationFailuresMapToSentinels pins the Save half of the
+// mapping: a violated NoStream or StreamExists expectation is reported with
+// the same cqrs sentinel the memory and file implementations use, rather than
+// as an opaque KurrentDB error. It also checks the client's own error stays
+// reachable in the chain, since that is where the detail lives.
+func TestSave_ExpectationFailuresMapToSentinels(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+
+	env := func(streamID string, n int) []cqrs.Envelope {
+		return []cqrs.Envelope{{
+			StreamID: streamID, Event: &CheckEvent{N: n},
+			Metadata: map[string]any{}, OccurredAt: time.Now(),
+		}}
+	}
+
+	t.Run("NoStream on an existing stream is ErrStreamExists", func(t *testing.T) {
+		streamID := "save-expect-nostream"
+		if _, err := store.Save(ctx, env(streamID, 0), cqrs.Any{}); err != nil {
+			t.Fatalf("seed save: %v", err)
+		}
+
+		_, err := store.Save(ctx, env(streamID, 1), cqrs.NoStream{})
+		if !errors.Is(err, cqrs.ErrStreamExists) {
+			t.Fatalf("Save error = %v, want cqrs.ErrStreamExists", err)
+		}
+		var kErr *kurrentdb.Error
+		if !errors.As(err, &kErr) {
+			t.Errorf("Save error = %v, want the KurrentDB error retained in the chain", err)
+		}
+	})
+
+	t.Run("StreamExists on a missing stream is ErrStreamNotFound", func(t *testing.T) {
+		_, err := store.Save(ctx, env("save-expect-streamexists-missing", 0), cqrs.StreamExists{})
+		if !errors.Is(err, cqrs.ErrStreamNotFound) {
+			t.Fatalf("Save error = %v, want cqrs.ErrStreamNotFound", err)
+		}
+	})
+
+	t.Run("a successful save reports no error", func(t *testing.T) {
+		if _, err := store.Save(ctx, env("save-expect-happy", 0), cqrs.NoStream{}); err != nil {
+			t.Fatalf("Save on a new stream with NoStream{} = %v, want nil", err)
+		}
+	})
 }

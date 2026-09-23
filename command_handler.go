@@ -169,9 +169,10 @@ func NewCommandHandler[T any, C Command](
 				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): load failed: %w", command, command.AggregateID(), streamID, err))
 			}
+			defer iter.Close()
 
 			// --- Evolve state ---
-			for iter.Next(ctx) {
+			for iter.Next() {
 				event := iter.Value()
 				revision = Revision(event.Version)
 				lastVersion = event.Version
