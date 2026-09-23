@@ -391,65 +391,60 @@ func (h *nameOnlyEventHandler) EventName() string {
 	return h.name
 }
 
-// TestEventGroupProcessor_StreamFilter_HandlerWithoutEventInstanceIsDropped
-// documents a bug: see
-// .bug/streamfilter-drops-handler-without-eventinstance.md.
+// TestStreamFilter_HandlerWithoutEventInstance covers a handler that
+// implements only the EventName method NewEventGroupProcessor requires, and
+// never the EventInstance one every OnEvent handler happens to have.
+// StreamFilter used to consider only handlers that type-asserted to
+// EventInstance, so such a handler was skipped outright — its type could not
+// reach the filter even when registered.
 //
-// StreamFilter's doc comment states that "an unregistered handled type is
-// never silently dropped from the filter" — it's supposed to fall back to
-// the handled type's own EventType() when the type isn't in the global
-// registry. But that fallback itself depends on first obtaining an instance
-// of the type via the handler's EventInstance() method: StreamFilter only
-// even considers a handler if it type-asserts to
-// `interface{ EventInstance() Event }`, silently skipping any handler that
-// doesn't implement it at all — even though NewEventGroupProcessor's own
-// construction-time requirement is only that a handler implement
-// EventName() string, not EventInstance() Event. A handler satisfying that
-// weaker, actually-enforced contract (like nameOnlyEventHandler above) is
-// registered successfully, routes and handles events correctly via Handle,
-// yet is completely absent from StreamFilter()'s output — an even stronger
-// violation of "never silently dropped" than the unregistered-type case
-// GitHub issue #55 already fixed.
-func TestEventGroupProcessor_StreamFilter_HandlerWithoutEventInstanceIsDropped(t *testing.T) {
+// It is resolved through its routing key now, which is the same type key the
+// registry files names under. Registration still decides: a registered type
+// contributes every name it is registered under, an unregistered one
+// contributes nothing, exactly as for an OnEvent handler.
+func TestStreamFilter_HandlerWithoutEventInstance(t *testing.T) {
+	cartCreatedName := reflect.TypeOf(CartCreated{}).String()
 
-	registryMu.Lock()
-	registry = map[string]func() Event{}
-	typeToNames = map[string][]string{}
-	registryMu.Unlock()
+	t.Run("registered type is included", func(t *testing.T) {
+		registryMu.Lock()
+		registry = map[string]func() Event{}
+		typeToNames = map[string][]string{}
+		registryMu.Unlock()
 
-	cartCreatedName := fmt.Sprintf("%T", CartCreated{})
-	h := &nameOnlyEventHandler{name: cartCreatedName}
+		RegisterEvent(&CartCreated{})
+		RegisterEventByName("LegacyCartCreated", func() Event { return &CartCreated{} })
 
-	group := NewEventGroupProcessor(
-		// *ItemAdded's EventType/AggregateID are pointer-receiver, so calling
-		// them on the nil *ItemAdded EventInstance() returns is safe — this
-		// keeps the test isolated from the separate, already-filed
-		// streamfilter-nil-pointer-dereference-on-fallback bug that a
-		// value-receiver event type (like CartCreated) would trigger here.
-		OnEvent(func(ctx context.Context, ev *ItemAdded) error { return nil }),
-		h,
-	)
+		h := &nameOnlyEventHandler{name: cartCreatedName}
+		group := NewEventGroupProcessor(h)
 
-	// Handle correctly routes to h — proving h is a fully working, properly
-	// registered member of the group, not some degenerate non-participant.
-	if err := group.Handle(context.Background(), CartCreated{ID: "c1"}); err != nil {
-		t.Fatalf("Handle: unexpected error: %v", err)
-	}
-	if !h.called {
-		t.Fatal("expected h.Handle to have been called for CartCreated")
-	}
-
-	names := group.StreamFilter()
-
-	found := false
-	for _, n := range names {
-		if n == cartCreatedName {
-			found = true
+		// Handle routes to h, so it is a full member of the group rather
+		// than a degenerate non-participant.
+		if err := group.Handle(context.Background(), CartCreated{ID: "c1"}); err != nil {
+			t.Fatalf("Handle: unexpected error: %v", err)
 		}
-	}
-	if !found {
-		t.Fatalf("StreamFilter() = %v, missing %q: a handler lacking EventInstance() is silently "+
-			"dropped from the filter, even though it is fully registered and handles events correctly",
-			names, cartCreatedName)
-	}
+		if !h.called {
+			t.Fatal("expected h.Handle to have been called for CartCreated")
+		}
+
+		names := group.StreamFilter()
+		want := []string{"CartCreated", "LegacyCartCreated"}
+		if !reflect.DeepEqual(names, want) {
+			t.Fatalf("StreamFilter() = %v, want %v: a handler without EventInstance is "+
+				"dropped from the filter even though its type is registered", names, want)
+		}
+	})
+
+	t.Run("unregistered type is omitted", func(t *testing.T) {
+		registryMu.Lock()
+		registry = map[string]func() Event{}
+		typeToNames = map[string][]string{}
+		registryMu.Unlock()
+
+		group := NewEventGroupProcessor(&nameOnlyEventHandler{name: cartCreatedName})
+
+		if names := group.StreamFilter(); len(names) != 0 {
+			t.Fatalf("StreamFilter() = %v, want no names: the type is unregistered, "+
+				"so it has no name a store would have persisted events under", names)
+		}
+	})
 }

@@ -156,3 +156,13 @@ func eventTypeKey(event Event) string {
 	}
 	return t.String()
 }
+
+// eventNamesForKey returns every name registered for the concrete event type
+// that eventTypeKey would produce for key, or nil if none is. It exists for
+// callers that hold the type's key but no instance of it.
+func eventNamesForKey(key string) []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	return typeToNames[key]
+}

@@ -150,12 +150,20 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 // them. A handled type that isn't registered contributes no name and is
 // silently omitted from the result, rather than falling back to that type's
 // own [Event.EventType].
+//
+// A handler that does not expose an EventInstance is resolved through its
+// routing key instead, which is the same type key the registry files names
+// under. [NewEventGroupProcessor] requires only EventName, so a hand-rolled
+// handler that never implements EventInstance is a supported shape and is
+// not dropped for it.
 func (p *EventGroupProcessor) StreamFilter() []string {
 	out := make([]string, 0, len(p.handlers))
-	for _, h := range p.handlers {
+	for key, h := range p.handlers {
 		if ei, ok := h.(interface{ EventInstance() Event }); ok {
 			out = append(out, EventNamesFor(ei.EventInstance())...)
+			continue
 		}
+		out = append(out, eventNamesForKey(key)...)
 	}
 	sort.Strings(out) // deterministic order
 	return out
