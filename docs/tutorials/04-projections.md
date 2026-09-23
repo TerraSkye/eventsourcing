@@ -211,7 +211,7 @@ curl -s http://localhost:8080/api/v1/tasks | jq .
 
 ## How `EventGroupProcessor` routes events
 
-`NewEventGroupProcessor` builds a map of event type → handler. When an event arrives via `Handle`, it looks up the correct typed handler by type name and calls it. Unrecognised event types return `ErrSkippedEvent` (not an error — it's expected).
+`NewEventGroupProcessor` builds a map of event type → handler. When an event arrives via `Handle`, it looks up the correct typed handler by type name and calls it. Unrecognised event types return `SkippedEventError` (not an error — it's expected).
 
 `StreamFilter()` returns the list of event type names the processor handles, which can be used to subscribe only to relevant events in networked event buses.
 

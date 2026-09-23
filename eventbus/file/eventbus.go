@@ -339,7 +339,7 @@ func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path stri
 	}
 
 	if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
-		var skippedErr *eventsourcing.ErrSkippedEvent
+		var skippedErr *eventsourcing.SkippedEventError
 		if !errors.As(err, &skippedErr) {
 			b.sendErr(fmt.Errorf("subscriber %q: %s: %w", s.name, path, err))
 			return

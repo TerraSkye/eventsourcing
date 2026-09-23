@@ -31,7 +31,7 @@ const notifyChannel = "eventsourcing_events_inserted"
 // subscriber's position is persisted in the event_subscriptions table, so
 // subscriptions resume where they left off after a restart. Delivery is
 // at-least-once and in strict id order: if a handler returns an error other
-// than [cqrs.ErrSkippedEvent], that event and the rest of its batch are
+// than [cqrs.SkippedEventError], that event and the rest of its batch are
 // retried on the next poll without advancing the subscriber's position (see
 // poll), so a handler that keeps failing blocks that subscriber
 // indefinitely.
@@ -278,7 +278,7 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error 
 // or rolls back, which keeps poll from ever advancing past that id and
 // permanently skipping it once it does commit.
 //
-// If s.handler returns an error other than [cqrs.ErrSkippedEvent], poll
+// If s.handler returns an error other than [cqrs.SkippedEventError], poll
 // returns without committing, so the position is not advanced and the same
 // batch (including any events already handled successfully earlier in this
 // call) is retried on the next poll.
@@ -332,7 +332,7 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, env), env.Event); err != nil {
-			var skipped *cqrs.ErrSkippedEvent
+			var skipped *cqrs.SkippedEventError
 			if !errors.As(err, &skipped) {
 				return fmt.Errorf("handle %s: %w", env.Event.EventType(), err)
 			}

@@ -136,9 +136,9 @@ func TestNewCommandHandler_DecideError_BusinessRuleViolation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected decide's error to be returned")
 	}
-	var violation *ErrBusinessRuleViolation
+	var violation *BusinessRuleViolationError
 	if !errors.As(err, &violation) {
-		t.Fatalf("expected error to wrap *ErrBusinessRuleViolation, got: %v", err)
+		t.Fatalf("expected error to wrap *BusinessRuleViolationError, got: %v", err)
 	}
 	if !errors.Is(err, decideErr) {
 		t.Fatalf("expected error chain to contain decide's original error, got: %v", err)
@@ -858,9 +858,9 @@ func TestNewCommandHandler_DecideError_ReportsCurrentVersionNotZero(t *testing.T
 	if err == nil {
 		t.Fatalf("expected decide's error to be returned")
 	}
-	var violation *ErrBusinessRuleViolation
+	var violation *BusinessRuleViolationError
 	if !errors.As(err, &violation) {
-		t.Fatalf("expected error to wrap *ErrBusinessRuleViolation, got: %v", err)
+		t.Fatalf("expected error to wrap *BusinessRuleViolationError, got: %v", err)
 	}
 
 	// The stream is unchanged at version 3 -- exactly the same situation as

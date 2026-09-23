@@ -8,7 +8,7 @@ var ErrStreamExists         = errors.New("stream already exists")
 var ErrInvalidEventBatch    = errors.New("invalid event batch")
 var ErrHandlerNotFound      = errors.New("handler not registered")
 var ErrInvalidRevision      = errors.New("invalid revision")
-var ErrHandlerNotRegistered = errors.New("no handler registered for type")
+var ErrHandlerNotRegistered = errors.New("no handler registered")
 var ErrDuplicateHandler     = errors.New("duplicate handler registered")
 var ErrHandlerPanicked      = errors.New("handler panicked when handling command")
 var ErrCommandBusClosed     = errors.New("command bus is closed")
@@ -25,10 +25,10 @@ if errors.Is(err, eventsourcing.ErrStreamNotFound) {
 
 ---
 
-## ErrBusinessRuleViolation
+## BusinessRuleViolationError
 
 ```go
-type ErrBusinessRuleViolation struct {
+type BusinessRuleViolationError struct {
     // unexported cause
 }
 
@@ -49,7 +49,7 @@ func handleCreateTask(ctx context.Context, cmd CreateTask) (eventsourcing.Append
 ```
 
 ```go
-var violation *eventsourcing.ErrBusinessRuleViolation
+var violation *eventsourcing.BusinessRuleViolationError
 if errors.As(err, &violation) {
     cause := violation.Unwrap() // the original error
 }
@@ -81,21 +81,21 @@ if errors.As(err, &conflict) {
 
 ---
 
-## ErrSkippedEvent
+## SkippedEventError
 
 ```go
-type ErrSkippedEvent struct {
+type SkippedEventError struct {
     Event Event
 }
 ```
 
 Returned by a typed event handler (created with `OnEvent`) when the event type does not match, and by `EventGroupProcessor.Handle` when no handler is registered for the event type.
 
-This is **not an error condition** — the event bus ignores `ErrSkippedEvent`. It is returned to enable detection when calling `Handle` directly.
+This is **not an error condition** — the event bus ignores `SkippedEventError`. It is returned to enable detection when calling `Handle` directly.
 
 ```go
 err := handler.Handle(ctx, someEvent)
-var skipped *eventsourcing.ErrSkippedEvent
+var skipped *eventsourcing.SkippedEventError
 if errors.As(err, &skipped) {
     // event type not handled by this processor
 }

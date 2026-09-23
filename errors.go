@@ -23,12 +23,12 @@ var (
 	ErrInvalidRevision = errors.New("invalid revision")
 	// ErrHandlerNotRegistered is returned by a [CommandBus] when no
 	// [CommandHandler] is registered for a command's type.
-	ErrHandlerNotRegistered = errors.New("no handler registered for type")
+	ErrHandlerNotRegistered = errors.New("no handler registered")
 	// ErrDuplicateHandler is returned or panicked with when registering a
 	// second handler for a command or event type that already has one, by
 	// [CommandBus.Register], [EventBus.Subscribe] implementations, and
 	// [QueryBus] registration.
-	ErrDuplicateHandler = errors.New("duplicate handler registered ")
+	ErrDuplicateHandler = errors.New("duplicate handler registered")
 	// ErrHandlerPanicked is joined into the error a [CommandBus] returns
 	// when a [CommandHandler] panics instead of returning an error.
 	ErrHandlerPanicked = errors.New("handler panicked when handling command")
@@ -49,36 +49,39 @@ type StreamRevisionConflictError struct {
 	ActualRevision   StreamState
 }
 
-func (s StreamRevisionConflictError) Error() string {
-	return fmt.Sprintf("concurrency conflict on stream %q: (expected version %d, actual %d)",
-		s.Stream, s.ExpectedRevision.ToRawInt64(), s.ActualRevision.ToRawInt64(),
+// Error formats the conflict through each [StreamState]'s own String method,
+// so a store that reports a conflict without knowing the revisions involved —
+// as the KurrentDB one does — renders them as <nil> instead of panicking.
+func (s *StreamRevisionConflictError) Error() string {
+	return fmt.Sprintf("concurrency conflict on stream %q: (expected version %v, actual %v)",
+		s.Stream, s.ExpectedRevision, s.ActualRevision,
 	)
 }
 
-// ErrSkippedEvent is returned when an [EventHandler] declines to process an
+// SkippedEventError is returned when an [EventHandler] declines to process an
 // [Event] because it is not the type the handler expects.
-type ErrSkippedEvent struct {
+type SkippedEventError struct {
 	Event Event
 }
 
-func (e ErrSkippedEvent) Error() string {
+func (e *SkippedEventError) Error() string {
 	return fmt.Sprintf("skipped event of type %T", e.Event)
 }
 
-// ErrBusinessRuleViolation wraps an error returned when a [Command] violates
+// BusinessRuleViolationError wraps an error returned when a [Command] violates
 // a business rule. Use it to signal expected, recoverable domain-level
 // rejections, as opposed to infrastructure or persistence errors. Its cause
 // is unexported — construct one with [NewBusinessRuleViolation] and read the
-// cause back with [ErrBusinessRuleViolation.Cause] or [errors.Unwrap].
-type ErrBusinessRuleViolation struct {
+// cause back with [BusinessRuleViolationError.Cause] or [errors.Unwrap].
+type BusinessRuleViolationError struct {
 	err error
 }
 
-// NewBusinessRuleViolation wraps err as an [ErrBusinessRuleViolation]. If err
+// NewBusinessRuleViolation wraps err as a [BusinessRuleViolationError]. If err
 // is nil, it returns nil.
 //
 // [NewCommandHandler] already wraps whatever error its [Decider] returns in
-// an ErrBusinessRuleViolation, so a Decider used with it should just return
+// a BusinessRuleViolationError, so a Decider used with it should just return
 // the plain error — calling this in a Decider would nest one violation
 // inside another. Use it when signaling a business rule violation from a
 // hand-rolled [CommandHandler] that doesn't go through NewCommandHandler's
@@ -88,20 +91,20 @@ func NewBusinessRuleViolation(err error) error {
 	if err == nil {
 		return nil
 	}
-	return &ErrBusinessRuleViolation{err: err}
+	return &BusinessRuleViolationError{err: err}
 }
 
-func (e ErrBusinessRuleViolation) Error() string {
+func (e *BusinessRuleViolationError) Error() string {
 	if e.err == nil {
 		return "business rule violation"
 	}
-	return fmt.Sprintf("business rule violation :%s", e.err.Error())
+	return fmt.Sprintf("business rule violation: %s", e.err.Error())
 }
 
-func (e ErrBusinessRuleViolation) Cause() error {
+func (e *BusinessRuleViolationError) Cause() error {
 	return e.err
 }
 
-func (e ErrBusinessRuleViolation) Unwrap() error {
+func (e *BusinessRuleViolationError) Unwrap() error {
 	return e.err
 }

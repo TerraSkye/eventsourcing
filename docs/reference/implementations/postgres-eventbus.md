@@ -69,7 +69,7 @@ bus.Subscribe(ctx, "new-projection", handler, postgres.WithStartFrom(0))
 
 - Subscriber names are the identity: two processes subscribing with the same name share one position and one of them processes each batch. Each poll locks the subscription row with `FOR UPDATE SKIP LOCKED`, so at most one instance handles events for a given subscription at a time — this gives you competing-consumer semantics across instances for free.
 - Events are delivered in global order (`id ASC`), at-least-once. The position is only committed after the batch is handled, so a crash mid-batch redelivers — handlers should be idempotent.
-- A handler error aborts the poll and the position is not advanced; the batch is retried on the next cycle. Returning `ErrSkippedEvent` skips the event and continues.
+- A handler error aborts the poll and the position is not advanced; the batch is retried on the next cycle. Returning `SkippedEventError` skips the event and continues.
 - Polls only see rows committed before the oldest in-progress transaction (`xmin` check), so a slow concurrent writer cannot cause events to be skipped.
 - `Use` registers `EventHandlerMiddleware` applied to handlers at `Subscribe` time — call it before subscribing.
 - Errors are sent to `Errors()`; if that channel is full, the error is dropped.

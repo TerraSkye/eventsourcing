@@ -94,7 +94,7 @@ func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
 		return nil
 	})
 
-	var skipped *ErrSkippedEvent
+	var skipped *SkippedEventError
 
 	err := handler.Handle(context.Background(), &ItemAdded{ID: "xyz"})
 
@@ -148,7 +148,7 @@ func TestEventGroupProcessor_SkippedEvent(t *testing.T) {
 
 	err := group.Handle(context.Background(), &UnhandledEvent{})
 
-	var expected *ErrSkippedEvent
+	var expected *SkippedEventError
 
 	if !errors.As(err, &expected) {
 		t.Fatalf("expected skipped event, got %v", err)

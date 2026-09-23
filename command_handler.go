@@ -108,7 +108,7 @@ type CommandHandlerOption func(configuration *handlerOptions)
 //
 // If decide returns no events, the handler returns a successful
 // [AppendResult] without calling Save. If decide returns a non-nil error,
-// the handler returns it wrapped in an [ErrBusinessRuleViolation].
+// the handler returns it wrapped in a [BusinessRuleViolationError].
 //
 // Example Usage:
 //
@@ -188,7 +188,7 @@ func NewCommandHandler[T any, C Command](
 
 			if err != nil {
 				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
-					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): business rule violation: %w", command, command.AggregateID(), streamID, NewBusinessRuleViolation(err)))
+					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): %w", command, command.AggregateID(), streamID, NewBusinessRuleViolation(err)))
 			}
 
 			// If no events, return success without saving

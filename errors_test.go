@@ -7,8 +7,6 @@ import (
 )
 
 func TestErrorStrings(t *testing.T) {
-	// Dummy Event type to satisfy ErrSkippedEvent
-
 	tests := []struct {
 		name string
 		err  error
@@ -16,7 +14,7 @@ func TestErrorStrings(t *testing.T) {
 	}{
 		{
 			name: "StreamRevisionConflictError",
-			err: StreamRevisionConflictError{
+			err: &StreamRevisionConflictError{
 				Stream:           "stream-123",
 				ExpectedRevision: Revision(5),
 				ActualRevision:   Revision(7),
@@ -25,17 +23,30 @@ func TestErrorStrings(t *testing.T) {
 		},
 		{
 			name: "StreamRevisionConflictError with non-Revision StreamStates",
-			err: StreamRevisionConflictError{
+			err: &StreamRevisionConflictError{
 				Stream:           "stream-123",
 				ExpectedRevision: Any{},
 				ActualRevision:   StreamExists{},
 			},
-			want: `concurrency conflict on stream "stream-123": (expected version -1, actual -2)`,
+			want: `concurrency conflict on stream "stream-123": (expected version any, actual stream exists)`,
 		},
 		{
-			name: "ErrSkippedEvent",
-			err:  ErrSkippedEvent{Event: &event{}},
+			name: "SkippedEventError",
+			err:  &SkippedEventError{Event: &event{}},
 			want: "skipped event of type *eventsourcing.event",
+		},
+		{
+			// A store can report a conflict without knowing either revision
+			// — the KurrentDB one does. Formatting that must not panic on
+			// the nil StreamStates.
+			name: "StreamRevisionConflictError with nil StreamStates",
+			err:  &StreamRevisionConflictError{Stream: "stream-123"},
+			want: `concurrency conflict on stream "stream-123": (expected version <nil>, actual <nil>)`,
+		},
+		{
+			name: "StreamRevisionConflictError with only the actual revision known",
+			err:  &StreamRevisionConflictError{Stream: "stream-123", ActualRevision: Revision(7)},
+			want: `concurrency conflict on stream "stream-123": (expected version <nil>, actual 7)`,
 		},
 	}
 
@@ -49,18 +60,18 @@ func TestErrorStrings(t *testing.T) {
 	}
 }
 
-func TestErrBusinessRuleViolation_Error(t *testing.T) {
+func TestBusinessRuleViolationError_Error(t *testing.T) {
 	inner := errors.New("insufficient balance")
 	err := NewBusinessRuleViolation(inner)
 
-	want := "business rule violation :insufficient balance"
+	want := "business rule violation: insufficient balance"
 	if got := err.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
-func TestErrBusinessRuleViolation_Error_NilCause(t *testing.T) {
-	err := ErrBusinessRuleViolation{}
+func TestBusinessRuleViolationError_Error_NilCause(t *testing.T) {
+	err := &BusinessRuleViolationError{}
 
 	want := "business rule violation"
 	if got := err.Error(); got != want {
@@ -68,7 +79,7 @@ func TestErrBusinessRuleViolation_Error_NilCause(t *testing.T) {
 	}
 }
 
-func TestErrBusinessRuleViolation_Unwrap(t *testing.T) {
+func TestBusinessRuleViolationError_Unwrap(t *testing.T) {
 	inner := errors.New("item out of stock")
 	err := NewBusinessRuleViolation(inner)
 
@@ -77,12 +88,12 @@ func TestErrBusinessRuleViolation_Unwrap(t *testing.T) {
 	}
 }
 
-func TestErrBusinessRuleViolation_Cause(t *testing.T) {
+func TestBusinessRuleViolationError_Cause(t *testing.T) {
 	inner := errors.New("duplicate order")
 
-	var violation *ErrBusinessRuleViolation
+	var violation *BusinessRuleViolationError
 	if !errors.As(NewBusinessRuleViolation(inner), &violation) {
-		t.Fatal("expected NewBusinessRuleViolation to return an *ErrBusinessRuleViolation")
+		t.Fatal("expected NewBusinessRuleViolation to return a *BusinessRuleViolationError")
 	}
 
 	if violation.Cause() != inner {
@@ -90,13 +101,13 @@ func TestErrBusinessRuleViolation_Cause(t *testing.T) {
 	}
 }
 
-func TestErrBusinessRuleViolation_ErrorsAs(t *testing.T) {
+func TestBusinessRuleViolationError_ErrorsAs(t *testing.T) {
 	inner := errors.New("age restriction")
 	wrapped := fmt.Errorf("command failed: %w", NewBusinessRuleViolation(inner))
 
-	var violation *ErrBusinessRuleViolation
+	var violation *BusinessRuleViolationError
 	if !errors.As(wrapped, &violation) {
-		t.Fatal("errors.As should unwrap to *ErrBusinessRuleViolation")
+		t.Fatal("errors.As should unwrap to *BusinessRuleViolationError")
 	}
 
 	if violation.Cause() != inner {
@@ -106,7 +117,7 @@ func TestErrBusinessRuleViolation_ErrorsAs(t *testing.T) {
 
 // TestNewBusinessRuleViolation_NilErr covers the reason NewBusinessRuleViolation
 // exists: passing a possibly-nil err straight through must produce a true nil
-// error, not a non-nil interface wrapping a nil-cause *ErrBusinessRuleViolation
+// error, not a non-nil interface wrapping a nil-cause *BusinessRuleViolationError
 // (the classic typed-nil-in-interface footgun), so a decide function can
 // return NewBusinessRuleViolation(validate(...)) unconditionally.
 func TestNewBusinessRuleViolation_NilErr(t *testing.T) {

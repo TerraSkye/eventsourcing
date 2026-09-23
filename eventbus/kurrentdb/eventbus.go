@@ -19,7 +19,7 @@ import (
 // by a persistent subscription to $all: Subscribe creates the subscription
 // if it does not already exist and then consumes it with automatic
 // reconnect and retry. Delivery is at-least-once: an event is acknowledged
-// to KurrentDB only after the handler returns nil or [cqrs.ErrSkippedEvent],
+// to KurrentDB only after the handler returns nil or [cqrs.SkippedEventError],
 // so a handler error leaves the event pending for redelivery.
 type EventBus struct {
 	db          *kurrentdb.Client
@@ -216,7 +216,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 // runSubscription reads from s's persistent subscription until ctx is
 // canceled or the subscription is dropped, decoding each event, dispatching
 // it to s.handler, and acknowledging it to KurrentDB unless the handler
-// returns an error other than [cqrs.ErrSkippedEvent] (in which case it is
+// returns an error other than [cqrs.SkippedEventError] (in which case it is
 // left unacknowledged for redelivery). It returns a non-nil error whenever
 // the subscription ends for a reason other than ctx being canceled, so the
 // caller can decide to reconnect.
@@ -295,7 +295,7 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
-			var skippedErr *cqrs.ErrSkippedEvent
+			var skippedErr *cqrs.SkippedEventError
 			if !errors.As(err, &skippedErr) {
 				select {
 				case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
