@@ -2,6 +2,7 @@ package eventsourcing
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -55,7 +56,7 @@ var (
 		registryMu.RLock()
 		defer registryMu.RUnlock()
 
-		return typeToNames[fmt.Sprintf("%T", event)]
+		return typeToNames[eventTypeKey(event)]
 	}
 )
 
@@ -109,7 +110,7 @@ func registerEventNameDefault(name string, fn func() Event) {
 
 	registry[name] = fn
 
-	key := fmt.Sprintf("%T", ev)
+	key := eventTypeKey(ev)
 	typeToNames[key] = append(typeToNames[key], name)
 }
 
@@ -130,4 +131,28 @@ func newEventByNameDefault(name string) (Event, error) {
 		return nil, fmt.Errorf("factory returned nil for event: %s", name)
 	}
 	return ev, nil
+}
+
+// eventTypeKey returns the key typeToNames uses for event's concrete type,
+// with pointer indirection stripped.
+//
+// The pointer and value forms of an event are different Go types but the same
+// registered event, and both reach the registry. [RegisterEvent] always
+// registers through the pointer form, while a handler built by [OnEvent] with
+// a value type parameter hands back a value — keying on %T would file those
+// under separate entries, so a lookup from one form would miss every name
+// registered through the other.
+//
+// It reads the type through reflection rather than trimming a "*" off %T,
+// because a generic instantiation's %T is package-qualified on its type
+// arguments too, and string surgery on that mangles the name (see TypeName).
+func eventTypeKey(event Event) string {
+	t := reflect.TypeOf(event)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t == nil {
+		return "<nil>"
+	}
+	return t.String()
 }
