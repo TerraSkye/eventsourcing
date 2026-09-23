@@ -333,33 +333,38 @@ func TestEventGroupProcessor_StreamFilter_ValueHandlerMissesPointerRegisteredAli
 	}
 }
 
-// TestStreamFilter_PointerHandlerOfValueReceiverEventPanics is a regression
-// test attempt for the bug documented in
-// .bug/streamfilter-nil-pointer-dereference-on-fallback.md: EventGroupProcessor.StreamFilter
-// panics instead of returning a name when a handler is registered via
-// OnEvent with a pointer type parameter over an Event whose methods are
-// defined with a value receiver, and that concrete type was never passed to
-// RegisterEvent/RegisterEventByType/RegisterEventByName (a supported,
-// documented combination per StreamFilter's own doc comment).
-func TestStreamFilter_PointerHandlerOfValueReceiverEventPanics(t *testing.T) {
+// TestStreamFilter_UnregisteredPointerHandlerOfValueReceiverEventIsOmitted
+// covers the combination that used to panic: a handler registered through
+// OnEvent with a pointer type parameter, over an Event whose methods take a
+// value receiver, whose concrete type was never registered.
+//
+// StreamFilter once fell back to calling EventType() on the instance when
+// the registry had no name for it. EventInstance() returns the zero T, which
+// for T = *CartCreated is a nil pointer, and reaching a value-receiver
+// method through it dereferences the nil before the method body runs --
+// "value method CartCreated.EventType called using nil *CartCreated
+// pointer".
+//
+// There is no fallback now: a filter name has to come from the registry, so
+// an unregistered type contributes nothing and the nil instance is never
+// called. This test pins both halves -- the omission, and that getting there
+// does not panic.
+func TestStreamFilter_UnregisteredPointerHandlerOfValueReceiverEventIsOmitted(t *testing.T) {
 
 	registryMu.Lock()
 	registry = map[string]func() Event{}
 	typeToNames = map[string][]string{}
 	registryMu.Unlock()
 
-	// CartCreated's AggregateID/EventType methods are defined with a value
-	// receiver (see event_handler_test.go). It is intentionally left
-	// unregistered here, so StreamFilter must fall back to calling
-	// EventType() on the zero value EventInstance() returns for a *CartCreated
-	// handler -- a nil pointer, since T is instantiated as *CartCreated.
+	// CartCreated's AggregateID/EventType methods take a value receiver, and
+	// it is intentionally left unregistered.
 	group := NewEventGroupProcessor(
 		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
 	)
 
-	names := group.StreamFilter()
-	if len(names) != 1 || names[0] != "CartCreated" {
-		t.Fatalf("StreamFilter() = %v, want [CartCreated]", names)
+	if names := group.StreamFilter(); len(names) != 0 {
+		t.Fatalf("StreamFilter() = %v, want no names: the type is unregistered, "+
+			"so it has no name a store would have persisted events under", names)
 	}
 }
 
