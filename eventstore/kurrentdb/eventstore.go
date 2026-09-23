@@ -3,7 +3,6 @@ package kurrentdb
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -80,11 +79,18 @@ func defaultSaveBackoff() backoff.BackOff {
 // by default — see [WithBackoff] to override. On success it returns a [cqrs.AppendResult] whose
 // NextExpectedVersion is the stream's new revision as reported by KurrentDB.
 //
-// TODO: on a revision conflict, the returned cqrs.StreamRevisionConflictError
-// only has its Stream field set — ExpectedRevision and ActualRevision are
-// left as their zero value (a nil cqrs.StreamState), so the message reports
-// both revisions as "unknown". KurrentDB's WrongExpectedVersion response
-// carries the actual revision; it should be read off and populated here.
+// Failures are reported in this package's error vocabulary: a violated
+// [cqrs.NoStream] expectation matches [cqrs.ErrStreamExists], a violated
+// [cqrs.StreamExists] expectation matches [cqrs.ErrStreamNotFound], and
+// anything else is mapped by [mapError]. The KurrentDB error stays in the
+// chain in every case.
+//
+// TODO: a violated [cqrs.Revision] expectation is still reported only as a
+// wrapped client error, not as a [cqrs.StreamRevisionConflictError], so
+// callers that retry on conflict — NewCommandHandler among them — do not
+// recognise it. Translating it needs the stream's actual revision, which the
+// client carries only for its StreamRevisionConflict code and not for the
+// WrongExpectedVersion an ordinary append failure returns.
 func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
@@ -174,28 +180,15 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 	//todo use the revision here
 
 	if err != nil {
-		var conflictErr *kurrentdb.StreamRevisionConflictError
-		if errors.As(err, &conflictErr) {
-			// TODO: extract the actual revisions from conflictErr (the
-			// commented-out fields below). As written, ExpectedRevision and
-			// ActualRevision are left nil, and StreamRevisionConflictError.Error
-			// panics when called on a nil cqrs.StreamState. See the Save doc
-			// comment above.
-			return cqrs.AppendResult{
-					Successful: false,
-					StreamID:   streamID,
-				}, &cqrs.StreamRevisionConflictError{
-					Stream: conflictErr.Stream,
-					//ExpectedRevision: conflictErr.ExpectedRevision,
-					//ActualRevision:   conflictErr.ActualRevision,
-				}
+		// A violated NoStream or StreamExists precondition is reported with
+		// the same sentinel the other implementations use, so callers can
+		// match it without knowing which store is underneath.
+		if expectation := expectationError(streamID, revision, err); expectation != nil {
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, expectation
 		}
 
-		// this is an unexpected error when saving.
-		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
-			"save events to stream %q: persist failed: %w",
-			streamID, err,
-		)
+		return cqrs.AppendResult{Successful: false, StreamID: streamID},
+			mapError(fmt.Sprintf("save events to stream %q", streamID), err)
 	}
 
 	return cqrs.AppendResult{
@@ -209,13 +202,13 @@ func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision c
 // LoadStream returns a lazy iterator over all events in the stream
 // identified by id, in the order they were appended.
 //
-// TODO: any error opening the read (including a genuine connectivity
-// failure) is currently reported as cqrs.ErrStreamNotFound, and any error
-// received while iterating — including a mid-stream connection drop, not
-// just a clean end of stream — is reported to the iterator as io.EOF, i.e.
-// as if the read had completed successfully. A caller has no way to
-// distinguish "the stream does not exist" or "the read failed partway
-// through" from a normal, complete read.
+// A stream that does not exist is a failure, not an empty read: iteration
+// ends with an error matching [cqrs.ErrStreamNotFound], as it does in the
+// memory and file implementations. Because the read is lazy, that error
+// arrives through the iterator's Err rather than from LoadStream itself —
+// the server only reports the missing stream once the first event is
+// requested. Every other failure reaches Err too, mapped through
+// [mapError]; only a genuine end of stream ends iteration with a nil Err.
 func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction:      kurrentdb.Forwards,
@@ -224,22 +217,16 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 	}, readToEnd)
 
 	if err != nil {
-		//TODO enhance error variants
-		return nil, fmt.Errorf(
-			"load stream %q: failed to check existence: %w",
-			id, cqrs.ErrStreamNotFound,
-		)
+		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 	}
 
 	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// TODO: this treats every error from Recv (including a real
-			// connection failure, confirmed possible per ReadStream.Recv in
-			// the kurrentdb client) as a normal end of stream, so genuine
-			// failures are silently reported as success. See the doc comment
-			// above.
-			return nil, io.EOF
+			// mapError passes io.EOF through untouched, so a clean end of
+			// stream still ends iteration successfully; everything else —
+			// a missing stream, a dropped connection — surfaces through Err.
+			return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 		}
 
 		// Convert KurrentDB event to cqrs.EventData
@@ -289,10 +276,12 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 // cqrs.NoStream and cqrs.StreamExists are not enforced as existence
 // preconditions here.
 //
-// TODO: as with LoadStream, every error from Recv while iterating —
-// including a real connection failure — is reported to the iterator as
-// io.EOF, i.e. a normal end of stream, so a caller cannot tell a genuine
-// failure apart from a complete read.
+// Consistent with not enforcing those preconditions, a stream that does not
+// exist is an empty read rather than a failure — the same treatment Any{}
+// gets in the memory and file implementations, and what lets a command
+// handler load a brand-new aggregate. Every other failure ends iteration
+// with an error, mapped through [mapError]; use [LoadStream] when a missing
+// stream should be reported as [cqrs.ErrStreamNotFound].
 func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// cqrs.Revision(N) means "N events already consumed, resume strictly
 	// after N" — the same "exclusive" contract eventstore/memory and
@@ -317,18 +306,20 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 	streamer, err := e.client.ReadStream(ctx, id, opt, readToEnd)
 
 	if err != nil {
-		return nil, fmt.Errorf(
-			"load stream %q: failed to check existence: %w",
-			id, cqrs.ErrStreamNotFound,
-		)
+		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 	}
 
 	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// TODO: see the LoadStreamFrom doc comment above — this masks
-			// real Recv errors as a normal end of stream.
-			return nil, io.EOF
+			// This method does not enforce existence preconditions, so an
+			// absent stream is an empty read, not a failure. The client
+			// reports it from the first Recv rather than from opening the
+			// read, which is why it is caught here.
+			if isNotFound(err) {
+				return nil, io.EOF
+			}
+			return nil, mapError(fmt.Sprintf("load stream %q", id), err)
 		}
 
 		// Convert KurrentDB event to cqrs.EventData
@@ -386,15 +377,15 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 	}, readToEnd)
 
 	if err != nil {
-		return nil, err
+		return nil, mapError("load from all", err)
 	}
 
 	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// Propagate as-is: io.EOF signals a normal end of stream, any
-			// other error is a genuine failure.
-			return nil, err
+			// io.EOF signals a normal end of stream and passes through
+			// mapError untouched; any other error is a genuine failure.
+			return nil, mapError("load from all", err)
 		}
 
 		// Convert KurrentDB event to cqrs.EventData

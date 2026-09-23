@@ -376,3 +376,40 @@ func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testi
 			"fell through to kurrentdb.Start{}", len(got))
 	}
 }
+
+// TestLoadStream_MissingStreamIsReportedNotFound is a regression test for
+// .bug/eventstore-kurrentdb-loadstream-missing-stream-masked-as-empty.md.
+//
+// LoadStream and LoadStreamFrom used to discard every error from
+// streamer.Recv and return io.EOF instead, which cqrs.Iterator translates
+// into a clean end of iteration (Next() == false, Err() == nil). A stream
+// that did not exist -- and equally a connection that dropped halfway
+// through a read -- was indistinguishable from a complete, empty read.
+// LoadStream now reports a missing stream as cqrs.ErrStreamNotFound, the
+// same sentinel eventstore/memory and eventstore/file use.
+func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	ctx := context.Background()
+
+	iter, err := store.LoadStream(ctx, "stream-that-does-not-exist")
+	if err != nil {
+		if !errors.Is(err, cqrs.ErrStreamNotFound) {
+			t.Fatalf("LoadStream error = %v, want cqrs.ErrStreamNotFound", err)
+		}
+		return // reported at open time: acceptable
+	}
+
+	got := 0
+	for iter.Next() {
+		got++
+	}
+	if got != 0 {
+		t.Fatalf("got %d events from a non-existent stream", got)
+	}
+	if err := iter.Err(); !errors.Is(err, cqrs.ErrStreamNotFound) {
+		t.Fatalf("iter.Err() = %v, want cqrs.ErrStreamNotFound: a missing stream is "+
+			"being reported as a clean, complete, empty read again, so callers cannot "+
+			"tell it apart from an existing empty stream -- nor from a read that failed "+
+			"partway through", err)
+	}
+}
