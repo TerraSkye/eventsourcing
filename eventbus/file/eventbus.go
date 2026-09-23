@@ -280,11 +280,18 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 
 	handlerCtx := context.WithoutCancel(ctx)
 
-	// Crash-recovery: process any existing files
+	// Crash-recovery: process any existing files.
+	//
+	// Skipping ".tmp" matches the watcher loop below, for the same reason:
+	// Dispatch writes each event to path+".tmp" and renames it into place,
+	// so a ".tmp" file is a write still in flight, or one a crash
+	// interrupted before its rename — never a deliverable event. Delivering
+	// one hands the subscriber a partial or absent envelope, and processFile
+	// removes it on success, destroying the write.
 	entries, err := os.ReadDir(dir)
 	if err == nil {
 		for _, e := range entries {
-			if e.IsDir() {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
 				continue
 			}
 			b.processFile(handlerCtx, s, filepath.Join(dir, e.Name()))
