@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -51,6 +52,12 @@ func WithFilterEvents(events ...string) eventsourcing.SubscriberOption {
 
 // ---- File-based EventBus ----
 
+// sweepInterval is how often a subscriber re-reads its directory, to pick up
+// files whose watcher notification never arrived. It bounds delivery latency
+// for those files; everything the watcher does report is still delivered as
+// soon as it arrives.
+const sweepInterval = 250 * time.Millisecond
+
 // FileEventBus is a file-backed [eventsourcing.EventBus]. Each dispatched
 // event is written as one JSON file per subscriber directory; a subscriber
 // watches its directory with fsnotify and deletes each file once its
@@ -70,6 +77,11 @@ type FileEventBus struct {
 	wg          sync.WaitGroup
 	errs        chan error
 	middlewares []eventsourcing.EventHandlerMiddleware
+
+	// seq disambiguates two Dispatch calls that read the same nanosecond.
+	// It is only ever touched atomically, so Dispatch keeps taking nothing
+	// but the read lock.
+	seq atomic.Uint64
 }
 
 // NewFileEventBus constructs a [FileEventBus] backed by root, creating the
@@ -236,7 +248,14 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 		}
 
 		dir := filepath.Join(b.root, name)
-		filename := fmt.Sprintf("%020d.json", time.Now().UnixNano())
+		// The timestamp orders the file among its neighbours, since delivery
+		// follows the directory's lexical order; the counter makes the name
+		// unique. Without it two concurrent Dispatch calls landing on the
+		// same nanosecond build the same name, and the second rename
+		// silently replaces the first event's file — including one the
+		// subscriber has not read yet, which is then never delivered and
+		// leaves nothing behind to notice.
+		filename := fmt.Sprintf("%020d-%020d.json", time.Now().UnixNano(), b.seq.Add(1))
 		path := filepath.Join(dir, filename)
 
 		tmp := path + ".tmp"
@@ -267,16 +286,45 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 
 	handlerCtx := context.WithoutCancel(ctx)
 
-	// Crash-recovery: process any existing files
-	entries, err := os.ReadDir(dir)
-	if err == nil {
+	// sweep delivers every file currently in dir.
+	//
+	// Skipping ".tmp" matches the watcher loop below, for the same reason:
+	// Dispatch writes each event to path+".tmp" and renames it into place,
+	// so a ".tmp" file is a write still in flight, or one a crash
+	// interrupted before its rename — never a deliverable event. Delivering
+	// one hands the subscriber a partial or absent envelope, and processFile
+	// removes it on success, destroying the write.
+	sweep := func() {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
 		for _, e := range entries {
-			if e.IsDir() {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
 				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
 			b.processFile(handlerCtx, s, filepath.Join(dir, e.Name()))
 		}
 	}
+
+	// Crash recovery: anything already in the directory when we start.
+	sweep()
+
+	// A watcher notification is best-effort. The kernel's queue is finite,
+	// and a burst of dispatches can overrun it faster than this loop drains
+	// it — the notifications for the overflow are never delivered at all, so
+	// those files would sit in the directory forever despite being complete
+	// and deliverable. fsnotify reports the overflow on Errors, but only
+	// when it is told; the ticker covers whatever slips past that too, which
+	// makes delivery eventual rather than contingent on the kernel keeping
+	// up.
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -291,8 +339,13 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 				b.processFile(handlerCtx, s, ev.Name)
 			}
 
+		case <-ticker.C:
+			sweep()
+
 		case <-watcher.Errors:
-			// swallow or log
+			// Includes fsnotify.ErrEventOverflow, which says outright that
+			// notifications were dropped. Sweeping is the recovery for it.
+			sweep()
 		}
 	}
 }
