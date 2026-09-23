@@ -241,7 +241,7 @@ func TestStreamFilterSubscriptionDropsUnregisteredHandledEvent(t *testing.T) {
 	// Drain any handler errors so a skipped event surfaces instead of hiding.
 	go func() {
 		for err := range bus.Errors() {
-			var skipped *cqrs.ErrSkippedEvent
+			var skipped *cqrs.SkippedEventError
 			if !errors.As(err, &skipped) {
 				t.Errorf("unexpected handler error: %v", err)
 			}

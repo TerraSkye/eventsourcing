@@ -59,18 +59,18 @@ func (h typedEventHandler[T]) EventInstance() Event {
 	return zero
 }
 
-// Handle calls h with event if it has type T, or returns [ErrSkippedEvent]
+// Handle calls h with event if it has type T, or returns [SkippedEventError]
 // otherwise.
 func (h typedEventHandler[T]) Handle(ctx context.Context, event Event) error {
 	ev, ok := event.(T)
 	if !ok {
-		return &ErrSkippedEvent{Event: event}
+		return &SkippedEventError{Event: event}
 	}
 	return h(ctx, ev)
 }
 
 // OnEvent returns fn as an [EventHandler] that only processes events of
-// type T, returning [ErrSkippedEvent] for any other type. It is meant to be
+// type T, returning [SkippedEventError] for any other type. It is meant to be
 // registered with an [EventGroupProcessor], which uses T's type name to
 // route only matching events to it.
 //
@@ -129,13 +129,13 @@ func NewEventGroupProcessor(handlers ...EventHandler) *EventGroupProcessor {
 }
 
 // Handle routes ev to the handler registered for its concrete type, or
-// returns [ErrSkippedEvent] if none is registered.
+// returns [SkippedEventError] if none is registered.
 func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	name := fmt.Sprintf("%T", ev)
 	h, ok := p.handlers[name]
 
 	if !ok {
-		return &ErrSkippedEvent{Event: ev}
+		return &SkippedEventError{Event: ev}
 	}
 	return h.Handle(ctx, ev)
 }

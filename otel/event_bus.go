@@ -33,7 +33,7 @@ type TelemetryEventBus struct {
 // tagged with the event type, event ID, global and stream position, stream
 // ID, and subscriber name; [EventBusHandled] and [EventBusDuration] are
 // recorded for every invocation, and [EventBusErrors] for every error other
-// than [eventsourcing.ErrSkippedEvent], which is treated as an intentional,
+// than [eventsourcing.SkippedEventError], which is treated as an intentional,
 // non-error skip. It returns an error if the underlying bus fails to
 // register the subscription.
 //
@@ -93,7 +93,7 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 		)
 
 		if err != nil {
-			var skipped *eventsourcing.ErrSkippedEvent
+			var skipped *eventsourcing.SkippedEventError
 			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {

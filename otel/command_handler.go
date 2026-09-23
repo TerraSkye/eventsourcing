@@ -74,7 +74,7 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 					ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
 					span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
 				}
-				var businessViolation *eventsourcing.ErrBusinessRuleViolation
+				var businessViolation *eventsourcing.BusinessRuleViolationError
 				if errors.As(err, &businessViolation) {
 					causeMessage := "business rule violation"
 					if cause := businessViolation.Cause(); cause != nil {
@@ -115,7 +115,7 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 // [CommandsProcessing] (in-flight commands), [CommandsDuration], and
 // [CommandsCount] labelled by [AttrResult]. A returned
 // [eventsourcing.StreamRevisionConflictError] is additionally counted in
-// [ConcurrencyConflicts]; a returned [eventsourcing.ErrBusinessRuleViolation]
+// [ConcurrencyConflicts]; a returned [eventsourcing.BusinessRuleViolationError]
 // is recorded on the span as an expected outcome rather than a span error.
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
@@ -191,7 +191,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 					AttrStreamID.String(result.StreamID),
 				))
 			}
-			var bussinessViolation *eventsourcing.ErrBusinessRuleViolation
+			var bussinessViolation *eventsourcing.BusinessRuleViolationError
 			if errors.As(err, &bussinessViolation) {
 
 				causeMessage := "business rule violation"

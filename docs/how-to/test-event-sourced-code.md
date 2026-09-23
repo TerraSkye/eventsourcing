@@ -109,7 +109,7 @@ func TestCreateTask_DuplicateID(t *testing.T) {
 
 ## Testing business rule violations
 
-Check that the error is a `ErrBusinessRuleViolation`:
+Check that the error is a `BusinessRuleViolationError`:
 
 ```go
 import (
@@ -126,9 +126,9 @@ func TestCompleteTask_NotExist(t *testing.T) {
 
     _, err := handler(context.Background(), cmd)
 
-    var violation *eventsourcing.ErrBusinessRuleViolation
+    var violation *eventsourcing.BusinessRuleViolationError
     if !errors.As(err, &violation) {
-        t.Fatalf("expected ErrBusinessRuleViolation, got %T: %v", err, err)
+        t.Fatalf("expected BusinessRuleViolationError, got %T: %v", err, err)
     }
 }
 ```

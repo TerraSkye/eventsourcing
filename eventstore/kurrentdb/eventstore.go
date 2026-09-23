@@ -73,11 +73,9 @@ func defaultSaveBackoff() backoff.BackOff {
 //
 // TODO: on a revision conflict, the returned cqrs.StreamRevisionConflictError
 // only has its Stream field set — ExpectedRevision and ActualRevision are
-// left as their zero value (a nil cqrs.StreamState). Calling Error() on that
-// value panics with a nil pointer dereference (confirmed), because
-// StreamRevisionConflictError.Error calls ToRawInt64() on both fields. Any
-// caller that logs or formats this error today will crash instead of seeing
-// a conflict message.
+// left as their zero value (a nil cqrs.StreamState), so the message reports
+// both revisions as "unknown". KurrentDB's WrongExpectedVersion response
+// carries the actual revision; it should be read off and populated here.
 func (e eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true, NextExpectedVersion: 0}, nil

@@ -90,7 +90,7 @@ type Decider[T any, C Command] func(state T, cmd C) ([]Event, error)
 Enforces business rules. Returns:
 - A non-empty slice of events to persist if the command is accepted.
 - An empty slice (and nil error) for no-op commands (e.g. already in the desired state).
-- An error to reject the command — wrapped in `ErrBusinessRuleViolation`.
+- An error to reject the command — wrapped in `BusinessRuleViolationError`.
 
 ```go
 func decide(state taskState, cmd CreateTask) ([]eventsourcing.Event, error) {
@@ -161,7 +161,7 @@ var DefaultStreamNamer StreamNamer // overrideable global default
 
 | Situation | Error type |
 |---|---|
-| `decide` returns an error | Wrapped in `*ErrBusinessRuleViolation` |
+| `decide` returns an error | Wrapped in `*BusinessRuleViolationError` |
 | Stream revision mismatch | `*StreamRevisionConflictError` (retried if strategy set) |
 | Store load failure | `error` with context |
 | Store save failure | `error` with context |

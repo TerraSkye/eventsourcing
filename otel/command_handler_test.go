@@ -17,14 +17,14 @@ func (panicProbeCmd) AggregateID() string { return "agg-1" }
 
 // TestCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic is a regression
 // test for GitHub issue #25: a decide function that signals a business rule
-// violation via a bare &eventsourcing.ErrBusinessRuleViolation{} (no inner
+// violation via a bare &eventsourcing.BusinessRuleViolationError{} (no inner
 // cause) used to crash CommandTelemetry, instead of being recorded as a
 // graceful, expected rejection.
 func TestCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic(t *testing.T) {
 	mw := CommandTelemetry()
 
 	next := func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-		return eventsourcing.AppendResult{}, &eventsourcing.ErrBusinessRuleViolation{}
+		return eventsourcing.AppendResult{}, &eventsourcing.BusinessRuleViolationError{}
 	}
 
 	wrapped := mw(next)
@@ -40,7 +40,7 @@ func TestCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic(t *testing.T) {
 // TestCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic.
 func TestWithCommandTelemetry_ZeroValueBusinessViolationDoesNotPanic(t *testing.T) {
 	next := eventsourcing.CommandHandler[panicProbeCmd](func(ctx context.Context, cmd panicProbeCmd) (eventsourcing.AppendResult, error) {
-		return eventsourcing.AppendResult{}, &eventsourcing.ErrBusinessRuleViolation{}
+		return eventsourcing.AppendResult{}, &eventsourcing.BusinessRuleViolationError{}
 	})
 
 	wrapped := WithCommandTelemetry(next)

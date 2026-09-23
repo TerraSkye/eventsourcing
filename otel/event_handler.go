@@ -22,7 +22,7 @@ import (
 // from the event's metadata), tagged with the event type, event ID, global
 // and stream position, and stream ID. It records [EventBusHandled] and
 // [EventBusDuration] for every invocation. A returned
-// [eventsourcing.ErrSkippedEvent] is treated as an intentional, non-error
+// [eventsourcing.SkippedEventError] is treated as an intentional, non-error
 // skip and marks the span OK, while any other error marks the span as
 // failed; unlike [TelemetryEventBus.Subscribe], it does not record
 // [EventBusErrors].
@@ -99,7 +99,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		)
 
 		if err != nil {
-			var skipped *eventsourcing.ErrSkippedEvent
+			var skipped *eventsourcing.SkippedEventError
 			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {
