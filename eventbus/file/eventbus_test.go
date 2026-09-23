@@ -371,7 +371,7 @@ func TestFileEventBusCrashRecoverySkipsTmpFiles(t *testing.T) {
 // whichever file got there first — even one still awaiting pickup by the
 // subscriber's fsnotify watcher — so the earlier event is never delivered
 // and leaves no trace on disk.
-func TestDispatch_ConcurrentCallsLoseEventsToFilenameCollision(t *testing.T) {
+func TestDispatch_ConcurrentCallsAreAllDelivered(t *testing.T) {
 
 	root := t.TempDir()
 	bus, err := NewFileEventBus(root)
@@ -443,7 +443,9 @@ func TestDispatch_ConcurrentCallsLoseEventsToFilenameCollision(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(received) != total {
-		t.Fatalf("dispatched %d events concurrently, only %d were delivered — %d were silently "+
-			"lost to Dispatch's time.Now().UnixNano() filename collisions", total, len(received), total-len(received))
+		t.Fatalf("dispatched %d events concurrently, only %d were delivered — %d never arrived: "+
+			"either Dispatch overwrote them with a colliding filename, or their watcher "+
+			"notification was dropped and nothing swept the directory afterwards",
+			total, len(received), total-len(received))
 	}
 }
