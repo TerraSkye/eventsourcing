@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,21 +327,21 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 	}
 }
 
-// TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing is a
-// regression test documenting the bug filed as
-// .bug/eventstore-kurrentdb-loadstreamfrom-huge-revision-replays-entire-stream.md.
+// TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed covers what an
+// unrepresentable Revision does now.
 //
-// eventstore/kurrentdb/eventstore.go's LoadStreamFrom decides whether to
-// honor the requested start position with `if version.ToRawInt64() > 0`.
-// revision.go's Revision.ToRawInt64() is `int64(r)`, which silently sign-flips
-// negative for any Revision >= 1<<63 (the same root cause already filed
-// against eventstore/memory and eventstore/postgres). Here that makes the
-// `> 0` check false, so LoadStreamFrom falls through to `kurrentdb.Start{}`
-// — the very beginning of the stream — instead of erroring or returning
-// nothing for a revision far beyond the stream's actual length. A caller
-// resuming from what it believes is a huge, already-consumed revision
-// instead gets the entire stream replayed from scratch.
-func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testing.T) {
+// Revision is a uint64 and ToRawInt64 returns int64, so any Revision >= 1<<63
+// used to sign-flip negative. Here that made LoadStreamFrom's `> 0` check
+// false, so it fell through to kurrentdb.Start{} — the very beginning of the
+// stream — and a caller resuming from what it believed was a huge,
+// already-consumed revision got the whole stream replayed instead.
+//
+// ToRawInt64 now panics rather than returning a value that means something
+// else, so the replay cannot happen. That is the loud half of the fix; a
+// revision merely past the end of the stream (but below 1<<63) is a separate
+// question — eventstore/memory rejects it with ErrInvalidRevision, and this
+// store does not yet.
+func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
 	store := kdbstore.NewEventStore(testDB)
 	ctx := context.Background()
@@ -359,20 +360,20 @@ func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testi
 		}
 	}
 
-	// A huge Revision, far beyond the stream's 3 events, sign-flips negative
-	// through ToRawInt64()'s int64(r) conversion.
 	hugeRevision := cqrs.Revision(uint64(1) << 63)
 
-	iter, err := store.LoadStreamFrom(ctx, streamID, hugeRevision)
-	if err != nil {
-		t.Fatalf("load stream from huge revision: %v", err)
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("LoadStreamFrom(id, Revision(1<<63)) did not panic: an " +
+				"unrepresentable revision is being read as a marker value again, " +
+				"which replays the stream from the beginning")
+		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "overflows int64") {
+			t.Fatalf("panicked with %v, want the Revision overflow panic", r)
+		}
+	}()
 
-	got := collectAll(t, iter)
-	if len(got) != 0 {
-		t.Errorf("LoadStreamFrom(id, Revision(1<<63)) replayed the entire stream from the beginning "+
-			"(got %d events) instead of returning 0 events for a revision far beyond the stream's length: "+
-			"ToRawInt64() sign-flipped negative, so the `version.ToRawInt64() > 0` check in LoadStreamFrom "+
-			"fell through to kurrentdb.Start{}", len(got))
-	}
+	//nolint:errcheck // the call panics; the deferred check is the assertion
+	store.LoadStreamFrom(ctx, streamID, hugeRevision)
 }
