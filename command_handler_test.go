@@ -1014,7 +1014,72 @@ func TestNewCommandHandler_AutoConvergeDefaultDoesNotPinEmptyStreamRevision(t *t
 		t.Fatalf("Save was called with Any{} for a brand-new (0-event) stream -- "+
 			"this performs NO concurrency check at all, so a second concurrent "+
 			"creation command racing this one would also succeed instead of "+
-			"being caught as a conflict and retried/rejected; expected NoStream{} "+
-			"or Revision(0), got %#v", seenRevision)
+			"being caught as a conflict and retried/rejected; expected "+
+			"Revision(0), got %#v", seenRevision)
+	}
+
+	// Revision(0) specifically, not NoStream{}: a store reports a violated
+	// Revision as a StreamRevisionConflictError, which the autoConverge path
+	// retries, where a violated NoStream is ErrStreamExists, which is
+	// permanent.
+	if got, ok := seenRevision.(Revision); !ok || got != 0 {
+		t.Fatalf("Save revision = %#v, want Revision(0)", seenRevision)
+	}
+}
+
+// TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate is the
+// end of the same story: with the empty stream's revision pinned, a second
+// command that still loads the stream as empty -- what both racers see when
+// they load before either saves -- must lose to the first rather than
+// appending a duplicate creation event.
+func TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate(t *testing.T) {
+	store := &testStore{}
+
+	// Every load looks empty, which is what makes the race deterministic:
+	// both commands decide against a brand-new aggregate.
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+
+	// A minimal stand-in for a real store's Revision check, matching
+	// eventstore/memory: a mismatch is a StreamRevisionConflictError.
+	var storedVersion uint64
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		if rev, ok := revision.(Revision); ok && uint64(rev) != storedVersion {
+			return AppendResult{}, &StreamRevisionConflictError{
+				Stream:           envelopes[0].StreamID,
+				ExpectedRevision: rev,
+				ActualRevision:   Revision(storedVersion),
+			}
+		}
+		storedVersion += uint64(len(envelopes))
+		return AppendResult{Successful: true, NextExpectedVersion: storedVersion}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "created"}}, nil
+		},
+	)
+
+	if _, err := handler(context.Background(), testEvent{agg: "acc-1", typ: "create"}); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	_, err := handler(context.Background(), testEvent{agg: "acc-1", typ: "create"})
+	if err == nil {
+		t.Fatal("second create succeeded: both commands appended a creation event to the same new stream")
+	}
+
+	var conflict *StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("second create: expected a *StreamRevisionConflictError, got: %v", err)
+	}
+
+	if storedVersion != 1 {
+		t.Fatalf("stream holds %d events, want 1", storedVersion)
 	}
 }
