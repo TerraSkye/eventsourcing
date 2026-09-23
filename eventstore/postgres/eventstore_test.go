@@ -109,9 +109,8 @@ func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
 
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
-	ctx := context.Background()
 	var results []*cqrs.Envelope
-	for iter.Next(ctx) {
+	for iter.Next() {
 		results = append(results, iter.Value())
 	}
 	if err := iter.Err(); err != nil && !errors.Is(err, io.EOF) {

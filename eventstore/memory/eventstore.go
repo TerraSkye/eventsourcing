@@ -66,17 +66,16 @@ func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.Str
 	default:
 	}
 
-	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	// The store holds no per-iteration resources — the snapshot is just a
+	// slice — so there is nothing to release and close is nil.
+	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		if offset >= uint64(len(allEvents)) {
 			return nil, io.EOF
 		}
 		ev := allEvents[offset]
 		offset++
 		return ev, nil
-	})
+	}, nil)
 
 	return iter, nil
 }
@@ -223,17 +222,15 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 	default:
 	}
 
-	iter := eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
+	// No per-iteration resources to release; see LoadFromAll.
+	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		if offset >= uint64(len(events)) {
 			return nil, io.EOF
 		}
 		ev := events[offset]
 		offset++
 		return ev, nil
-	})
+	}, nil)
 
 	return iter, nil
 }

@@ -2,6 +2,8 @@ package otel
 
 import (
 	"context"
+	"errors"
+	"io"
 	"sync"
 	"testing"
 
@@ -62,16 +64,16 @@ func (s *loadFromAllStub) Save(context.Context, []eventsourcing.Envelope, events
 	return eventsourcing.AppendResult{}, nil
 }
 
-func (s *loadFromAllStub) LoadStream(context.Context, string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	return eventsourcing.NewSliceIterator(s.events), nil
+func (s *loadFromAllStub) LoadStream(ctx context.Context, _ string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return eventsourcing.NewSliceIterator(ctx, s.events), nil
 }
 
-func (s *loadFromAllStub) LoadStreamFrom(context.Context, string, eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	return eventsourcing.NewSliceIterator(s.events), nil
+func (s *loadFromAllStub) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return eventsourcing.NewSliceIterator(ctx, s.events), nil
 }
 
-func (s *loadFromAllStub) LoadFromAll(context.Context, eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	return eventsourcing.NewSliceIterator(s.events), nil
+func (s *loadFromAllStub) LoadFromAll(ctx context.Context, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return eventsourcing.NewSliceIterator(ctx, s.events), nil
 }
 
 func (s *loadFromAllStub) Close() error { return nil }
@@ -115,7 +117,7 @@ func TestTelemetryStore_LoadFromAll_TerminatesAtEndOfStream(t *testing.T) {
 			}
 
 			var got int
-			for iter.Next(context.Background()) {
+			for iter.Next() {
 				if iter.Value() == nil {
 					t.Fatalf("iterator yielded a nil *Envelope at index %d", got)
 				}
@@ -168,4 +170,150 @@ func TestWithEventStoreTelemetry_WithOperationIgnoredForSaveSpan(t *testing.T) {
 	if !found {
 		t.Fatalf("WithOperation(%q) had no effect; span(s) started: %v (want a span named %q, per WithEventStoreTelemetry's doc comment)", wantSpanName, got, wantSpanName)
 	}
+}
+
+// closeTrackingStore is an EventStore whose Load* methods return iterators
+// that count how many times they are closed and report a read error after
+// the first event, so tests can observe both propagation paths.
+type closeTrackingStore struct {
+	events  []*eventsourcing.Envelope
+	closes  int
+	readErr error
+}
+
+func (s *closeTrackingStore) iter(ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	i := 0
+	return eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
+		if i >= len(s.events) {
+			if s.readErr != nil {
+				return nil, s.readErr
+			}
+			return nil, io.EOF
+		}
+		ev := s.events[i]
+		i++
+		return ev, nil
+	}, func() error { s.closes++; return nil }), nil
+}
+
+func (s *closeTrackingStore) Save(context.Context, []eventsourcing.Envelope, eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
+	return eventsourcing.AppendResult{}, nil
+}
+
+func (s *closeTrackingStore) LoadStream(ctx context.Context, _ string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return s.iter(ctx)
+}
+
+func (s *closeTrackingStore) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return s.iter(ctx)
+}
+
+func (s *closeTrackingStore) LoadFromAll(ctx context.Context, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return s.iter(ctx)
+}
+
+func (s *closeTrackingStore) Close() error { return nil }
+
+// TestTelemetryStore_ClosesUnderlyingIterator pins the ownership half of the
+// Load* contract: the instrumented iterator owns the one it wraps, so
+// closing it closes the underlying iterator exactly once — whether the
+// caller reads to the end or stops early.
+//
+// An early stop is the case that matters. The underlying iterator may hold a
+// database cursor or an open read stream, and a caller that breaks out of
+// the loop (as cqrs.NewCommandHandler's retry loop can, via its deferred
+// Close) would otherwise leak it.
+func TestTelemetryStore_ClosesUnderlyingIterator(t *testing.T) {
+	load := map[string]func(eventsourcing.EventStore, context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error){
+		"LoadStream": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return s.LoadStream(ctx, "agg-1")
+		},
+		"LoadStreamFrom": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return s.LoadStreamFrom(ctx, "agg-1", eventsourcing.Any{})
+		},
+		"LoadFromAll": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return s.LoadFromAll(ctx, eventsourcing.Any{})
+		},
+	}
+
+	for name, open := range load {
+		t.Run(name, func(t *testing.T) {
+			t.Run("full read", func(t *testing.T) {
+				stub := &closeTrackingStore{events: envelopes(3)}
+				iter, err := open(WithEventStoreTelemetry(stub), context.Background())
+				if err != nil {
+					t.Fatalf("%s() error = %v", name, err)
+				}
+				got, err := iter.All()
+				if err != nil {
+					t.Fatalf("All() = %v", err)
+				}
+				if len(got) != 3 {
+					t.Fatalf("All() returned %d events, want 3", len(got))
+				}
+				if stub.closes != 1 {
+					t.Fatalf("underlying iterator closed %d times, want 1", stub.closes)
+				}
+			})
+
+			t.Run("early close", func(t *testing.T) {
+				stub := &closeTrackingStore{events: envelopes(3)}
+				iter, err := open(WithEventStoreTelemetry(stub), context.Background())
+				if err != nil {
+					t.Fatalf("%s() error = %v", name, err)
+				}
+				if !iter.Next() {
+					t.Fatal("Next() = false on a 3-event stream")
+				}
+				if err := iter.Close(); err != nil {
+					t.Fatalf("Close() = %v", err)
+				}
+				if stub.closes != 1 {
+					t.Fatalf("underlying iterator closed %d times after an early Close, want 1", stub.closes)
+				}
+				// Idempotent: a deferred Close after an explicit one must
+				// not close the underlying iterator a second time.
+				if err := iter.Close(); err != nil {
+					t.Fatalf("second Close() = %v", err)
+				}
+				if stub.closes != 1 {
+					t.Fatalf("underlying iterator closed %d times after two Closes, want 1", stub.closes)
+				}
+			})
+
+			t.Run("read error reaches Err", func(t *testing.T) {
+				boom := errors.New("read failed")
+				stub := &closeTrackingStore{events: envelopes(1), readErr: boom}
+				iter, err := open(WithEventStoreTelemetry(stub), context.Background())
+				if err != nil {
+					t.Fatalf("%s() error = %v", name, err)
+				}
+				got, err := iter.All()
+				if !errors.Is(err, boom) {
+					t.Fatalf("All() error = %v, want %v", err, boom)
+				}
+				if s, want := err.Error(), boom.Error(); s != want {
+					t.Fatalf("All() error = %q, want the failure reported once (%q)", s, want)
+				}
+				if len(got) != 1 {
+					t.Fatalf("All() returned %d events, want the 1 read before the error", len(got))
+				}
+				if stub.closes != 1 {
+					t.Fatalf("underlying iterator closed %d times, want 1", stub.closes)
+				}
+			})
+		})
+	}
+}
+
+func envelopes(n int) []*eventsourcing.Envelope {
+	out := make([]*eventsourcing.Envelope, n)
+	for i := range out {
+		out[i] = &eventsourcing.Envelope{
+			StreamID: "agg-1",
+			Event:    loadFromAllStubEvent{},
+			Version:  uint64(i),
+		}
+	}
+	return out
 }

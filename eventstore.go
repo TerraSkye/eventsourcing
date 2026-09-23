@@ -13,6 +13,21 @@ import (
 // Load* method. The [Iterator] values Load* methods return are lazy and
 // should be consumed promptly; implementations make no guarantee about
 // their reusability or thread-safety once iteration ends.
+//
+// A Load* iterator is bound to the ctx it was created with, and may hold
+// resources — a database cursor, an open read stream — until iteration
+// ends. Reading it to the end or failing releases them; a caller that may
+// stop early must call [Iterator.Close], which is safe to defer:
+//
+//	it, err := store.LoadStream(ctx, id)
+//	if err != nil {
+//		return err
+//	}
+//	defer it.Close()
+//	for it.Next() {
+//		state = evolve(state, it.Value())
+//	}
+//	return it.Err()
 type EventStore interface {
 	// Save appends events to the stream identified by their common StreamID,
 	// which must be the same across every element of events. revision states

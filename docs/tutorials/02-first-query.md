@@ -72,9 +72,10 @@ func (h *QueryHandler) HandleQuery(ctx context.Context, _ ListTasks) (*TaskList,
     if err != nil {
         return nil, fmt.Errorf("list tasks: %w", err)
     }
+    defer iter.Close()
 
     result := &TaskList{Tasks: make([]Task, 0)}
-    for iter.Next(ctx) {
+    for iter.Next() {
         result = evolve(result, iter.Value())
     }
     if err := iter.Err(); err != nil {

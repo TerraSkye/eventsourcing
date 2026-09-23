@@ -132,115 +132,124 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 // [eventsourcing.EventStore]. If the initial call fails, it records
 // [EventStoreErrors] and returns immediately. Otherwise it returns an
 // iterator that, on its first advance, starts a client span tagged with the
-// stream ID; each yielded event increments [EventsLoaded], and
-// [EventStoreDuration] is recorded, and [EventStoreErrors] incremented on
-// failure, once the iterator is exhausted.
+// stream ID; each yielded event increments [EventsLoaded].
+//
+// The returned iterator owns the underlying one: closing it — by reading to
+// the end, by failing, or by an explicit Close — closes the underlying
+// iterator, ends the span, and records [EventStoreDuration], or
+// [EventStoreErrors] if the load failed. A caller that stops early is
+// therefore instrumented like any other, provided it closes the iterator.
 func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	iter, err := t.next.LoadStream(ctx, id)
+	src, err := t.next.LoadStream(ctx, id)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-		return iter, err
+		return src, err
 	}
 
-	started := false
-	var startedAt time.Time
-	var rebuildSpan trace.Span
+	var (
+		startedAt time.Time
+		span      trace.Span
+		spanCtx   = ctx
+	)
 
-	return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if !started {
-			started = true
-			startedAt = time.Now()
-
-			spanAttrs := append(t.baseAttrs(),
-				AttrOperation.String("load"),
-				AttrStreamID.String(id),
-			)
-			ctx, rebuildSpan = tracer.Start(ctx, "load eventstore",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(spanAttrs...),
-			)
-		}
-
-		if !iter.Next(ctx) {
-			err := iter.Err()
-			if err == nil || err == io.EOF {
-				EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
-				rebuildSpan.End()
-				return nil, io.EOF
-			} else {
-				EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-				if rebuildSpan != nil {
-					rebuildSpan.RecordError(err)
-					rebuildSpan.SetStatus(codes.Error, err.Error())
-					rebuildSpan.End()
-				}
+	return eventsourcing.Wrap(src,
+		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
+			if span == nil {
+				startedAt = time.Now()
+				spanAttrs := append(t.baseAttrs(),
+					AttrOperation.String("load"),
+					AttrStreamID.String(id),
+				)
+				// Keep the span's context for the metrics recorded below, so
+				// they are attributed to the span rather than to ctx alone.
+				spanCtx, span = tracer.Start(ctx, "load eventstore",
+					trace.WithSpanKind(trace.SpanKindClient),
+					trace.WithAttributes(spanAttrs...),
+				)
 			}
-			return nil, err
-		}
 
-		val := iter.Value()
-		EventsLoaded.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+			if !src.Next() {
+				// io.EOF, not src.Err(): the source's failure reaches this
+				// iterator through Close, and the done function below sees
+				// it. Returning it here as well would report it twice.
+				return nil, io.EOF
+			}
 
-		return val, nil
-	}), nil
+			EventsLoaded.Add(spanCtx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+			return src.Value(), nil
+		},
+		func(err error) {
+			if span == nil {
+				// Closed before the first advance: no span was started, so
+				// there is no load to report.
+				return
+			}
+			if err != nil {
+				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			} else {
+				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
+			}
+			span.End()
+		}), nil
 }
 
 // LoadStreamFrom loads stream id from version onward from the underlying
 // [eventsourcing.EventStore]. It behaves like [TelemetryStore.LoadStream],
 // additionally tagging the span with the requested version and, once the
-// iterator is exhausted, with the number of events yielded.
+// iterator closes, with the number of events yielded.
 func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	iter, err := t.next.LoadStreamFrom(ctx, id, version)
+	src, err := t.next.LoadStreamFrom(ctx, id, version)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-		return iter, err
+		return src, err
 	}
 
-	started := false
-	var startedAt time.Time
-	var rebuildSpan trace.Span
-	var eventCount int64
+	var (
+		startedAt  time.Time
+		span       trace.Span
+		spanCtx    = ctx
+		eventCount int64
+	)
 
-	return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if !started {
-			started = true
-			startedAt = time.Now()
+	return eventsourcing.Wrap(src,
+		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
+			if span == nil {
+				startedAt = time.Now()
+				spanAttrs := append(t.baseAttrs(),
+					AttrOperation.String("load"),
+					AttrStreamID.String(id),
+					AttrStreamVersion.Int64(version.ToRawInt64()),
+				)
+				spanCtx, span = tracer.Start(ctx, "load eventstore",
+					trace.WithSpanKind(trace.SpanKindClient),
+					trace.WithAttributes(spanAttrs...),
+				)
+			}
 
-			spanAttrs := append(t.baseAttrs(),
-				AttrOperation.String("load"),
-				AttrStreamID.String(id),
-				AttrStreamVersion.Int64(version.ToRawInt64()),
-			)
-			ctx, rebuildSpan = tracer.Start(ctx, "load eventstore",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(spanAttrs...),
-			)
-		}
-
-		if !iter.Next(ctx) {
-			rebuildSpan.SetAttributes(AttrEventCount.Int64(eventCount))
-
-			err := iter.Err()
-
-			if err == nil {
-				EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
-				rebuildSpan.End()
+			if !src.Next() {
 				return nil, io.EOF
 			}
 
-			EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-			rebuildSpan.RecordError(err)
-			rebuildSpan.SetStatus(codes.Error, err.Error())
-			rebuildSpan.End()
-			return nil, err
-		}
-
-		eventCount++
-		val := iter.Value()
-		EventsLoaded.Add(ctx, 1, metric.WithAttributes(AttrStreamID.String(id)))
-
-		return val, nil
-	}), nil
+			eventCount++
+			EventsLoaded.Add(spanCtx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+			return src.Value(), nil
+		},
+		func(err error) {
+			if span == nil {
+				return
+			}
+			span.SetAttributes(AttrEventCount.Int64(eventCount))
+			if err != nil {
+				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			} else {
+				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
+			}
+			span.End()
+		}), nil
 }
 
 // LoadFromAll loads all events across streams from version onward from the
@@ -248,54 +257,52 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 // [TelemetryStore.LoadStream], tagging the span with the requested version
 // instead of a stream ID, since the events may belong to any stream.
 func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	iter, err := t.next.LoadFromAll(ctx, version)
+	src, err := t.next.LoadFromAll(ctx, version)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-		return iter, err
+		return src, err
 	}
 
-	started := false
-	var startedAt time.Time
-	var rebuildSpan trace.Span
+	var (
+		startedAt time.Time
+		span      trace.Span
+		spanCtx   = ctx
+	)
 
-	return eventsourcing.NewIteratorFunc(func(ctx context.Context) (*eventsourcing.Envelope, error) {
-		if !started {
-			started = true
-			startedAt = time.Now()
+	return eventsourcing.Wrap(src,
+		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
+			if span == nil {
+				startedAt = time.Now()
+				spanAttrs := append(t.baseAttrs(),
+					AttrOperation.String("load"),
+					AttrStreamVersion.Int64(version.ToRawInt64()),
+				)
+				spanCtx, span = tracer.Start(ctx, "load eventstore",
+					trace.WithSpanKind(trace.SpanKindClient),
+					trace.WithAttributes(spanAttrs...),
+				)
+			}
 
-			spanAttrs := append(t.baseAttrs(),
-				AttrOperation.String("load"),
-				AttrStreamVersion.Int64(version.ToRawInt64()),
-			)
-			ctx, rebuildSpan = tracer.Start(ctx, "load eventstore",
-				trace.WithSpanKind(trace.SpanKindClient),
-				trace.WithAttributes(spanAttrs...),
-			)
-		}
-
-		if !iter.Next(ctx) {
-			err := iter.Err()
-			if err == nil || err == io.EOF {
-				EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
-				if rebuildSpan != nil {
-					rebuildSpan.End()
-				}
+			if !src.Next() {
 				return nil, io.EOF
 			}
-			EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-			if rebuildSpan != nil {
-				rebuildSpan.RecordError(err)
-				rebuildSpan.SetStatus(codes.Error, err.Error())
-				rebuildSpan.End()
+
+			EventsLoaded.Add(spanCtx, 1)
+			return src.Value(), nil
+		},
+		func(err error) {
+			if span == nil {
+				return
 			}
-			return nil, err
-		}
-
-		val := iter.Value()
-		EventsLoaded.Add(ctx, 1, metric.WithAttributes())
-
-		return val, nil
-	}), nil
+			if err != nil {
+				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			} else {
+				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
+			}
+			span.End()
+		}), nil
 }
 
 // Close closes the underlying [eventsourcing.EventStore]. It delegates
