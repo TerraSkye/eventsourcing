@@ -146,13 +146,19 @@ func newEventByNameDefault(name string) (Event, error) {
 // It reads the type through reflection rather than trimming a "*" off %T,
 // because a generic instantiation's %T is package-qualified on its type
 // arguments too, and string surgery on that mangles the name (see TypeName).
+// Reflection is also the cheaper of the two: reflect.Type.String returns the
+// string held in the type descriptor, where fmt builds a fresh one and
+// allocates for it on every call.
+//
+// One dereference is enough. The method set of **T is empty, so a
+// double pointer cannot satisfy [Event] and cannot reach here.
 func eventTypeKey(event Event) string {
 	t := reflect.TypeOf(event)
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
 	if t == nil {
 		return "<nil>"
+	}
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
 	return t.String()
 }

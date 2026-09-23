@@ -51,8 +51,11 @@ func TestEventNameExtraction(t *testing.T) {
 		panic(fmt.Errorf("handler %T does not have a function `EventName()`", h))
 	}
 
-	if u.EventName() != "*eventsourcing.CartCreated" {
-		t.Errorf("event name `CartCreated` does not match `EventName()`")
+	// The pointer indirection is stripped: routing, the event registry and
+	// StreamFilter all key on the same form, so a handler can be resolved
+	// back to the names its type is registered under.
+	if got := u.EventName(); got != "eventsourcing.CartCreated" {
+		t.Errorf("EventName() = %q, want %q", got, "eventsourcing.CartCreated")
 	}
 
 }
@@ -89,7 +92,7 @@ func TestTypedEventHandler_Handle_CorrectType(t *testing.T) {
 }
 
 func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
-	handler := OnEvent(func(ctx context.Context, ev CartCreated) error {
+	handler := OnEvent(func(ctx context.Context, ev *CartCreated) error {
 		t.Fail() // should not be called
 		return nil
 	})
@@ -143,7 +146,7 @@ func TestEventGroupProcessor_RoutesEvents(t *testing.T) {
 
 func TestEventGroupProcessor_SkippedEvent(t *testing.T) {
 	group := NewEventGroupProcessor(
-		OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
+		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
 	)
 
 	err := group.Handle(context.Background(), &UnhandledEvent{})
@@ -163,8 +166,8 @@ func TestEventGroupProcessor_DuplicateHandlerPanics(t *testing.T) {
 	}()
 
 	NewEventGroupProcessor(
-		OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
-		OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
+		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
+		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
 	)
 }
 
@@ -267,39 +270,18 @@ func TestNewEventHandlerFunc_UsableDirectly(t *testing.T) {
 	}
 }
 
-// TestEventGroupProcessor_StreamFilter_ValueHandlerMissesPointerRegisteredAliases
-// documents a bug: see
-// .bug/streamfilter-value-handler-misses-pointer-registered-aliases.md.
+// TestOnEvent_ReceivesEventsAsTheRegistryMintsThem pins the invariant that
+// makes OnEvent's pointer constraint worth having: a handler is routed under
+// the same name as the events a store will actually deliver to it.
 //
-// StreamFilter's doc comment promises that "for a handled type registered in
-// the global event registry ... it includes every name that type is
-// registered under, since one concrete event struct can be registered under
-// several names (for example after a rename, via RegisterEventByName)".
-//
-// CartCreated's EventType/AggregateID are value-receiver (see
-// event_handler_test.go), so it can be used with OnEvent either as a pointer
-// type parameter (OnEvent(func(ctx, ev *CartCreated) ...), the shape every
-// other StreamFilter test in this package uses) or, equally legally, as a
-// value type parameter (OnEvent(func(ctx, ev CartCreated) ...)). But
-// RegisterEvent(&CartCreated{}) — the idiomatic registration call, and the
-// only kind used anywhere in this codebase's own examples — always registers
-// the type in typeToNames under its *pointer* form's %T string
-// ("*eventsourcing.CartCreated"), because RegisterEventByType's factory
-// closure always returns a pointer.
-//
-// EventNamesFor keys strictly on %T of the instance passed to it. A
-// value-type OnEvent handler's EventInstance() returns a zero value T (a bare
-// CartCreated{}, not a pointer), whose %T is "eventsourcing.CartCreated" —
-// missing the leading asterisk, so it never matches the pointer-keyed
-// registry entry. StreamFilter() then silently falls through to the
-// unregistered-type fallback (instance.EventType()), which only ever reports
-// the single primary name, dropping every additional alias added via
-// RegisterEventByName — even though CartCreated genuinely is registered, and
-// even though the exact same handler built with a pointer type parameter
-// would report every alias correctly (see
-// TestEventGroupProcessor_StreamFilter_Sorted, which asserts exactly that for
-// the pointer form).
-func TestEventGroupProcessor_StreamFilter_ValueHandlerMissesPointerRegisteredAliases(t *testing.T) {
+// RegisterEvent mints new(T), so NewEventByName -- and therefore every
+// EventStore and EventBus that rehydrates an event by name -- hands out *T.
+// OnEvent used to accept the value form too, which registered the handler
+// under "eventsourcing.CartCreated" while those events arrived as
+// "*eventsourcing.CartCreated": it compiled, registered, appeared in
+// StreamFilter, and was never called. The constraint makes that unwritable,
+// and this test fails if the two sides ever drift apart again.
+func TestOnEvent_ReceivesEventsAsTheRegistryMintsThem(t *testing.T) {
 
 	registryMu.Lock()
 	registry = map[string]func() Event{}
@@ -307,29 +289,76 @@ func TestEventGroupProcessor_StreamFilter_ValueHandlerMissesPointerRegisteredAli
 	registryMu.Unlock()
 
 	RegisterEvent(&CartCreated{})
-	RegisterEventByName("LegacyCartCreated", func() Event {
-		return &CartCreated{}
-	})
+
+	called := false
+	group := NewEventGroupProcessor(
+		OnEvent(func(ctx context.Context, ev *CartCreated) error {
+			called = true
+			return nil
+		}),
+	)
+
+	// Exactly what a store hands the bus after reading an event back.
+	rehydrated, err := NewEventByName("CartCreated")
+	if err != nil {
+		t.Fatalf("NewEventByName: %v", err)
+	}
+
+	if err := group.Handle(context.Background(), rehydrated); err != nil {
+		t.Fatalf("Handle(%T): %v -- the handler is registered under a different name "+
+			"than the registry mints, so no stored event would ever reach it", rehydrated, err)
+	}
+	if !called {
+		t.Fatalf("handler was not called for a %T rehydrated from the registry", rehydrated)
+	}
+
+	// And the filter names what the subscriber will actually receive.
+	if names := group.StreamFilter(); !reflect.DeepEqual(names, []string{"CartCreated"}) {
+		t.Fatalf("StreamFilter() = %v, want [CartCreated]", names)
+	}
+}
+
+// TestEventGroupProcessor_StreamFilter_ValueRegisteredAliases covers a type
+// whose registry factory mints a value while its handler takes a pointer.
+//
+// RegisterEventByType takes a plain func() Event, so what it mints is
+// whatever the caller wrote — a value here. OnEvent, by contrast, always
+// takes the pointer form. typeToNames used to key on %T of the instance, so
+// the factory filed the type under "eventsourcing.CartCreated" while the
+// handler looked it up as "*eventsourcing.CartCreated", and every alias
+// registered through RegisterEventByName went missing from the filter even
+// though the type genuinely was registered.
+//
+// The pointer and value forms are the same registered event, so they share
+// one entry now.
+func TestEventGroupProcessor_StreamFilter_ValueRegisteredAliases(t *testing.T) {
+
+	registryMu.Lock()
+	registry = map[string]func() Event{}
+	typeToNames = map[string][]string{}
+	registryMu.Unlock()
+
+	// Both factories mint a value, which RegisterEvent never does but
+	// RegisterEventByType/ByName leave entirely to the caller.
+	RegisterEventByType(func() Event { return CartCreated{} })
+	RegisterEventByName("LegacyCartCreated", func() Event { return CartCreated{} })
 
 	group := NewEventGroupProcessor(
-		// Value type parameter — legal since CartCreated's methods are
-		// value-receiver, but a different Go type than the *CartCreated form
-		// RegisterEvent registered under.
-		OnEvent(func(ctx context.Context, ev CartCreated) error { return nil }),
+		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
 	)
 
 	// Handle still routes correctly: this isn't about the handler being
 	// broken, only about StreamFilter() misreporting its aliases.
-	if err := group.Handle(context.Background(), CartCreated{ID: "c1"}); err != nil {
+	if err := group.Handle(context.Background(), &CartCreated{ID: "c1"}); err != nil {
 		t.Fatalf("Handle: unexpected error: %v", err)
 	}
 
 	names := group.StreamFilter()
 	expected := []string{"CartCreated", "LegacyCartCreated"}
 	if !reflect.DeepEqual(names, expected) {
-		t.Fatalf("StreamFilter() = %v, want %v: the LegacyCartCreated alias registered via "+
-			"RegisterEventByName is silently missing because the value-type handler's "+
-			"EventInstance() doesn't match the pointer-keyed registry entry", names, expected)
+		t.Fatalf("StreamFilter() = %v, want %v: the aliases are missing because the "+
+			"value-minting factory and the pointer handler key the registry differently",
+			names, expected)
 	}
 }
 
@@ -338,17 +367,17 @@ func TestEventGroupProcessor_StreamFilter_ValueHandlerMissesPointerRegisteredAli
 // OnEvent with a pointer type parameter, over an Event whose methods take a
 // value receiver, whose concrete type was never registered.
 //
-// StreamFilter once fell back to calling EventType() on the instance when
-// the registry had no name for it. EventInstance() returns the zero T, which
-// for T = *CartCreated is a nil pointer, and reaching a value-receiver
-// method through it dereferences the nil before the method body runs --
-// "value method CartCreated.EventType called using nil *CartCreated
-// pointer".
+// StreamFilter once fell back to calling EventType() on the instance when the
+// registry had no name for it, and EventInstance() returned the zero value --
+// a nil pointer for a pointer type parameter. Reaching a value-receiver
+// method through that dereferences the nil before the method body runs:
+// "value method CartCreated.EventType called using nil *CartCreated pointer".
 //
-// There is no fallback now: a filter name has to come from the registry, so
-// an unregistered type contributes nothing and the nil instance is never
-// called. This test pins both halves -- the omission, and that getting there
-// does not panic.
+// Both halves of that are gone. There is no fallback: a filter name has to
+// come from the registry, so an unregistered type contributes nothing. And
+// EventInstance() allocates now, so nothing hands out a nil receiver in the
+// first place. This test pins the omission, and that getting there does not
+// panic.
 func TestStreamFilter_UnregisteredPointerHandlerOfValueReceiverEventIsOmitted(t *testing.T) {
 
 	registryMu.Lock()
