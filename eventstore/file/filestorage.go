@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -442,25 +443,47 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 	default:
 	}
 
+	// os.ReadDir sorts by filename, which only matches append order while
+	// every version pads to the same width. Save writes %010d, and %010d pads
+	// up to ten digits without truncating or rejecting a longer one, so a
+	// version of 10,000,000,000 produces an eleven-character name that sorts
+	// before every ten-digit one whose leading digit is larger --
+	// "10000000000-x.json" ahead of "9999999999-x.json", decided on the first
+	// byte. Sort on the parsed version instead, which is also what lets files
+	// already written at the narrower width be read back in order.
+	type entry struct {
+		name    string
+		version uint64
+	}
+	entries := make([]entry, 0, len(files))
+	for _, fi := range files {
+		if fi.IsDir() {
+			continue
+		}
+		digits, _, ok := strings.Cut(fi.Name(), "-")
+		if !ok {
+			continue
+		}
+		ver, err := strconv.ParseUint(digits, 10, 64)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, entry{name: fi.Name(), version: ver})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].version < entries[j].version })
+
 	idx := 0
 	nextFunc := func(ctx context.Context) (*cqrs.Envelope, error) {
-		for idx < len(files) {
-			fi := files[idx]
+		for idx < len(entries) {
+			e := entries[idx]
 			idx++
-			if fi.IsDir() {
-				continue
-			}
 
-			parts := strings.Split(fi.Name(), "-")
-			if len(parts) < 2 {
-				continue
-			}
-			ver, _ := strconv.ParseUint(parts[0], 10, 64)
+			ver := e.version
 			if fromRevision && ver <= offset {
 				continue
 			}
 
-			path := filepath.Join(dir, fi.Name())
+			path := filepath.Join(dir, e.name)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				continue
