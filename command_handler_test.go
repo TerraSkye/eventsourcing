@@ -26,8 +26,8 @@ func (e testEvent) EventType() string   { return e.typ }
 func (e testEvent) CommandType() string { return "testEvent" }
 
 // testIterator wraps the Iterator[*Envelope] constructor helpers.
-func newSliceEnvelopeIterator(envs []*Envelope) *Iterator[*Envelope] {
-	return NewSliceIterator(envs)
+func newSliceEnvelopeIterator(ctx context.Context, envs []*Envelope) *Iterator[*Envelope] {
+	return NewSliceIterator(ctx, envs)
 }
 
 type testStore struct {
@@ -51,7 +51,7 @@ func (s *testStore) LoadStreamFrom(ctx context.Context, id string, version Strea
 	s.loadCalled++
 	return s.loadFn(ctx, id, version)
 }
-func (s *testStore) LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error) {
+func (s *testStore) LoadFromAll(_ context.Context, _ StreamState) (*Iterator[*Envelope], error) {
 	return nil, nil
 }
 func (s *testStore) Close() error { return nil }
@@ -93,8 +93,10 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 
 	// produce an iterator that returns an error on Next
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		it := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
+		it := NewIteratorFunc(ctx, func(ctx context.Context) (*Envelope, error) {
 			return nil, errors.New("iterator fail")
+		}, func() error {
+			return nil
 		})
 		return it, nil
 	}
@@ -115,7 +117,7 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 func TestNewCommandHandler_DecideError_BusinessRuleViolation(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(t.Context(), nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns an error")
@@ -149,7 +151,7 @@ func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		// no prior events
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(t.Context(), nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns no events")
@@ -195,7 +197,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 		OccurredAt: time.Now(),
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
+		return newSliceEnvelopeIterator(ctx, []*Envelope{prior}), nil
 	}
 
 	// Check payload saved
@@ -258,7 +260,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{Successful: false}, fmt.Errorf("disk full")
@@ -287,7 +289,7 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 	store := &testStore{}
 	// no prior events
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 
 	callCount := 0
@@ -336,7 +338,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		OccurredAt: time.Now(),
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
+		return newSliceEnvelopeIterator(ctx, []*Envelope{prior}), nil
 	}
 
 	var seenRevision StreamState
@@ -387,11 +389,11 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 	// event that competing writer landed.
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		if store.loadCalled == 1 {
-			return newSliceEnvelopeIterator([]*Envelope{
+			return newSliceEnvelopeIterator(ctx, []*Envelope{
 				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
 			}), nil
 		}
-		return newSliceEnvelopeIterator([]*Envelope{
+		return newSliceEnvelopeIterator(ctx, []*Envelope{
 			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
 		}), nil
 	}
@@ -441,7 +443,7 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 func TestNewCommandHandler_ExplicitRevision_ConflictNotRetried(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(0), ActualRevision: Revision(1)}
@@ -518,11 +520,11 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		if store.loadCalled == 1 {
-			return newSliceEnvelopeIterator([]*Envelope{
+			return newSliceEnvelopeIterator(ctx, []*Envelope{
 				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
 			}), nil
 		}
-		return newSliceEnvelopeIterator([]*Envelope{
+		return newSliceEnvelopeIterator(ctx, []*Envelope{
 			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
 		}), nil
 	}
@@ -565,7 +567,7 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		// verify metadata merged and overwritten by later extractor
@@ -609,7 +611,7 @@ func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
 	var savedEnvelopes []Envelope
 	store := &testStore{
 		loadFn: func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-			return newSliceEnvelopeIterator(nil), nil
+			return newSliceEnvelopeIterator(ctx, nil), nil
 		},
 		saveFn: func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 			savedEnvelopes = envelopes
@@ -665,7 +667,7 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 	callCount := 0
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		callCount = 0 // reset for each load call
-		iter := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
+		iter := NewIteratorFunc(ctx, func(ctx context.Context) (*Envelope, error) {
 			callCount++
 			if callCount == 1 {
 				// First event succeeds
@@ -679,6 +681,8 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 			// Second event fails - simulating an unregistered event error
 			// This is the error that would come from NewEventByName in KurrentDB
 			return nil, fmt.Errorf("cannot create event %q: %w", "UnknownEvent", ErrEventNotRegistered)
+		}, func() error {
+			return nil
 		})
 		return iter, nil
 	}
@@ -757,7 +761,7 @@ func TestNewCommandHandler_PinnedRevisionSkipsStateFolding(t *testing.T) {
 				out = append(out, e)
 			}
 		}
-		return newSliceEnvelopeIterator(out), nil
+		return newSliceEnvelopeIterator(ctx, out), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
@@ -795,7 +799,7 @@ func TestNewCommandHandler_NilRetryStrategyPanicsInsteadOfNoRetry(t *testing.T) 
 
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns no events")
@@ -837,7 +841,7 @@ func TestNewCommandHandler_DecideError_ReportsCurrentVersionNotZero(t *testing.T
 		{EventID: uuid.New(), StreamID: "agg-1", Event: testEvent{agg: "agg-1", typ: "old"}, Version: 3, OccurredAt: time.Now()},
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(prior), nil
+		return newSliceEnvelopeIterator(ctx, prior), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns an error")
@@ -882,7 +886,7 @@ func TestNewCommandHandler_ConflictReportsActualRevisionNotGuess(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		// The handler loads an empty stream (lastVersion stays 0).
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		// By the time Save runs, five foreign events have already landed —
@@ -932,7 +936,7 @@ func TestNewCommandHandler_ConflictReportsActualRevisionNotGuess(t *testing.T) {
 func TestNewCommandHandler_AutoConvergeConflictErrorLosesDiagnosticContext(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{}, &StreamRevisionConflictError{
@@ -982,7 +986,7 @@ func TestNewCommandHandler_AutoConvergeDefaultDoesNotPinEmptyStreamRevision(t *t
 		// Always looks like a brand-new, empty stream -- exactly what a real
 		// EventStore's LoadStreamFrom returns for an aggregate that has
 		// never been saved to before.
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 
 	var seenRevision StreamState

@@ -53,9 +53,8 @@ func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
 
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
-	ctx := context.Background()
 	var results []*cqrs.Envelope
-	for iter.Next(ctx) {
+	for iter.Next() {
 		results = append(results, iter.Value())
 	}
 	if err := iter.Err(); err != nil && err != io.EOF {
@@ -328,12 +327,12 @@ func TestLoadStream_ContextCancellation(t *testing.T) {
 	}
 
 	// Read a few events then cancel
-	iter.Next(ctx)
-	iter.Next(ctx)
+	iter.Next()
+	iter.Next()
 	cancel()
 
 	// Next call should detect cancellation
-	if iter.Next(ctx) {
+	if iter.Next() {
 		// Context check happens at start of Next, so it should return false
 		if iter.Err() != context.Canceled {
 			t.Errorf("expected context.Canceled, got %v", iter.Err())
@@ -932,7 +931,7 @@ func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 		t.Fatalf("LoadFromAll failed: %v", err)
 	}
 
-	events, err := iter.All(ctx)
+	events, err := iter.All()
 	if err != nil {
 		t.Fatalf("iter.All failed: %v", err)
 	}

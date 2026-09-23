@@ -222,16 +222,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		)
 	}
 
-	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf(
-				"load stream %q: iteration failed : %w",
-				id, ctx.Err(),
-			)
-		default:
-		}
-
+	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// TODO: this treats every error from Recv (including a real
@@ -269,6 +260,12 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*
 		}
 
 		return envelope, nil
+	}, func() error {
+		// The iterator owns the read stream: closing it releases the
+		// client's subscription, whether iteration ran to the end or the
+		// caller stopped early.
+		streamer.Close()
+		return nil
 	})
 
 	return iter, nil
@@ -317,13 +314,7 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		)
 	}
 
-	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
+	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// TODO: see the LoadStreamFrom doc comment above — this masks
@@ -358,6 +349,12 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.
 		}
 
 		return envelope, nil
+	}, func() error {
+		// The iterator owns the read stream: closing it releases the
+		// client's subscription, whether iteration ran to the end or the
+		// caller stopped early.
+		streamer.Close()
+		return nil
 	})
 
 	return iter, nil
@@ -383,13 +380,7 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		return nil, err
 	}
 
-	iter := cqrs.NewIteratorFunc(func(ctx context.Context) (*cqrs.Envelope, error) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
+	iter := cqrs.NewIteratorFunc(ctx, func(context.Context) (*cqrs.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
 			// Propagate as-is: io.EOF signals a normal end of stream, any
@@ -424,6 +415,12 @@ func (e eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (
 		}
 
 		return envelope, nil
+	}, func() error {
+		// The iterator owns the read stream: closing it releases the
+		// client's subscription, whether iteration ran to the end or the
+		// caller stopped early.
+		streamer.Close()
+		return nil
 	})
 
 	return iter, nil

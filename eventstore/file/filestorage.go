@@ -357,7 +357,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
 func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(f.streamDir(id), cqrs.StreamExists{}, false)
+	return f.loadFromDir(ctx, f.streamDir(id), cqrs.StreamExists{}, false)
 }
 
 // LoadStreamFrom returns a lazy iterator over the events in the stream
@@ -369,7 +369,7 @@ func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 // beginning of the stream. It also returns a non-nil error if the requested
 // revision is beyond the stream's current length.
 func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(f.streamDir(id), version, false)
+	return f.loadFromDir(ctx, f.streamDir(id), version, false)
 }
 
 // LoadFromAll returns a lazy iterator over every event saved across all
@@ -378,7 +378,7 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 // [FilesStore.LoadStreamFrom], but against the global sequence rather than a
 // single stream.
 func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(filepath.Join(f.baseDir, allDirName), version, true)
+	return f.loadFromDir(ctx, filepath.Join(f.baseDir, allDirName), version, true)
 }
 
 // loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
@@ -392,7 +392,7 @@ func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) 
 // Envelope.GlobalVersion, which starts at 1 — so a Revision(N) start
 // position (meaning "N events already seen") must skip versions < N in the
 // 0-indexed case, but versions <= N in the 1-indexed one.
-func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState, oneIndexed bool) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState, oneIndexed bool) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// A stream's directory is only created lazily, on its first successful
 	// Save, so a never-saved stream (a perfectly normal thing to load, e.g.
 	// via Any{} or NoStream{} for a brand-new aggregate) has no directory at
@@ -498,7 +498,11 @@ func (f *FilesStore) loadFromDir(dir string, from cqrs.StreamState, oneIndexed b
 		return nil, io.EOF
 	}
 
-	return cqrs.NewIteratorFunc(nextFunc), nil
+	// nextFunc reads each event file with os.ReadFile, which closes it
+	// before returning, and the directory listing above is already in
+	// memory — so the iterator holds nothing that needs releasing and its
+	// close function is nil.
+	return cqrs.NewIteratorFunc(ctx, nextFunc, nil), nil
 }
 
 // Events returns a channel that receives every [cqrs.Envelope] as it is

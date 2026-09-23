@@ -74,7 +74,7 @@ func TestSave_StreamNamedAllCollidesWithGlobalDir(t *testing.T) {
 		t.Fatalf("LoadStream(%q): %v", "all", err)
 	}
 	var envs []*cqrs.Envelope
-	for iter.Next(ctx) {
+	for iter.Next() {
 		envs = append(envs, iter.Value())
 	}
 	if err := iter.Err(); err != nil {
@@ -281,7 +281,7 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Any{} on a never-saved stream: expected no error, got: %v", err)
 		}
-		if iter.Next(ctx) {
+		if iter.Next() {
 			t.Fatalf("expected an empty iterator for a never-saved stream")
 		}
 	})
@@ -298,7 +298,7 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NoStream{} on a never-saved stream: expected no error (stream genuinely does not exist), got: %v", err)
 		}
-		if iter.Next(ctx) {
+		if iter.Next() {
 			t.Fatalf("expected an empty iterator for a never-saved stream")
 		}
 	})
@@ -372,7 +372,7 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 			}
 
 			count := 0
-			for iter.Next(ctx) {
+			for iter.Next() {
 				count++
 			}
 			if err := iter.Err(); err != nil {
@@ -423,7 +423,7 @@ func TestLoadFromAll_RevisionAtHead(t *testing.T) {
 			}
 
 			count := 0
-			for iter.Next(ctx) {
+			for iter.Next() {
 				count++
 			}
 			if err := iter.Err(); err != nil {
@@ -482,7 +482,7 @@ func TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent(t *testing.T) {
 	}
 
 	var versions []uint64
-	for iter.Next(ctx) {
+	for iter.Next() {
 		versions = append(versions, iter.Value().Version)
 	}
 	if err := iter.Err(); err != nil {
@@ -537,7 +537,7 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 	}
 
 	var versions []uint64
-	for iter.Next(ctx) {
+	for iter.Next() {
 		versions = append(versions, iter.Value().Version)
 	}
 	if err := iter.Err(); err != nil {

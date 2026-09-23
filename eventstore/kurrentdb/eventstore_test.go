@@ -78,7 +78,7 @@ func TestMain(m *testing.M) {
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
 	var out []*cqrs.Envelope
-	for iter.Next(context.Background()) {
+	for iter.Next() {
 		out = append(out, iter.Value())
 	}
 	if err := iter.Err(); err != nil {
@@ -174,7 +174,7 @@ func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for iter.Next(ctx) {
+		for iter.Next() {
 		}
 	}()
 
@@ -306,7 +306,7 @@ func TestLoadStream_TruncatesStreamsLargerThanHardcodedCount(t *testing.T) {
 	}
 
 	count := 0
-	for iter.Next(ctx) {
+	for iter.Next() {
 		count++
 	}
 	if err := iter.Err(); err != nil {
