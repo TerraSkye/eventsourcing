@@ -101,8 +101,7 @@ func NewFileStore(dir string) (*FilesStore, error) {
 }
 
 // highestGlobalVersion returns the highest global version already recorded
-// in allDir (named "%010d-<EventType>.json"; see Save), or 0 if allDir is
-// empty.
+// in allDir (named by eventFileName), or 0 if allDir is empty.
 func highestGlobalVersion(allDir string) (uint64, error) {
 	entries, err := os.ReadDir(allDir)
 	if err != nil {
@@ -155,9 +154,9 @@ func (f *FilesStore) watchGlobalSequence() {
 	}
 }
 
-// parseGlobalVersion extracts the global version encoded in a filename of
-// the form "%010d-<EventType>.json" (see Save), reporting ok=false if name
-// doesn't match that pattern.
+// parseGlobalVersion extracts the global version encoded in a filename
+// built by eventFileName, reporting ok=false if name doesn't match that
+// pattern.
 func parseGlobalVersion(name string) (uint64, bool) {
 	name, ok := strings.CutSuffix(name, ".json")
 	if !ok {
@@ -172,6 +171,15 @@ func parseGlobalVersion(name string) (uint64, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// eventFileName names the file for an event at version v, in a stream
+// directory (v is its Version) or in allDir (v is its GlobalVersion). The
+// number is zero-padded to 20 digits, the width of the largest uint64, so
+// every name has the same width and os.ReadDir's lexical order is numeric
+// order — the order loadFromDir yields events in.
+func eventFileName(v uint64, eventType string) string {
+	return fmt.Sprintf("%020d-%s.json", v, eventType)
 }
 
 func (f *FilesStore) streamDir(id string) string {
@@ -199,7 +207,7 @@ func (f *FilesStore) streamDir(id string) string {
 // [cqrs.AppendResult] whose NextExpectedVersion is the stream's new length.
 //
 // TODO: each event is written to a file named after its own Version field
-// (e.g. "0000000002-Foo.json"), but Save never assigns that field itself —
+// (e.g. "00000000000000000002-Foo.json"), but Save never assigns that field itself —
 // unlike the postgres and kurrentdb implementations of this interface, which
 // compute the position server-side. If the caller does not set Version to a
 // value that is unique and sequential within the stream (for example, if it
@@ -287,7 +295,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		f.globalSeq++
 		events[i].GlobalVersion = f.globalSeq
 
-		fname := fmt.Sprintf("%010d-%s.json", events[i].Version, events[i].Event.EventType())
+		fname := eventFileName(events[i].Version, events[i].Event.EventType())
 
 		path := filepath.Join(sdir, fname)
 
@@ -321,7 +329,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		written = append(written, path)
 
 		// symlink to all/
-		all := filepath.Join(f.baseDir, allDirName, fmt.Sprintf("%010d-%s.json", events[i].GlobalVersion, events[i].Event.EventType()))
+		all := filepath.Join(f.baseDir, allDirName, eventFileName(events[i].GlobalVersion, events[i].Event.EventType()))
 
 		rel, _ := filepath.Rel(filepath.Join(f.baseDir, allDirName), path)
 
