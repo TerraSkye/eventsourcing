@@ -337,9 +337,12 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	// Only publish once the whole batch is durably on disk, so a
 	// subscriber never sees part of a batch that a later event in it then
 	// failed and rolled back.
+	// Send a copy of each envelope: events belongs to the caller, who may
+	// reuse its backing array once Save returns.
 	for i := range events {
+		ev := events[i]
 		select {
-		case f.bus <- &events[i]:
+		case f.bus <- &ev:
 		default:
 			// Drop event if channel full
 		}
