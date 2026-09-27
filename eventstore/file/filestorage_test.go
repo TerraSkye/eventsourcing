@@ -3,7 +3,6 @@ package file
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -224,7 +223,7 @@ func TestSave_GlobalSequenceConflictRollsBackBatch(t *testing.T) {
 	// Pre-claim the global version the second event in the batch below will
 	// be assigned (globalSeq starts at 0, so the first event takes 1 and the
 	// second takes 2), simulating a peer instance that won that race.
-	collidingPath := filepath.Join(dir, allDirName, fmt.Sprintf("%010d-%s.json", 2, "allCollisionEvent"))
+	collidingPath := filepath.Join(dir, allDirName, eventFileName(2, "allCollisionEvent"))
 	if err := os.Symlink("/nonexistent", collidingPath); err != nil {
 		t.Fatalf("pre-create colliding symlink: %v", err)
 	}
@@ -495,23 +494,16 @@ func TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent(t *testing.T) {
 }
 
 // TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents is a
-// regression test for a bug where loadFromDir relies on os.ReadDir's
-// lexical filename sort to reproduce append order, but Save names each
-// event's file "%010d-<EventType>.json" from its own Version field. %010d
-// only zero-pads up to 10 digits; a Version of 10,000,000,000 or higher
-// needs an 11th digit, so its filename is longer than — and therefore, per
-// Go's byte-wise string comparison, lexically less than — any file for a
-// Version that still fits in 10 digits, even one appended long before it.
-// LoadStream then yields that later event first.
+// regression test for GitHub issue #146: loadFromDir yields events in
+// os.ReadDir's lexical filename order, and Save used to name files
+// "%010d-<EventType>.json".
+// %010d only sets a minimum width, so a Version of 10,000,000,000 or more
+// got an 11-digit name, which sorts by its leading "1" before a 10-digit
+// name such as 9999999999's, and LoadStream yielded that later event first.
 //
-// This file's own pre-existing TODO on Save already documents that the
-// Version field is caller-supplied and never assigned or validated by Save
-// itself, so a real Version this large is reachable without needing to
-// actually append ten billion events to trigger it.
-//
-// See .bug/eventstore-file-large-version-lexical-sort-breaks-order.md.
+// Save never assigns Version itself (see its TODO), so a caller can reach
+// a version this large without appending ten billion events.
 func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T) {
-
 	ctx := context.Background()
 	dir := t.TempDir()
 
@@ -521,9 +513,7 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 	}
 	defer store.Close()
 
-	// Two Save calls, each appending one event, in ascending Version order —
-	// exactly like two ordinary sequential appends, just at a version range
-	// that crosses the 10-digit boundary %010d pads to.
+	// Two sequential appends whose versions cross from 10 digits to 11.
 	if _, err := store.Save(ctx, []cqrs.Envelope{envelopeFor("order-1", 9999999999, "first")}, cqrs.Any{}); err != nil {
 		t.Fatalf("save 1: %v", err)
 	}
@@ -546,5 +536,49 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 
 	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
 		t.Errorf("LoadStream order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
+	}
+}
+
+// TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder is the LoadFromAll
+// counterpart of TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents:
+// allDir's symlinks are named after GlobalVersion by the same format, so the
+// global log had the same ordering bug once it crossed 10 digits.
+func TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
+	ctx := context.Background()
+
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	// The next two appends are assigned global versions 9999999999 and
+	// 10000000000.
+	store.mu.Lock()
+	store.globalSeq = 9999999998
+	store.mu.Unlock()
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{envelopeFor("order-1", 1, "first")}, cqrs.Any{}); err != nil {
+		t.Fatalf("save 1: %v", err)
+	}
+	if _, err := store.Save(ctx, []cqrs.Envelope{envelopeFor("order-2", 1, "second")}, cqrs.Any{}); err != nil {
+		t.Fatalf("save 2: %v", err)
+	}
+
+	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+	if err != nil {
+		t.Fatalf("LoadFromAll: %v", err)
+	}
+
+	var versions []uint64
+	for iter.Next() {
+		versions = append(versions, iter.Value().GlobalVersion)
+	}
+	if err := iter.Err(); err != nil {
+		t.Fatalf("iterator error: %v", err)
+	}
+
+	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
+		t.Errorf("LoadFromAll order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
 	}
 }
