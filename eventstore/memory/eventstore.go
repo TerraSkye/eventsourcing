@@ -148,16 +148,19 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		return eventsourcing.AppendResult{Successful: false, StreamID: streamId}, err
 	}
 
-	// Append events
+	// Append events. events belongs to the caller, who may reuse its
+	// backing array once Save returns, so the store keeps its own copy of
+	// each envelope and publishes another on Events().
 	for i := range events {
 		ev := events[i]
+		ev.GlobalVersion = uint64(len(m.global)) + 1
 		m.events[streamId] = append(m.events[streamId], &ev)
 		m.global = append(m.global, &ev)
-		events[i].GlobalVersion = uint64(len(m.global))
 		currentVersion++
 
+		published := ev
 		select {
-		case m.bus <- &events[i]:
+		case m.bus <- &published:
 		default:
 			// Drop error if channel full
 		}
