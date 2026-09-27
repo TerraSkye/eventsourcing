@@ -195,6 +195,11 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 
 	err := backoff.Retry(func() error {
 		if err := b.runSubscription(ctx, s); err != nil {
+			if ctx.Err() != nil {
+				// The subscription ended because ctx was canceled (Close,
+				// or the subscriber being removed), not because it failed.
+				return nil
+			}
 			select {
 			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
 			default:
@@ -205,7 +210,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 		return nil
 	}, retryBackoff)
 
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		select {
 		case b.errs <- fmt.Errorf("subscriber %q: max retries exceeded: %w", s.name, err):
 		default:
@@ -238,8 +243,11 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 
 		kEvent := subscriptionEvent.EventAppeared
 
-		if subscriptionEvent.SubscriptionDropped != nil {
-			return errors.New("subscription dropped, reconnecting")
+		if dropped := subscriptionEvent.SubscriptionDropped; dropped != nil {
+			if dropped.Error == nil {
+				return errors.New("subscription dropped")
+			}
+			return fmt.Errorf("subscription dropped: %w", dropped.Error)
 		}
 
 		if kEvent == nil {
