@@ -222,10 +222,17 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf("save to stream %q: event store is closed", streamID)
 	}
 
-	os.MkdirAll(sdir, 0o755)
+	if err := os.MkdirAll(sdir, 0o755); err != nil {
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf("save to stream %q: create stream dir: %w", streamID, err)
+	}
 
-	// Determine current version
-	files, _ := os.ReadDir(sdir)
+	// Determine current version. A listing that fails must not be read as
+	// an empty stream: the directory may still accept writes, and every
+	// revision check below would run against the wrong length.
+	files, err := os.ReadDir(sdir)
+	if err != nil {
+		return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf("save to stream %q: read stream dir: %w", streamID, err)
+	}
 
 	currentVersion := uint64(len(files))
 
