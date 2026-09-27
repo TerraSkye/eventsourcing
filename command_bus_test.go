@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
@@ -583,6 +584,30 @@ func TestCommandBus_BufferedStopRaceParallel(t *testing.T) {
 		case <-waitDone:
 		case <-time.After(1 * time.Second):
 			t.Fatalf("trial %d: a Dispatch call never returned after Stop completed", i)
+		}
+	}
+}
+
+// selectShard converted the 32-bit FNV hash to int before taking the modulus.
+// Where int is 32 bits wide, a hash of 1<<31 or more became negative, so did
+// the shard index, and Dispatch panicked indexing b.queues. The negative
+// case only occurs on 32-bit platforms; run with GOARCH=386 to exercise it.
+func TestCommandBus_SelectShardInRangeForHighHashes(t *testing.T) {
+	bus := NewCommandBus(1, 3)
+	defer bus.Stop()
+
+	checked := 0
+	for i := 0; checked < 100; i++ {
+		id := "aggregate-" + strconv.Itoa(i)
+		h := fnv.New32a()
+		h.Write([]byte(id))
+		if h.Sum32() < 1<<31 {
+			continue
+		}
+		checked++
+
+		if shard := bus.selectShard(id); shard < 0 || shard >= bus.shardCount {
+			t.Fatalf("selectShard(%q) = %d, want a shard in [0, %d)", id, shard, bus.shardCount)
 		}
 	}
 }

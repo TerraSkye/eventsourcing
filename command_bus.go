@@ -224,10 +224,14 @@ func (b *CommandBus) handlerFor(cmdName string) (CommandHandler[Command], bool) 
 	return h, ok
 }
 
+// selectShard returns the index of the queue that serializes commands for
+// aggregateID. The modulus is taken in uint64 so the result is never
+// negative: converting the 32-bit hash to int first sign-flips it on
+// platforms where int is 32 bits wide.
 func (b *CommandBus) selectShard(aggregateID string) int {
 	hash := fnv.New32a()
 	hash.Write([]byte(aggregateID))
-	return int(hash.Sum32()) % b.shardCount
+	return int(uint64(hash.Sum32()) % uint64(b.shardCount))
 }
 
 // Register installs handler as the handler for command type C on b. The
