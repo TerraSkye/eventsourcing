@@ -11,6 +11,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,28 +302,18 @@ func TestLoadFromAll_IgnoresInFlightTransactions(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_HugeRevisionReplaysEntireStoreInsteadOfNothing documents a
-// bug: LoadFromAll's doc comment says a cqrs.Revision(n) position means
-// "starting after the position identified by version" - so a caller that
-// believes it has already consumed an enormous number of events (e.g. via a
-// corrupted/bogus checkpoint, or the unsigned-underflow scenario the
-// analogous eventstore/memory bug used to hit before it was fixed) should,
-// at worst, get an empty iterator back, since no real global position can
-// exceed such a value.
+// TestLoadFromAll_HugeRevisionIsRefusedNotReplayed covers what an
+// unrepresentable Revision does to LoadFromAll.
 //
-// Instead, LoadFromAll does:
+// Revision is a uint64 and ToRawInt64 returns int64, so any Revision >= 1<<63
+// used to sign-flip negative. Here that turned LoadFromAll's `id > $1` into
+// `id > -1`, which matches every row, so a caller resuming from what it
+// believed was a huge, already-consumed position got the whole store
+// replayed instead.
 //
-//	fromID := version.ToRawInt64()  // int64(uint64) conversion
-//	... WHERE id > $1 ...
-//
-// For any Revision >= 1<<63, ToRawInt64()'s int64(r) conversion produces a
-// negative number. Since every real `id` in the events table is a positive
-// bigserial, "id > <negative>" matches every row - so instead of returning
-// nothing, LoadFromAll silently replays the entire store from the beginning.
-// This is the LoadFromAll sibling of the already-filed
-// eventstore-postgres-loadstreamfrom-huge-revision-replays-entire-stream bug (same root cause,
-// same file, different function - that report only exercises LoadStreamFrom).
-func TestLoadFromAll_HugeRevisionReplaysEntireStoreInsteadOfNothing(t *testing.T) {
+// ToRawInt64 now panics rather than returning a value that means something
+// else, so the replay cannot happen.
+func TestLoadFromAll_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
@@ -337,46 +328,22 @@ func TestLoadFromAll_HugeRevisionReplaysEntireStoreInsteadOfNothing(t *testing.T
 		t.Fatalf("save: %v", err)
 	}
 
-	// A caller believes it has already processed math.MaxUint64 events (far
-	// beyond the 3 actually stored globally) and asks to resume strictly
-	// after that position - it should see nothing new.
-	iter, err := store.LoadFromAll(ctx, cqrs.Revision(math.MaxUint64))
-	if err != nil {
-		t.Fatalf("LoadFromAll: %v", err)
-	}
-	events := collectAll(t, iter)
+	defer assertRevisionOverflowPanic(t, "LoadFromAll(Revision(MaxUint64))")
 
-	if len(events) != 0 {
-		t.Fatalf("documents bug: LoadFromAll(Revision(MaxUint64)) replayed %d event(s) from the "+
-			"beginning of the store instead of returning none (int64(MaxUint64) == -1, so "+
-			"'id > -1' matches every row)", len(events))
+	// The call should panic. If it doesn't, close the iterator so its open
+	// rows don't hold the pool connection that pool.Close in cleanup waits
+	// on, which would hang the run instead of failing it.
+	iter, _ := store.LoadFromAll(ctx, cqrs.Revision(math.MaxUint64))
+	if iter != nil {
+		iter.Close() //nolint:errcheck
 	}
 }
 
-// TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing documents
-// a bug: eventstore.LoadStreamFrom's doc comment says a cqrs.Revision(n) means
-// "events after [position] n are returned" - so a caller who believes it has
-// already processed an enormous number of events (e.g. via an unsigned
-// underflow bug computing n, or simply a corrupted/bogus checkpoint) should,
-// at worst, get an empty iterator back, since no real stream position can
-// exceed such a value.
-//
-// Instead, LoadStreamFrom's default branch does:
-//
-//	fromPos := version.ToRawInt64()  // int64(uint64) conversion
-//	... WHERE stream_position > $2 ...
-//
-// For any Revision >= 1<<63, ToRawInt64()'s int64(r) conversion produces a
-// *negative* number. Since every real stream_position is positive, "stream_position
-// > <negative>" matches every row in the stream - so instead of returning
-// nothing (or erroring), LoadStreamFrom silently replays the *entire* stream
-// from the beginning. This is the opposite of the documented "resume where
-// you left off" semantics and, unlike the already-known sibling issue in
-// eventstore/memory (which panics) and eventstore/file (which returns an
-// empty stream), this manifests as silent full-stream reprocessing - the
-// most dangerous of the three failure modes for a real caller (e.g. a
-// projector replaying every event again from position 0).
-func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testing.T) {
+// TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed is the LoadStreamFrom
+// counterpart of TestLoadFromAll_HugeRevisionIsRefusedNotReplayed: the
+// sign-flipped revision turned `stream_position > $2` into
+// `stream_position > -1` and replayed the entire stream.
+func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
@@ -391,18 +358,28 @@ func TestLoadStreamFrom_HugeRevisionReplaysEntireStreamInsteadOfNothing(t *testi
 		t.Fatalf("save: %v", err)
 	}
 
-	// A caller believes it has already processed math.MaxUint64 events (a
-	// value far beyond the 3 actually stored) and asks to resume strictly
-	// after that position - it should see nothing new.
-	iter, err := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(math.MaxUint64))
-	if err != nil {
-		t.Fatalf("LoadStreamFrom: %v", err)
-	}
-	events := collectAll(t, iter)
+	defer assertRevisionOverflowPanic(t, "LoadStreamFrom(id, Revision(MaxUint64))")
 
-	if len(events) != 0 {
-		t.Fatalf("documents bug: LoadStreamFrom(Revision(MaxUint64)) replayed %d event(s) from the "+
-			"beginning of the stream instead of returning none (int64(MaxUint64) == -1, so "+
-			"'stream_position > -1' matches every row)", len(events))
+	// The call should panic. If it doesn't, close the iterator so its open
+	// rows don't hold the pool connection that pool.Close in cleanup waits
+	// on, which would hang the run instead of failing it.
+	iter, _ := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(math.MaxUint64))
+	if iter != nil {
+		iter.Close() //nolint:errcheck
+	}
+}
+
+// assertRevisionOverflowPanic fails t unless the deferred call it guards
+// panicked with cqrs.Revision's int64 overflow panic. call names the guarded
+// call for the failure message.
+func assertRevisionOverflowPanic(t *testing.T, call string) {
+	t.Helper()
+	r := recover()
+	if r == nil {
+		t.Fatalf("%s did not panic: an unrepresentable revision is being read "+
+			"as a marker value again, which replays events from the beginning", call)
+	}
+	if msg, ok := r.(string); !ok || !strings.Contains(msg, "overflows int64") {
+		t.Fatalf("%s panicked with %v, want the Revision overflow panic", call, r)
 	}
 }
