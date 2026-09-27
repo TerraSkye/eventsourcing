@@ -75,11 +75,6 @@ Then, in rough order of blast radius:
 [postgres](eventbus/postgres/eventbus.go.md) ·
 [kurrentdb](eventbus/kurrentdb/eventbus.go.md)
 
-**logging/** ·
-[command_handler.go](logging/command_handler.go.md) ·
-[event_handler.go](logging/event_handler.go.md) ·
-[query_handler.go](logging/query_handler.go.md)
-
 **otel/** ·
 [otel.go](otel/otel.go.md) ·
 [config.go](otel/config.go.md) ·
@@ -151,10 +146,6 @@ metadata unmarshal failure; `eventstore/file` skips unreadable and undecodable e
 Every `otel` wrapper exists twice with divergent span names, SpanKinds and metrics; `scanEnvelope` is
 byte-identical across `eventstore/postgres` and `eventbus/postgres`; the three `LoadStream*` iterator
 wrappers in `otel/event_store.go`; the two command/query telemetry pairs.
-
-### 10. Structured-log key conventions
-Three schemes across one `logging` package: `aggregateID`, `aggregateId`, `stream-id`.
-[`logging/event_handler.go.md`](logging/event_handler.go.md).
 
 ---
 
