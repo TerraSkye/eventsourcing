@@ -12,6 +12,7 @@ import (
 	"time"
 
 	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	kdbstore "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
 
 	"github.com/cenkalti/backoff/v4"
@@ -413,4 +414,10 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 			"tell it apart from an existing empty stream -- nor from a read that failed "+
 			"partway through", err)
 	}
+}
+
+// TestAcceptance does not Close the store: that would close testDB, which
+// every other test in this package shares.
+func TestAcceptance(t *testing.T) {
+	eventsourcingtest.AcceptanceTest(t, kdbstore.NewEventStore(testDB))
 }
