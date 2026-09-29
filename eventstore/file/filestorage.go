@@ -188,15 +188,18 @@ func (f *FilesStore) streamDir(id string) string {
 
 // Save appends events to the stream they share, enforcing the concurrency
 // check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
-// the stream not to exist yet, [cqrs.StreamExists] requires that it already
-// does, and a [cqrs.Revision] requires the stream's current length to match
-// exactly, returning a [cqrs.StreamRevisionConflictError] on mismatch. Save
+// the stream not to exist yet, failing with [cqrs.ErrStreamExists],
+// [cqrs.StreamExists] requires that it already does, failing with
+// [cqrs.ErrStreamNotFound], and a [cqrs.Revision] requires the stream's
+// current length to match exactly, returning a
+// [cqrs.StreamRevisionConflictError] on mismatch. Save
 // also returns a [cqrs.StreamRevisionConflictError] if the global version it
 // assigns an event collides with one a concurrent writer already claimed
 // (see watchGlobalSequence) — its ActualRevision is then the colliding
 // global version rather than a stream length, but the reaction is the same
 // either way: retry the whole Save. All events must have the same
-// StreamID, or Save returns a non-nil error without appending anything.
+// StreamID, or Save returns an error matching [cqrs.ErrInvalidEventBatch]
+// without appending anything.
 //
 // events is written as a single unit: if any event fails to marshal or
 // write, or its global version collides, every file and symlink already
@@ -221,6 +224,14 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	}
 
 	var streamID = events[0].StreamID
+	for i, env := range events {
+		if env.StreamID != streamID {
+			return cqrs.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has different stream ID %q",
+				streamID, cqrs.ErrInvalidEventBatch, i, env.StreamID,
+			)
+		}
+	}
 	sdir := f.streamDir(streamID)
 
 	f.mu.Lock()
@@ -249,12 +260,12 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		// No concurrency check
 	case cqrs.NoStream:
 		if currentVersion != 0 {
-			err := fmt.Errorf("stream already exists for stream %s", streamID)
+			err := fmt.Errorf("stream %q: already exists: %w", streamID, cqrs.ErrStreamExists)
 			return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 		}
 	case cqrs.StreamExists:
 		if currentVersion == 0 {
-			err := fmt.Errorf("stream does not exist for stream %s", streamID)
+			err := fmt.Errorf("stream %q: does not exist: %w", streamID, cqrs.ErrStreamNotFound)
 			return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 		}
 	case cqrs.Revision:
@@ -267,7 +278,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 				}
 		}
 	default:
-		err := fmt.Errorf("unsupported revision type for stream %s", streamID)
+		err := fmt.Errorf("unsupported revision type for stream %s: %w", streamID, cqrs.ErrInvalidRevision)
 		return cqrs.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
