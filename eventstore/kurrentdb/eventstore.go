@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -68,29 +69,34 @@ func defaultSaveBackoff() backoff.BackOff {
 	return b
 }
 
+// KurrentDB numbers a stream's events from 0 and expresses an append
+// expectation as the number of the stream's last event, where this package
+// numbers them from 1 and a [eventsourcing.Revision] is a count of events.
+// The conversion happens at this boundary only, so every caller sees the
+// same numbering it gets from the memory, file and postgres stores:
+//
+//	Envelope.Version        = EventNumber + 1
+//	Save(Revision(0))       → kurrentdb.NoStream{}
+//	Save(Revision(N))       → kurrentdb.Revision(N - 1)
+//	LoadStreamFrom(Rev(N))  → read from KurrentDB revision N
+//	NextExpectedVersion     = last EventNumber written + 1
+
 // Save appends events to the stream they share, translating revision into
 // the equivalent KurrentDB stream-state expectation: [cqrs.Any] skips the
 // check, [cqrs.NoStream] requires the stream not to exist yet,
 // [cqrs.StreamExists] requires that it already does, and a [cqrs.Revision]
-// requires the stream's current revision to match exactly. All events must
+// of N requires the stream to hold exactly N events. All events must
 // have the same StreamID, or Save returns a non-nil error without contacting
 // the server. The append is retried with backoff on transient gRPC errors
 // (such as those from an in-progress leader election), for up to 30 seconds
 // by default — see [WithBackoff] to override. On success it returns a [cqrs.AppendResult] whose
-// NextExpectedVersion is the stream's new revision as reported by KurrentDB.
+// NextExpectedVersion is the number of events the stream now holds.
 //
 // Failures are reported in this package's error vocabulary: a violated
 // [cqrs.NoStream] expectation matches [cqrs.ErrStreamExists], a violated
-// [cqrs.StreamExists] expectation matches [cqrs.ErrStreamNotFound], and
-// anything else is mapped by [mapError]. The KurrentDB error stays in the
-// chain in every case.
-//
-// TODO: a violated [eventsourcing.Revision] expectation is still reported only as a
-// wrapped client error, not as a [cqrs.StreamRevisionConflictError], so
-// callers that retry on conflict — NewCommandHandler among them — do not
-// recognise it. Translating it needs the stream's actual revision, which the
-// client carries only for its StreamRevisionConflict code and not for the
-// WrongExpectedVersion an ordinary append failure returns.
+// [cqrs.StreamExists] expectation matches [cqrs.ErrStreamNotFound], a
+// violated [cqrs.Revision] is a [cqrs.StreamRevisionConflictError], and
+// anything else is mapped by [mapError].
 func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
@@ -150,7 +156,13 @@ func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	case eventsourcing.StreamExists:
 		streamState = kurrentdb.StreamExists{}
 	case eventsourcing.Revision:
-		streamState = kurrentdb.Revision(uint64(rev.ToRawInt64()))
+		// A stream of N events has N-1 as its last KurrentDB revision, and
+		// a stream of none has no revision at all.
+		if n := uint64(rev.ToRawInt64()); n == 0 {
+			streamState = kurrentdb.NoStream{}
+		} else {
+			streamState = kurrentdb.Revision(n - 1)
+		}
 	default:
 		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, eventsourcing.ErrInvalidRevision)
 		return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, err
@@ -177,12 +189,21 @@ func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	}, expBackoff, func(err error, duration time.Duration) {
 		fmt.Printf("Retry attempt failed for stream %s: %v, retrying in %s", streamID, err, duration)
 	})
-	//todo use the revision here
 
 	if err != nil {
-		// A violated NoStream or StreamExists precondition is reported with
-		// the same sentinel the other implementations use, so callers can
-		// match it without knowing which store is underneath.
+		// A violated expectation is reported the way the other
+		// implementations report it, so callers can match it without
+		// knowing which store is underneath.
+		if isWrongExpectedVersion(err) {
+			if rev, ok := revision.(eventsourcing.Revision); ok {
+				return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+					&eventsourcing.StreamRevisionConflictError{
+						Stream:           streamID,
+						ExpectedRevision: rev,
+						ActualRevision:   e.currentRevision(ctx, streamID),
+					}
+			}
+		}
 		if expectation := expectationError(streamID, revision, err); expectation != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, expectation
 		}
@@ -194,9 +215,36 @@ func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	return eventsourcing.AppendResult{
 		Successful:          true,
 		StreamID:            streamID,
-		NextExpectedVersion: result.NextExpectedVersion,
+		NextExpectedVersion: result.NextExpectedVersion + 1,
 	}, nil
 
+}
+
+// currentRevision returns the number of events stream streamID holds, as a
+// [eventsourcing.Revision], by reading its last event. It is only called
+// after a failed append, to fill in a conflict's ActualRevision, so the
+// count may already be newer than the one the append was rejected against.
+// It returns nil if the read fails; [eventsourcing.StreamRevisionConflictError]
+// renders a nil revision without trouble.
+func (e eventstore) currentRevision(ctx context.Context, streamID string) eventsourcing.StreamState {
+	streamer, err := e.client.ReadStream(ctx, streamID, kurrentdb.ReadStreamOptions{
+		Direction: kurrentdb.Backwards,
+		From:      kurrentdb.End{},
+	}, 1)
+	if err != nil {
+		return nil
+	}
+	defer streamer.Close()
+
+	kEvent, err := streamer.Recv()
+	switch {
+	case err == nil:
+		return eventsourcing.Revision(kEvent.OriginalEvent().EventNumber + 1)
+	case isNotFound(err):
+		return eventsourcing.Revision(0)
+	default:
+		return nil
+	}
 }
 
 // LoadStream returns a lazy iterator over all events in the stream
@@ -210,145 +258,73 @@ func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 // requested. Every other failure reaches Err too, mapped through
 // [mapError]; only a genuine end of stream ends iteration with a nil Err.
 func (e eventstore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
-		Direction:      kurrentdb.Forwards,
-		From:           kurrentdb.Start{},
-		ResolveLinkTos: true,
-	}, readToEnd)
-
-	if err != nil {
-		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
-	}
-
-	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
-		kEvent, err := streamer.Recv()
-		if err != nil {
-			// mapError passes io.EOF through untouched, so a clean end of
-			// stream still ends iteration successfully; everything else —
-			// a missing stream, a dropped connection — surfaces through Err.
-			return nil, mapError(fmt.Sprintf("load stream %q", id), err)
-		}
-
-		// Convert KurrentDB event to cqrs.EventData
-		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
-		if err != nil {
-			// Wrap and propagate as EventStoreError
-			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
-		}
-
-		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
-		}
-
-		var metadata map[string]any
-		if err := json.Unmarshal(kEvent.Event.UserMetadata, &metadata); err != nil {
-			metadata = make(map[string]any) // fallback to empty map
-		}
-
-		envelope := &eventsourcing.Envelope{
-			EventID:       kEvent.Event.EventID,
-			StreamID:      kEvent.Event.StreamID,
-			Event:         ev,
-			Metadata:      metadata,
-			Version:       kEvent.Event.EventNumber,
-			GlobalVersion: kEvent.Event.Position.Commit,
-			OccurredAt:    kEvent.Event.CreatedDate,
-		}
-
-		return envelope, nil
-	}, func() error {
-		// The iterator owns the read stream: closing it releases the
-		// client's subscription, whether iteration ran to the end or the
-		// caller stopped early.
-		streamer.Close()
-		return nil
-	})
-
-	return iter, nil
+	return e.LoadStreamFrom(ctx, id, eventsourcing.StreamExists{})
 }
 
 // LoadStreamFrom returns a lazy iterator over the events in the stream
-// identified by id, starting at the position identified by version. Only a
-// positive [cqrs.Revision] changes the starting point; version.ToRawInt64()
-// <= 0 — which includes [cqrs.NoStream], [cqrs.StreamExists], [cqrs.Any],
-// and a zero [cqrs.Revision] — all read from the beginning of the stream.
-// Unlike the memory, file, and postgres implementations of this interface,
-// cqrs.NoStream and cqrs.StreamExists are not enforced as existence
-// preconditions here.
+// identified by id, starting after the position identified by version. A
+// [cqrs.Revision] of N skips the stream's first N events, so a caller that
+// has already consumed N events resumes exactly where it left off;
+// [cqrs.Any] reads from the beginning. [cqrs.StreamExists] also reads from
+// the beginning but requires the stream to exist, and [cqrs.NoStream]
+// requires that it does not.
 //
-// Consistent with not enforcing those preconditions, a stream that does not
-// exist is an empty read rather than a failure — the same treatment Any{}
-// gets in the memory and file implementations, and what lets a command
-// handler load a brand-new aggregate. Every other failure ends iteration
-// with an error, mapped through [mapError]; use [LoadStream] when a missing
-// stream should be reported as [cqrs.ErrStreamNotFound].
+// Because the read is lazy, a violated precondition is reported through the
+// iterator's Err rather than by LoadStreamFrom itself: a missing stream
+// under StreamExists matches [cqrs.ErrStreamNotFound], and an existing one
+// under NoStream matches [cqrs.ErrStreamExists]. Under Any or a Revision a
+// missing stream is an empty read, which is what lets a command handler
+// load a brand-new aggregate. Every other failure ends iteration with an
+// error, mapped through [mapError].
 func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	// cqrs.Revision(N) means "N events already consumed, resume strictly
-	// after N" — the same "exclusive" contract eventstore/memory and
-	// eventstore/file both implement — but kurrentdb.StreamRevision{Value: N}
-	// is KurrentDB's native, inclusive-of-N read position. Add 1 to convert
-	// between the two conventions; Revision(0) still falls through to
-	// kurrentdb.Start{} below, which already means the same thing.
-	var from kurrentdb.StreamPosition
-	if version.ToRawInt64() > 0 {
-		from = kurrentdb.StreamRevision{
-			Value: uint64(version.ToRawInt64()) + 1,
+	var (
+		from           kurrentdb.StreamPosition = kurrentdb.Start{}
+		missingIsEmpty                          = true
+		mustNotExist                            = false
+	)
+	switch v := version.(type) {
+	case eventsourcing.Any:
+	case eventsourcing.NoStream:
+		mustNotExist = true
+	case eventsourcing.StreamExists:
+		missingIsEmpty = false
+	case eventsourcing.Revision:
+		// Revision(N) means "N events already consumed". The next one is
+		// the stream's (N+1)th event, which KurrentDB numbers N.
+		if n := v.ToRawInt64(); n > 0 {
+			from = kurrentdb.StreamRevision{Value: uint64(n)}
 		}
-	} else {
-		from = kurrentdb.Start{}
+	default:
+		return nil, fmt.Errorf("load stream %q: unsupported stream state %T: %w", id, version, eventsourcing.ErrInvalidRevision)
 	}
 
-	opt := kurrentdb.ReadStreamOptions{
+	op := fmt.Sprintf("load stream %q", id)
+
+	streamer, err := e.client.ReadStream(ctx, id, kurrentdb.ReadStreamOptions{
 		Direction:      kurrentdb.Forwards,
 		From:           from,
 		ResolveLinkTos: true,
-	}
-	streamer, err := e.client.ReadStream(ctx, id, opt, readToEnd)
-
+	}, readToEnd)
 	if err != nil {
-		return nil, mapError(fmt.Sprintf("load stream %q", id), err)
+		return nil, mapError(op, err)
 	}
 
 	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		kEvent, err := streamer.Recv()
 		if err != nil {
-			// This method does not enforce existence preconditions, so an
-			// absent stream is an empty read, not a failure. The client
-			// reports it from the first Recv rather than from opening the
-			// read, which is why it is caught here.
-			if isNotFound(err) {
+			// The client reports a missing stream from the first Recv
+			// rather than from opening the read, which is why it is caught
+			// here. mapError passes io.EOF through untouched, so a clean
+			// end of stream still ends iteration successfully.
+			if missingIsEmpty && isNotFound(err) {
 				return nil, io.EOF
 			}
-			return nil, mapError(fmt.Sprintf("load stream %q", id), err)
+			return nil, mapError(op, err)
 		}
-
-		// Convert KurrentDB event to cqrs.EventData
-		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
-		if err != nil {
-			// Wrap and propagate as EventStoreError
-			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
+		if mustNotExist {
+			return nil, fmt.Errorf("%s: expected empty stream: %w", op, eventsourcing.ErrStreamExists)
 		}
-
-		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
-		}
-
-		var metadata map[string]any
-		if err := json.Unmarshal(kEvent.Event.UserMetadata, &metadata); err != nil {
-			metadata = make(map[string]any) // fallback to empty map
-		}
-
-		envelope := &eventsourcing.Envelope{
-			EventID:       kEvent.Event.EventID,
-			StreamID:      kEvent.Event.StreamID,
-			Event:         ev,
-			Metadata:      metadata,
-			Version:       kEvent.Event.EventNumber,
-			GlobalVersion: kEvent.Event.Position.Commit,
-			OccurredAt:    kEvent.Event.CreatedDate,
-		}
-
-		return envelope, nil
+		return toEnvelope(kEvent.Event)
 	}, func() error {
 		// The iterator owns the read stream: closing it releases the
 		// client's subscription, whether iteration ran to the end or the
@@ -361,19 +337,33 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version event
 }
 
 // LoadFromAll returns a lazy iterator over every event across all streams,
-// in the global order KurrentDB stored them.
+// in the global order KurrentDB stored them, starting after the position
+// identified by version. A [cqrs.Revision] is a GlobalVersion — the commit
+// position of an event this store returned — and the read resumes strictly
+// after that event; every other [cqrs.StreamState] reads from the
+// beginning.
 //
-// TODO: version is accepted but never used — every call reads from the very
-// beginning of the $all stream regardless of the position passed in, so
-// there is currently no way to resume a previous LoadFromAll from where it
-// left off (already flagged in the code below).
+// KurrentDB's own records in $all — events in system streams, and event
+// types starting with "$", such as $metadata and link events — are skipped:
+// they are not application events, and no application registers them.
+// Links are not resolved either, so an event reached through a link is not
+// returned a second time.
 func (e eventstore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	//TODO fix `from`
+	var (
+		from  kurrentdb.AllPosition = kurrentdb.Start{}
+		after uint64
+	)
+	if rev, ok := version.(eventsourcing.Revision); ok {
+		if after = uint64(rev.ToRawInt64()); after > 0 {
+			// KurrentDB includes the event at the position it is asked to
+			// read from; that event is skipped below.
+			from = kurrentdb.Position{Commit: after, Prepare: after}
+		}
+	}
 
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
-		Direction:      kurrentdb.Forwards,
-		From:           kurrentdb.Start{},
-		ResolveLinkTos: true,
+		Direction: kurrentdb.Forwards,
+		From:      from,
 	}, readToEnd)
 
 	if err != nil {
@@ -381,40 +371,19 @@ func (e eventstore) LoadFromAll(ctx context.Context, version eventsourcing.Strea
 	}
 
 	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
-		kEvent, err := streamer.Recv()
-		if err != nil {
-			// io.EOF signals a normal end of stream and passes through
-			// mapError untouched; any other error is a genuine failure.
-			return nil, mapError("load from all", err)
+		for {
+			kEvent, err := streamer.Recv()
+			if err != nil {
+				// io.EOF signals a normal end of stream and passes through
+				// mapError untouched; any other error is a genuine failure.
+				return nil, mapError("load from all", err)
+			}
+			rec := kEvent.Event
+			if isSystemRecord(rec) || (after > 0 && rec.Position.Commit <= after) {
+				continue
+			}
+			return toEnvelope(rec)
 		}
-
-		// Convert KurrentDB event to cqrs.EventData
-		ev, err := eventsourcing.NewEventByName(kEvent.Event.EventType)
-		if err != nil {
-			// Wrap and propagate as EventStoreError
-			return nil, fmt.Errorf("cannot create event %q: %w", kEvent.Event.EventType, err)
-		}
-
-		if err := json.Unmarshal(kEvent.Event.Data, ev); err != nil {
-			return nil, fmt.Errorf("cannot unmarshal event %q: %w", kEvent.Event.EventType, err)
-		}
-
-		var metadata map[string]any
-		if err := json.Unmarshal(kEvent.Event.UserMetadata, &metadata); err != nil {
-			metadata = make(map[string]any) // fallback to empty map
-		}
-
-		envelope := &eventsourcing.Envelope{
-			EventID:       kEvent.Event.EventID,
-			StreamID:      kEvent.Event.StreamID,
-			Event:         ev,
-			Metadata:      metadata,
-			Version:       kEvent.Event.EventNumber,
-			GlobalVersion: kEvent.Event.Position.Commit,
-			OccurredAt:    kEvent.Event.CreatedDate,
-		}
-
-		return envelope, nil
 	}, func() error {
 		// The iterator owns the read stream: closing it releases the
 		// client's subscription, whether iteration ran to the end or the
@@ -424,6 +393,42 @@ func (e eventstore) LoadFromAll(ctx context.Context, version eventsourcing.Strea
 	})
 
 	return iter, nil
+}
+
+// isSystemRecord reports whether rec is one of KurrentDB's own records
+// rather than an application event: anything in a system stream, or of a
+// system event type such as $metadata or the $> of a link.
+func isSystemRecord(rec *kurrentdb.RecordedEvent) bool {
+	return strings.HasPrefix(rec.StreamID, "$") || strings.HasPrefix(rec.EventType, "$")
+}
+
+// toEnvelope decodes rec into an [eventsourcing.Envelope], converting
+// KurrentDB's 0-based EventNumber into the 1-based Version the package
+// uses.
+func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
+	ev, err := eventsourcing.NewEventByName(rec.EventType)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create event %q: %w", rec.EventType, err)
+	}
+
+	if err := json.Unmarshal(rec.Data, ev); err != nil {
+		return nil, fmt.Errorf("cannot unmarshal event %q: %w", rec.EventType, err)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil {
+		metadata = make(map[string]any) // fallback to empty map
+	}
+
+	return &eventsourcing.Envelope{
+		EventID:       rec.EventID,
+		StreamID:      rec.StreamID,
+		Event:         ev,
+		Metadata:      metadata,
+		Version:       rec.EventNumber + 1,
+		GlobalVersion: rec.Position.Commit,
+		OccurredAt:    rec.CreatedDate,
+	}, nil
 }
 
 // Close closes the underlying KurrentDB client connection.

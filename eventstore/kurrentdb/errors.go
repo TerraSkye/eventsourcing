@@ -87,30 +87,31 @@ func isNotFound(err error) bool {
 	return errors.As(err, &kErr) && kErr.IsErrorCode(kurrentdb.ErrorCodeResourceNotFound)
 }
 
+// isWrongExpectedVersion reports whether err is the client's failed
+// optimistic-concurrency check on an append.
+func isWrongExpectedVersion(err error) bool {
+	var kErr *kurrentdb.Error
+	if !errors.As(err, &kErr) {
+		return false
+	}
+	switch kErr.Code() {
+	case kurrentdb.ErrorCodeWrongExpectedVersion,
+		kurrentdb.ErrorCodeStreamRevisionConflict:
+		return true
+	default:
+		return false
+	}
+}
+
 // expectationError translates a failed optimistic-concurrency check on Save
 // into the error the caller's own expectation implies, so that violating a
 // [cqrs.NoStream] or [cqrs.StreamExists] precondition reports the same
 // sentinel here as it does in eventstore/memory and eventstore/file. It
 // returns nil when err is not a concurrency failure, or when the expectation
-// was a [cqrs.Revision].
-//
-// A Revision mismatch is deliberately left to the caller of this function:
-// reporting it faithfully means returning a
-// [cqrs.StreamRevisionConflictError], which needs the stream's actual
-// revision, and the client only carries that for
-// [kurrentdb.ErrorCodeStreamRevisionConflict] — not for the
-// [kurrentdb.ErrorCodeWrongExpectedVersion] an ordinary append failure
-// produces, where it appears only inside the message text. See
-// .bug/eventstore-kurrentdb-save-revision-conflict-not-translated.md.
+// was a [cqrs.Revision], which Save reports as a
+// [cqrs.StreamRevisionConflictError] itself.
 func expectationError(streamID string, revision eventsourcing.StreamState, err error) error {
-	var kErr *kurrentdb.Error
-	if !errors.As(err, &kErr) {
-		return nil
-	}
-	switch kErr.Code() {
-	case kurrentdb.ErrorCodeWrongExpectedVersion,
-		kurrentdb.ErrorCodeStreamRevisionConflict:
-	default:
+	if !isWrongExpectedVersion(err) {
 		return nil
 	}
 
