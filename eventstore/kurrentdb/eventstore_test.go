@@ -1,10 +1,11 @@
+//go:build integration
+
 package kurrentdb_test
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -104,7 +105,7 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	ctx := context.Background()
 	streamID := "check-inclusive"
 
-	// Save 3 events (native KurrentDB revisions 0, 1, 2).
+	// Save 3 events (Versions 1, 2, 3; native KurrentDB revisions 0, 1, 2).
 	for i := 0; i < 3; i++ {
 		_, err := store.Save(ctx, []cqrs.Envelope{{
 			StreamID:   streamID,
@@ -128,10 +129,10 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	if len(all) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(all))
 	}
-	lastVersion := all[len(all)-1].Version // native EventNumber = 2
+	lastVersion := all[len(all)-1].Version // 3, native EventNumber 2
 
 	// Retry: resume from the last consumed revision. Since all 3 events
-	// (indices 0,1,2) were already evolved, this MUST yield zero events.
+	// were already evolved, this MUST yield zero events.
 	iter, err = store.LoadStreamFrom(ctx, streamID, cqrs.Revision(lastVersion))
 	if err != nil {
 		t.Fatalf("resume load: %v", err)
@@ -182,13 +183,12 @@ func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
 
 	select {
 	case <-done:
-		// The point of this test is that the drain loop terminates at all
-		// (the bug was that it never did). $all also carries KurrentDB's own
-		// internal events (e.g. "$metadata"), which this store's registry
-		// was never meant to decode, so a non-EOF error here is expected and
-		// not itself a failure — only a timeout is.
-		if err := iter.Err(); err != nil && !errors.Is(err, io.EOF) {
-			t.Logf("iterator ended with a non-EOF error (expected for unregistered system events in $all): %v", err)
+		// The drain loop terminating at all is the point of this test (the
+		// bug was that it never did). It must also end cleanly: $all carries
+		// KurrentDB's own records, such as $metadata, which LoadFromAll
+		// skips rather than failing to decode.
+		if err := iter.Err(); err != nil {
+			t.Fatalf("iterator ended with an error: %v", err)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatalf("LoadFromAll's iterator did not terminate within 15s after exhausting the $all stream: " +
