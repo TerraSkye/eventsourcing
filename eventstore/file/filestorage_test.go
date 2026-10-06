@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/eventsourcingtest"
 )
 
 type allCollisionEvent struct {
@@ -580,5 +581,138 @@ func TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
 
 	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
 		t.Errorf("LoadFromAll order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
+	}
+}
+
+func TestAcceptance(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	eventsourcingtest.AcceptanceTest(t, store)
+}
+
+type aliasChannelTestEvent struct {
+	ID    string
+	Value string
+}
+
+func (e aliasChannelTestEvent) AggregateID() string { return e.ID }
+func (e aliasChannelTestEvent) EventType() string   { return "aliasChannelTestEvent" }
+
+// TestFilesStore_EventsChannelAliasesCallerSlice checks that envelopes
+// delivered on Events() are not affected by the caller reusing the slice it
+// passed to Save.
+func TestFilesStore_EventsChannelAliasesCallerSlice(t *testing.T) {
+	dir, err := os.MkdirTemp("", "filestore-alias")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	store, err := NewFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// A single-element buffer reused across independent Save calls, as a
+	// caller might do to avoid allocating a new slice per aggregate.
+	buf := make([]cqrs.Envelope, 1)
+
+	for i, id := range []string{"agg-1", "agg-2", "agg-3"} {
+		buf[0] = cqrs.Envelope{
+			StreamID: id,
+			Event:    aliasChannelTestEvent{ID: id, Value: id},
+			Version:  uint64(i),
+		}
+		if _, err := store.Save(ctx, buf, cqrs.NoStream{}); err != nil {
+			t.Fatalf("save %q failed: %v", id, err)
+		}
+	}
+
+	// Drain the Events() channel after all Save calls; if it aliases the
+	// caller's reused buffer, every received envelope reflects the LAST
+	// Save call's data instead of its own, even though the on-disk copy
+	// (written via json.Marshal before this loop runs) is unaffected.
+	for _, want := range []string{"agg-1", "agg-2", "agg-3"} {
+		select {
+		case env := <-store.Events():
+			got := env.Event.(aliasChannelTestEvent).Value
+			if got != want {
+				t.Errorf("expected event value %q, got %q (StreamID recorded as %q)", want, got, env.StreamID)
+			}
+		default:
+			t.Fatalf("expected an event on the bus for %q", want)
+		}
+	}
+}
+
+// TestSave_UnreadableStreamDirBypassesConcurrencyCheck is a regression test
+// for GitHub issue #144: Save discarded the error from listing the stream
+// directory and read a failed listing as an empty stream. A directory that
+// can be written but not listed then let a NoStream{} append through against
+// a stream that already had events, overwriting the event on disk that
+// shared its Version.
+func TestSave_UnreadableStreamDirBypassesConcurrencyCheck(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test relies on permission enforcement; not meaningful running as root")
+	}
+
+	ctx := context.Background()
+
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer store.Close()
+
+	streamID := "cart-1"
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		envelopeFor(streamID, 0, "first"),
+	}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("setup save: %v", err)
+	}
+
+	// Write and execute without read: files can still be created in the
+	// directory, but it cannot be listed.
+	sdir := store.streamDir(streamID)
+	if err := os.Chmod(sdir, 0o300); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sdir, 0o755) }) // let TempDir cleanup walk it again
+
+	if _, err := os.ReadDir(sdir); err == nil {
+		t.Fatalf("expected ReadDir to fail with the directory at 0300, got no error")
+	}
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		envelopeFor(streamID, 0, "second"),
+	}, cqrs.NoStream{}); err == nil {
+		t.Fatalf("Save with NoStream{} against an existing (but unlistable) stream unexpectedly succeeded")
+	}
+
+	if err := os.Chmod(sdir, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	it, err := store.LoadStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	var got []string
+	for it.Next() {
+		got = append(got, it.Value().Event.(*allCollisionEvent).Name)
+	}
+	if err := it.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	if len(got) != 1 || got[0] != "first" {
+		t.Fatalf("stream events = %v, want [first]", got)
 	}
 }

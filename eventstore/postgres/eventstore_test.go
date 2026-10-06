@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	pgstore "github.com/terraskye/eventsourcing/eventstore/postgres"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -382,4 +383,8 @@ func assertRevisionOverflowPanic(t *testing.T, call string) {
 	if msg, ok := r.(string); !ok || !strings.Contains(msg, "overflows int64") {
 		t.Fatalf("%s panicked with %v, want the Revision overflow panic", call, r)
 	}
+}
+
+func TestAcceptance(t *testing.T) {
+	eventsourcingtest.AcceptanceTest(t, pgstore.NewEventStore(newPool(t)))
 }
