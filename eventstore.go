@@ -69,4 +69,9 @@ type AppendResult struct {
 	// NextExpectedVersion is the version the stream's next [Revision] should
 	// use.
 	NextExpectedVersion uint64
+	// GlobalVersion is the [Envelope.GlobalVersion] of the last event
+	// appended, or 0 if nothing was appended or the store does not report
+	// it. Pass it to projection.Runner.WaitUntil to wait until a
+	// projection reflects this append.
+	GlobalVersion uint64
 }
