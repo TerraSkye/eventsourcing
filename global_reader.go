@@ -76,6 +76,15 @@ type ReadResult struct {
 //     Stores where positions can become visible out of order (a SQL
 //     sequence assigned before commit, for example) must hide events until
 //     every lower position is either committed or permanently abandoned.
+//     In PostgreSQL, a bigserial position is assigned at INSERT but visible
+//     at COMMIT, so 102 can become visible before 101. Filtering on
+//     pg_snapshot_xmin alone does not fix that for a single position: a
+//     transaction with a lower ID can hold a higher position. Either make
+//     positions visible in order (assign them under a transaction-scoped
+//     advisory lock taken by every append, so appends commit in position
+//     order), or order the log by (transaction ID, position) and only read
+//     transactions older than pg_snapshot_xmin(pg_current_snapshot()), in
+//     which case GlobalVersion must be assigned in that order too.
 //   - Progress: if AtEnd is false, Next is greater than after.
 //   - Exclusive start: ReadAll(ctx, n, ...) never returns the event at
 //     position n itself. GlobalVersion 0 is never assigned to an event, so

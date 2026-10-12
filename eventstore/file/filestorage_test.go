@@ -385,57 +385,6 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_RevisionAtHead is the LoadFromAll counterpart of
-// TestLoadStreamFrom_RevisionAtStreamHead: the same off-by-one guard backs
-// both, so it affects global-log reads too.
-func TestLoadFromAll_RevisionAtHead(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		eventCount int
-	}{
-		{name: "empty store, position 0", eventCount: 0},
-		{name: "two events, position 2", eventCount: 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			store, err := NewFileStore(dir)
-			if err != nil {
-				t.Fatalf("NewFileStore: %v", err)
-			}
-			defer store.Close()
-
-			for i := 0; i < tt.eventCount; i++ {
-				if _, err := store.Save(ctx, []cqrs.Envelope{
-					envelopeFor("order-1", uint64(i), "item"),
-				}, cqrs.Any{}); err != nil {
-					t.Fatalf("setup save: %v", err)
-				}
-			}
-
-			iter, err := store.LoadFromAll(ctx, cqrs.Revision(tt.eventCount))
-			if err != nil {
-				t.Fatalf("LoadFromAll(Revision(%d)) with %d events stored: "+
-					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
-			}
-
-			count := 0
-			for iter.Next() {
-				count++
-			}
-			if err := iter.Err(); err != nil {
-				t.Fatalf("iterator error: %v", err)
-			}
-			if count != 0 {
-				t.Errorf("expected 0 events past the head, got %d", count)
-			}
-		})
-	}
-}
-
 // TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent documents a bug: unlike
 // [eventstore/memory.MemoryStore] and [eventstore/postgres]'s implementation
 // of the same [cqrs.EventStore] interface, FilesStore.LoadStreamFrom treats
@@ -540,11 +489,11 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 	}
 }
 
-// TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder is the LoadFromAll
+// TestReadAll_GlobalVersionAbove9999999999KeepsOrder is the ReadAll
 // counterpart of TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents:
 // allDir's symlinks are named after GlobalVersion by the same format, so the
 // global log had the same ordering bug once it crossed 10 digits.
-func TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
+func TestReadAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
 	ctx := context.Background()
 
 	store, err := NewFileStore(t.TempDir())
@@ -566,21 +515,18 @@ func TestLoadFromAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
 		t.Fatalf("save 2: %v", err)
 	}
 
-	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
+	res, err := store.ReadAll(ctx, 0, cqrs.ReadOptions{})
 	if err != nil {
-		t.Fatalf("LoadFromAll: %v", err)
+		t.Fatalf("ReadAll: %v", err)
 	}
 
 	var versions []uint64
-	for iter.Next() {
-		versions = append(versions, iter.Value().GlobalVersion)
-	}
-	if err := iter.Err(); err != nil {
-		t.Fatalf("iterator error: %v", err)
+	for _, env := range res.Events {
+		versions = append(versions, env.GlobalVersion)
 	}
 
 	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
-		t.Errorf("LoadFromAll order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
+		t.Errorf("ReadAll order = %v, want [9999999999 10000000000] (events in the order they were appended)", versions)
 	}
 }
 
@@ -592,6 +538,16 @@ func TestAcceptance(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	eventsourcingtest.AcceptanceTest(t, store)
+}
+
+func TestGlobalReaderAcceptance(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }
 
 type aliasChannelTestEvent struct {

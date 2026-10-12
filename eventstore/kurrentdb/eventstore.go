@@ -3,6 +3,7 @@ package kurrentdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -14,6 +15,11 @@ import (
 	"github.com/terraskye/eventsourcing"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+var (
+	_ eventsourcing.EventStore   = eventstore{}
+	_ eventsourcing.GlobalReader = eventstore{}
 )
 
 // eventstore is a KurrentDB-backed [cqrs.EventStore], delegating stream
@@ -336,63 +342,129 @@ func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version event
 	return iter, nil
 }
 
-// LoadFromAll returns a lazy iterator over every event across all streams,
-// in the global order KurrentDB stored them, starting after the position
-// identified by version. A [cqrs.Revision] is a GlobalVersion — the commit
-// position of an event this store returned — and the read resumes strictly
-// after that event; every other [cqrs.StreamState] reads from the
-// beginning.
+// scanLimit caps how many $all records one ReadAll call looks at when a
+// filter matches rarely. The KurrentDB client cannot filter a plain read
+// server-side, so filtering happens here, and without a cap a selective
+// filter would scan the whole log in one call. Hitting the cap returns a
+// page that may be empty but has moved Next forward, as the
+// [eventsourcing.GlobalReader] contract allows.
+const scanLimit = 4096
+
+// ReadAll implements [eventsourcing.GlobalReader] over $all. GlobalVersion
+// is an event's commit position.
 //
 // KurrentDB's own records in $all — events in system streams, and event
 // types starting with "$", such as $metadata and link events — are skipped:
 // they are not application events, and no application registers them.
 // Links are not resolved either, so an event reached through a link is not
-// returned a second time.
-func (e eventstore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	var (
-		from  kurrentdb.AllPosition = kurrentdb.Start{}
-		after uint64
-	)
-	if rev, ok := version.(eventsourcing.Revision); ok {
-		if after = uint64(rev.ToRawInt64()); after > 0 {
-			// KurrentDB includes the event at the position it is asked to
-			// read from; that event is skipped below.
-			from = kurrentdb.Position{Commit: after, Prepare: after}
-		}
+// returned a second time. Skipped records still move Next forward.
+//
+// KurrentDB only makes a position readable once everything before it is,
+// so reading $all is gap-free without further work.
+func (e eventstore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	types := make(map[string]bool, len(opts.EventTypes))
+	for _, t := range opts.EventTypes {
+		types[t] = true
 	}
 
+	var from kurrentdb.AllPosition = kurrentdb.Start{}
+	if after > 0 {
+		// KurrentDB includes the record at the position it is asked to read
+		// from; records up to after are skipped below.
+		from = kurrentdb.Position{Commit: after, Prepare: after}
+	}
+
+	// Read without a count (see readToEnd) and stop by closing the stream,
+	// so that the end of the read is always the end of $all and AtEnd can
+	// be told apart from running out of budget.
+	scan := max(limit, scanLimit)
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
 		Direction: kurrentdb.Forwards,
 		From:      from,
 	}, readToEnd)
-
 	if err != nil {
-		return nil, mapError("load from all", err)
+		return eventsourcing.ReadResult{}, mapError("read all", err)
 	}
+	defer streamer.Close()
 
-	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
-		for {
-			kEvent, err := streamer.Recv()
-			if err != nil {
-				// io.EOF signals a normal end of stream and passes through
-				// mapError untouched; any other error is a genuine failure.
-				return nil, mapError("load from all", err)
-			}
-			rec := kEvent.Event
-			if isSystemRecord(rec) || (after > 0 && rec.Position.Commit <= after) {
-				continue
-			}
-			return toEnvelope(rec)
+	res := eventsourcing.ReadResult{Next: after}
+	scanned := 0
+	for {
+		kEvent, err := streamer.Recv()
+		if errors.Is(err, io.EOF) {
+			res.AtEnd = true
+			return res, nil
 		}
-	}, func() error {
-		// The iterator owns the read stream: closing it releases the
-		// client's subscription, whether iteration ran to the end or the
-		// caller stopped early.
-		streamer.Close()
-		return nil
-	})
+		if err != nil {
+			return eventsourcing.ReadResult{}, mapError("read all", err)
+		}
+		rec := kEvent.Event
+		if rec.Position.Commit <= after {
+			continue
+		}
+		scanned++
+		if scanned > scan || len(res.Events) == limit {
+			// There is more after what this page covers.
+			return res, nil
+		}
+		res.Next = rec.Position.Commit
+		if isSystemRecord(rec) {
+			continue
+		}
+		if len(types) > 0 && !types[rec.EventType] {
+			continue
+		}
+		if !hasPrefix(rec.StreamID, opts.StreamPrefixes) {
+			continue
+		}
+		env, err := toEnvelope(rec)
+		if err != nil {
+			return eventsourcing.ReadResult{}, fmt.Errorf("read all: %w", err)
+		}
+		res.Events = append(res.Events, env)
+	}
+}
 
-	return iter, nil
+// Head implements [eventsourcing.GlobalReader]: the commit position of the
+// newest application event in $all, skipping KurrentDB's own records the
+// way ReadAll does, or 0 if there is none.
+func (e eventstore) Head(ctx context.Context) (uint64, error) {
+	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
+		Direction: kurrentdb.Backwards,
+		From:      kurrentdb.End{},
+	}, readToEnd)
+	if err != nil {
+		return 0, mapError("head", err)
+	}
+	defer streamer.Close()
+	for {
+		kEvent, err := streamer.Recv()
+		if errors.Is(err, io.EOF) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, mapError("head", err)
+		}
+		if !isSystemRecord(kEvent.Event) {
+			return kEvent.Event.Position.Commit, nil
+		}
+	}
+}
+
+func hasPrefix(streamID string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(streamID, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // isSystemRecord reports whether rec is one of KurrentDB's own records
