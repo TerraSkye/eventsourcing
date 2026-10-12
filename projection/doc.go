@@ -175,4 +175,23 @@
 // When the checkpoint store implements [StatusStore], the active runner
 // publishes its [Status] there, so other processes can follow it; see
 // [Remote].
+//
+// # Scaling out
+//
+// A projection that one instance cannot keep up with is split into
+// partitions with [WithPartitions]. Each event goes to the partition its
+// key maps to, the instances share the partitions between them through a
+// [LeaseStore], and every partition keeps its own checkpoint, fenced so
+// that an instance that lost a partition can never commit to it again:
+//
+//	orderSummaries := projection.NewRunner("order-summaries-v1", projector.EventHandlers(), store,
+//		projection.WithCheckpoints(checkpoints),
+//		projection.WithPartitions(64, projection.ByStreamID, postgres.NewLeases(pool)),
+//		projection.WithMember(os.Getenv("POD_NAME")),
+//	)
+//
+// Handlers are the same as for an unpartitioned projection, as long as no
+// two partitions write the same read-model row; see [PartitionKey]. Adding
+// or removing instances moves partitions between them, and a partitioned
+// projection is rebuilt under a new name rather than in place.
 package projection

@@ -82,8 +82,27 @@ type Status struct {
 	LastError string
 
 	// Owner identifies the instance running the projection, as reported by
-	// the [Locker]; "" when there is no locker.
+	// the [Locker] or set with [WithMember]; "" when there is neither.
 	Owner string
+
+	// Partitions is the projection's number of partitions, or 0 when it is
+	// not partitioned; see [WithPartitions].
+	Partitions int
+
+	// Partition is the partition this status describes. It is only
+	// meaningful in a status saved through [StatusStore.SaveStatus] by a
+	// partitioned runner.
+	//
+	// A status that covers the whole partitioned projection, as returned by
+	// [StatusStore.LoadStatus] and [Runner.Status], combines its partitions
+	// instead: Phase is the furthest-behind phase of any partition (Stalled,
+	// then Starting, CatchingUp, Live), Position the lowest checkpoint, Age
+	// the oldest status, and Skipped their sum.
+	Partition int
+
+	// Owned lists the partitions this instance runs, in a status returned by
+	// [Runner.Status] on a partitioned runner.
+	Owned []int
 
 	// Age is how long ago this status was published, measured by the
 	// store's own clock so that clock differences between machines do not

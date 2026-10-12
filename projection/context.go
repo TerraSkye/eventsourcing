@@ -7,6 +7,7 @@ type ctxKey int
 const (
 	replayingKey ctxKey = iota
 	bufferKey
+	partitionCtxKey
 )
 
 // IsReplaying reports whether the event being handled under ctx is being
