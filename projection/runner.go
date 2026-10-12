@@ -9,10 +9,6 @@ import (
 	"github.com/terraskye/eventsourcing"
 )
 
-// errNotImplemented marks the parts of this package that are still a
-// design draft: signatures and documentation only.
-var errNotImplemented = errors.New("projection: not implemented yet")
-
 var (
 	// ErrNotActive is returned by [Runner.Rebuild] when this instance is not
 	// the one running the projection, either because [Runner.Run] has not
@@ -59,6 +55,8 @@ type Runner struct {
 	// Set for a runner created with WithPartitions.
 	disp *dispatcher
 	part partitioned
+
+	one single
 }
 
 // NewRunner creates a Runner for the projection called name, which routes
@@ -100,6 +98,9 @@ func NewRunner(name string, handlers Router, store eventsourcing.GlobalReader, o
 		panic(fmt.Sprintf("projection %s: WithVersion requires WithReset", name))
 	}
 	validatePartitions(name, cfg)
+	if cfg.checkpoints == nil {
+		cfg.checkpoints = &memoryCheckpoints{}
+	}
 
 	filter := handlers.StreamFilter()
 	if len(filter) == 0 {
@@ -119,6 +120,7 @@ func NewRunner(name string, handlers Router, store eventsourcing.GlobalReader, o
 		cfg:      cfg,
 		nudge:    make(chan struct{}, 1),
 		part:     partitioned{statuses: make(map[int]Status)},
+		one:      single{changed: make(chan struct{}), rebuilds: make(chan rebuildRequest)},
 	}
 	r.status.Store(&Status{Phase: Starting, Version: cfg.version, Partitions: cfg.partitions})
 	return r
@@ -157,7 +159,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.cfg.partitions > 0 {
 		return r.runPartitioned(ctx)
 	}
-	panic(errNotImplemented)
+	return r.runSingle(ctx)
 }
 
 // Status returns the runner's current status as seen by this instance.
@@ -186,7 +188,7 @@ func (r *Runner) Live(ctx context.Context) (bool, error) {
 	if r.cfg.partitions > 0 {
 		return r.liveRemote(ctx)
 	}
-	panic(errNotImplemented)
+	return r.liveSingle(ctx)
 }
 
 // Rebuild wipes the read model and processes the log again from the start.
@@ -208,7 +210,7 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.cfg.partitions > 0 {
 		return ErrPartitioned
 	}
-	panic(errNotImplemented)
+	return r.rebuildSingle(ctx)
 }
 
 // WaitUntil blocks until the projection has processed the log up to and
@@ -240,7 +242,7 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 	if r.cfg.partitions > 0 {
 		return r.waitRemote(ctx, position)
 	}
-	panic(errNotImplemented)
+	return r.waitSingle(ctx, position)
 }
 
 // Nudge asks the runner to read now instead of waiting for its next poll.
