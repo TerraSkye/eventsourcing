@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/terraskye/eventsourcing"
@@ -12,7 +13,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var _ eventsourcing.EventStore = (*MemoryStore)(nil)
+var (
+	_ eventsourcing.EventStore   = (*MemoryStore)(nil)
+	_ eventsourcing.GlobalReader = (*MemoryStore)(nil)
+	_ eventsourcing.Notifier     = (*MemoryStore)(nil)
+)
 
 // MemoryStore is an in-memory [eventsourcing.EventStore] intended for tests
 // and local development. It keeps every stream and the global event log in a
@@ -25,59 +30,98 @@ type MemoryStore struct {
 	bus    chan *eventsourcing.Envelope
 	global []*eventsourcing.Envelope
 	events map[string][]*eventsourcing.Envelope
+	notify map[chan struct{}]struct{}
 }
 
-// LoadFromAll returns a lazy iterator over every event ever saved, across all
-// streams, in the order they were appended, starting at the position
-// identified by version. An [eventsourcing.Revision] starts at that index
-// (or [eventsourcing.NoStream], which behaves like revision 0); any other
-// [eventsourcing.StreamState], including [eventsourcing.Any], reads from the
-// beginning. It returns a non-nil error if the requested revision is beyond
-// the number of events currently stored.
-func (m *MemoryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	allEvents := m.global // global slice of all events
-
-	// Only eventsourcing.Revision (and eventsourcing.NoStream, treated as
-	// revision 0) carry a meaningful numeric offset; every other
-	// StreamState, including Any{}, means "from the beginning" — matching
-	// LoadStreamFrom's own default: case. Computing an offset from
-	// version.ToRawInt64() unconditionally previously misread Any{}'s -1
-	// (and StreamExists{}'s -2) as a huge uint64 offset.
-	//
-	// A start index equal to the number of events already stored is valid —
-	// it means "give me anything newer than what I've already seen", the
-	// same half-open convention Save itself relies on when it accepts
-	// Revision(currentVersion) as the expected revision to append against.
-	// Only a position beyond that is invalid.
-	var offset uint64
-	switch v := version.(type) {
-	case eventsourcing.NoStream:
-		// Behaves like revision 0.
-	case eventsourcing.Revision:
-		if v > eventsourcing.Revision(len(allEvents)) {
-			return nil, fmt.Errorf(
-				"load stream %q: requested %d but stream has %d: %w",
-				"all", v, len(allEvents), eventsourcing.ErrInvalidRevision,
-			)
-		}
-		offset = uint64(v)
-	default:
+// ReadAll implements [eventsourcing.GlobalReader]. Events are kept in a
+// single slice in append order and GlobalVersion is their index plus one,
+// so a read is a slice of that slice, filtered in Go.
+func (m *MemoryStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return eventsourcing.ReadResult{}, err
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	types := make(map[string]bool, len(opts.EventTypes))
+	for _, t := range opts.EventTypes {
+		types[t] = true
 	}
 
-	// The store holds no per-iteration resources — the snapshot is just a
-	// slice — so there is nothing to release and close is nil.
-	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
-		if offset >= uint64(len(allEvents)) {
-			return nil, io.EOF
-		}
-		ev := allEvents[offset]
-		offset++
-		return ev, nil
-	}, nil)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	return iter, nil
+	res := eventsourcing.ReadResult{Next: after}
+	for i := after; i < uint64(len(m.global)); i++ {
+		env := m.global[i]
+		res.Next = env.GlobalVersion
+		if matches(env, types, opts.StreamPrefixes) {
+			cp := *env
+			res.Events = append(res.Events, &cp)
+			if len(res.Events) == limit {
+				break
+			}
+		}
+	}
+	res.AtEnd = res.Next >= uint64(len(m.global))
+	return res, nil
+}
+
+func matches(env *eventsourcing.Envelope, types map[string]bool, prefixes []string) bool {
+	if len(types) > 0 && !types[env.Event.EventType()] && !anyIn(eventsourcing.EventNamesFor(env.Event), types) {
+		return false
+	}
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(env.StreamID, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyIn(names []string, set map[string]bool) bool {
+	for _, n := range names {
+		if set[n] {
+			return true
+		}
+	}
+	return false
+}
+
+// Head implements [eventsourcing.GlobalReader].
+func (m *MemoryStore) Head(ctx context.Context) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return uint64(len(m.global)), nil
+}
+
+// Notify implements [eventsourcing.Notifier]: the returned channel receives
+// a value after every Save that appended events, until ctx is done.
+func (m *MemoryStore) Notify(ctx context.Context) (<-chan struct{}, error) {
+	ch := make(chan struct{}, 1)
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		close(ch)
+		return ch, nil
+	}
+	m.notify[ch] = struct{}{}
+	m.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		m.mu.Lock()
+		if _, ok := m.notify[ch]; ok {
+			delete(m.notify, ch)
+			close(ch)
+		}
+		m.mu.Unlock()
+	}()
+	return ch, nil
 }
 
 // Save appends events to the stream they share, atomically and under the
@@ -166,6 +210,13 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		}
 	}
 
+	for ch := range m.notify {
+		select {
+		case ch <- struct{}{}:
+		default: // a notification is already pending
+		}
+	}
+
 	return eventsourcing.AppendResult{
 		StreamID:            streamId,
 		Successful:          true,
@@ -213,8 +264,9 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 			)
 		}
 	case eventsourcing.Revision:
-		// A start index equal to the stream's length is valid — see the
-		// identical reasoning in LoadFromAll.
+		// A start index equal to the stream's length is valid: it means
+		// "anything newer than what I've already seen", the same half-open
+		// convention Save relies on when it accepts Revision(currentVersion).
 		if v > eventsourcing.Revision(len(events)) {
 			return nil, fmt.Errorf(
 				"load stream %q: requested %d but stream has %d: %w",
@@ -225,7 +277,7 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 	default:
 	}
 
-	// No per-iteration resources to release; see LoadFromAll.
+	// The snapshot is just a slice, so there is nothing to release.
 	iter := eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
 		if offset >= uint64(len(events)) {
 			return nil, io.EOF
@@ -263,6 +315,10 @@ func (m *MemoryStore) Close() error {
 	m.events = make(map[string][]*eventsourcing.Envelope)
 	m.global = make([]*eventsourcing.Envelope, 0)
 	close(m.bus)
+	for ch := range m.notify {
+		close(ch)
+	}
+	m.notify = nil
 	return nil
 }
 
@@ -273,5 +329,6 @@ func NewMemoryStore(buffer int64) *MemoryStore {
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
 		bus:    make(chan *eventsourcing.Envelope, buffer),
+		notify: make(map[chan struct{}]struct{}),
 	}
 }

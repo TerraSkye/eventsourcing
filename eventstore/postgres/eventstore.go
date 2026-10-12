@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,12 +19,21 @@ import (
 
 const pgUniqueViolation = "23505"
 
-var _ cqrs.EventStore = (*eventstore)(nil)
+var (
+	_ cqrs.EventStore   = (*eventstore)(nil)
+	_ cqrs.GlobalReader = (*eventstore)(nil)
+)
+
+// appendLockKey is the two-key advisory lock every Save takes before it
+// inserts, held until its transaction ends; see Save. The two-key form lives
+// in a different lock space from the one-key per-stream locks, so it never
+// collides with a stream's hashtext.
+const appendLockKey1, appendLockKey2 = 0x65766e74, 0x616c6c00 // "evnt", "all"
 
 // eventstore is a PostgreSQL-backed [cqrs.EventStore]. Stream membership and
 // per-stream ordering are recorded in the events table's stream_id and
 // stream_position columns; the table's own auto-incrementing id column
-// provides the global order consumed by LoadFromAll.
+// is the GlobalVersion that [eventstore.ReadAll] orders by.
 type eventstore struct {
 	pool *pgxpool.Pool
 }
@@ -45,6 +55,16 @@ func NewEventStore(pool *pgxpool.Pool) cqrs.EventStore {
 // Postgres advisory lock, so on a revision mismatch — whether caught by the
 // check above or by a unique-constraint violation from a concurrent writer —
 // it returns a [cqrs.StreamRevisionConflictError] and nothing is persisted.
+//
+// Before inserting, Save also takes one advisory lock shared by every
+// append, held until it commits. Ids are assigned at INSERT but become
+// visible at COMMIT; without that lock, a transaction could commit id 52
+// while another still holds 51, and a reader that moved past 52 would
+// never see 51. With it, appends assign ids and commit one at a time, so
+// ids become visible in order and [eventstore.ReadAll] needs no visibility
+// filter. The cost is that appends to different streams no longer commit in
+// parallel; only the inserts and the commit run under the lock.
+//
 // On success it returns a [cqrs.AppendResult] whose NextExpectedVersion is
 // the stream's new length.
 func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
@@ -108,6 +128,13 @@ func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	default:
 		return cqrs.AppendResult{Successful: false, StreamID: streamID},
 			fmt.Errorf("unsupported revision type for stream %s: %w", streamID, cqrs.ErrInvalidRevision)
+	}
+
+	// Serialize every append from here to COMMIT; see the doc comment. It is
+	// taken after the per-stream lock and the revision check, always in that
+	// order, so two Saves cannot deadlock on the pair.
+	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)", appendLockKey1, appendLockKey2); err != nil {
+		return cqrs.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: acquire append lock: %w", streamID, err)
 	}
 
 	nextPosition := currentVersion + 1
@@ -239,23 +266,84 @@ func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 	}
 }
 
-// LoadFromAll returns a lazy iterator over every event saved across all
-// streams, in the global order they were committed, starting after the
-// position identified by version (per its ToRawInt64, so [cqrs.Any],
-// [cqrs.NoStream], and [cqrs.StreamExists] all behave like reading from the
-// very beginning). It only returns events from transactions that had
-// already committed when the read began, so a transaction that is still
-// in-flight — even if it inserted a row with a lower id than one already
-// visible — cannot be skipped over and later missed by a subsequent call
-// with a higher version.
-func (s *eventstore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	fromID := version.ToRawInt64()
-	return s.queryRows(ctx, `
+// ReadAll implements [cqrs.GlobalReader]. Filters run in SQL, on exact
+// event type names and on stream ID prefixes (with starts_with, so % and _
+// in a prefix are not wildcards).
+//
+// Because Save commits appends one at a time in id order, every row up to
+// the highest visible id is either committed or permanently abandoned (a
+// rolled-back insert leaves a hole in the sequence, never a late row), so
+// ReadAll reads up to that id without a visibility filter.
+func (s *eventstore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
+	if after > math.MaxInt64 {
+		return cqrs.ReadResult{}, fmt.Errorf("read all after %d: %w", after, cqrs.ErrInvalidRevision)
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+
+	// Pin the head first and read no further than it, so Next and AtEnd
+	// describe the same point in the log even if appends land in between.
+	head, err := s.Head(ctx)
+	if err != nil {
+		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+	}
+	res := cqrs.ReadResult{Next: max(after, head), AtEnd: true}
+	if head <= after {
+		res.Next = after
+		return res, nil
+	}
+
+	types := opts.EventTypes
+	if types == nil {
+		types = []string{}
+	}
+	prefixes := opts.StreamPrefixes
+	if prefixes == nil {
+		prefixes = []string{}
+	}
+	rows, err := s.pool.Query(ctx, `
 		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
 		FROM events
-		WHERE id > $1
-		  AND xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint
-		ORDER BY id ASC`, fromID)
+		WHERE id > $1 AND id <= $2
+		  AND (cardinality($3::text[]) = 0 OR event_type = ANY($3::text[]))
+		  AND (cardinality($4::text[]) = 0 OR EXISTS (
+		        SELECT 1 FROM unnest($4::text[]) AS p WHERE starts_with(stream_id, p)))
+		ORDER BY id ASC
+		LIMIT $5`, int64(after), int64(head), types, prefixes, limit)
+	if err != nil {
+		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		env, err := scanEnvelope(rows)
+		if err != nil {
+			return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+		}
+		res.Events = append(res.Events, env)
+	}
+	if err := rows.Err(); err != nil {
+		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+	}
+
+	// A full page may stop short of the head; anything less means every
+	// row up to the head was scanned.
+	if len(res.Events) == limit {
+		res.Next = res.Events[len(res.Events)-1].GlobalVersion
+		res.AtEnd = res.Next >= head
+	}
+	return res, nil
+}
+
+// Head implements [cqrs.GlobalReader]: the highest id in the events table,
+// or 0 if it is empty.
+func (s *eventstore) Head(ctx context.Context) (uint64, error) {
+	var head int64
+	if err := s.pool.QueryRow(ctx, "SELECT coalesce(max(id), 0) FROM events").Scan(&head); err != nil {
+		return 0, fmt.Errorf("head: %w", err)
+	}
+	return uint64(head), nil
 }
 
 // Close closes the underlying connection pool. It is safe to call more than

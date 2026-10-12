@@ -10,7 +10,6 @@ package eventsourcingtest
 
 import (
 	"errors"
-	"fmt"
 	"slices"
 	"sort"
 	"sync"
@@ -44,8 +43,8 @@ type acceptance struct {
 //
 // store may already hold events, and may be shared with other tests: every
 // subtest writes to streams of its own, named with a fresh UUID, and reads
-// from [eventsourcing.EventStore.LoadFromAll] only the events of those
-// streams. The suite never calls Close; that is left to the caller, who
+// back only those streams. Stores that can read the global log are also
+// checked with [GlobalReaderAcceptanceTest]. The suite never calls Close; that is left to the caller, who
 // owns store.
 //
 // Envelopes are saved with Version already set, 1 for the first event of a
@@ -83,11 +82,6 @@ func AcceptanceTest(t *testing.T, store eventsourcing.EventStore) {
 		"ResumeFromLastVersion":   a.loadFromResumeFromLastVersion,
 		"StreamExistsRejectsNew":  a.loadFromStreamExistsRejectsNew,
 		"NoStreamRejectsExisting": a.loadFromNoStreamRejectsExisting,
-	})
-	a.group(t, "LoadFromAll", map[string]func(*testing.T){
-		"IncludesSavedEvents":   a.loadAllIncludesSavedEvents,
-		"GlobalVersionIncrease": a.loadAllGlobalVersionIncreases,
-		"RevisionIsExclusive":   a.loadAllRevisionIsExclusive,
 	})
 }
 
@@ -436,60 +430,6 @@ func (a *acceptance) loadFromNoStreamRejectsExisting(t *testing.T) {
 	}
 }
 
-// --- LoadFromAll ---
-
-func (a *acceptance) loadAllIncludesSavedEvents(t *testing.T) {
-	first, second := newStreamID(), newStreamID()
-	a.save(t, envelopes(first, 1, 1), eventsourcing.NoStream{})
-	a.save(t, envelopes(second, 1, 1), eventsourcing.NoStream{})
-	a.save(t, envelopes(first, 2, 1), eventsourcing.Revision(1))
-
-	got := a.loadAll(t, eventsourcing.Any{}, first, second)
-	var order []string
-	for _, env := range got {
-		order = append(order, fmt.Sprintf("%s@%d", label(env.StreamID, first, second), env.Version))
-	}
-	if want := []string{"first@1", "second@1", "first@2"}; !slices.Equal(order, want) {
-		t.Errorf("LoadFromAll order = %v, want %v", order, want)
-	}
-}
-
-func (a *acceptance) loadAllGlobalVersionIncreases(t *testing.T) {
-	first, second := newStreamID(), newStreamID()
-	a.save(t, envelopes(first, 1, 2), eventsourcing.NoStream{})
-	a.save(t, envelopes(second, 1, 2), eventsourcing.NoStream{})
-
-	got := a.loadAll(t, eventsourcing.Any{}, first, second)
-	if len(got) != 4 {
-		t.Fatalf("LoadFromAll returned %d of this test's events, want 4", len(got))
-	}
-	for i := 1; i < len(got); i++ {
-		if got[i].GlobalVersion <= got[i-1].GlobalVersion {
-			t.Errorf("GlobalVersion does not increase: event %d has %d, event %d has %d",
-				i-1, got[i-1].GlobalVersion, i, got[i].GlobalVersion)
-		}
-	}
-}
-
-// loadAllRevisionIsExclusive resumes a global read from the GlobalVersion
-// of the last event seen, as a projection restarting from its checkpoint
-// does.
-func (a *acceptance) loadAllRevisionIsExclusive(t *testing.T) {
-	id := newStreamID()
-	a.save(t, envelopes(id, 1, 3), eventsourcing.NoStream{})
-
-	all := a.loadAll(t, eventsourcing.Any{}, id)
-	if len(all) != 3 {
-		t.Fatalf("LoadFromAll returned %d of this test's events, want 3", len(all))
-	}
-	checkpoint := eventsourcing.Revision(all[0].GlobalVersion)
-
-	got := a.loadAll(t, checkpoint, id)
-	if vs := versions(got); !slices.Equal(vs, []uint64{2, 3}) {
-		t.Errorf("LoadFromAll(eventsourcing.Revision(%d)) versions = %v, want [2 3]", checkpoint, vs)
-	}
-}
-
 // --- helpers ---
 
 // newStreamID returns a stream ID no other test, or earlier run against a
@@ -550,23 +490,6 @@ func (a *acceptance) loadStreamFrom(t *testing.T, id string, state eventsourcing
 	return drain(t, it)
 }
 
-// loadAll reads LoadFromAll from state and keeps only the events of ids, so
-// events other tests saved to a shared store do not interfere.
-func (a *acceptance) loadAll(t *testing.T, state eventsourcing.StreamState, ids ...string) []*eventsourcing.Envelope {
-	t.Helper()
-	it, err := a.store.LoadFromAll(t.Context(), state)
-	if err != nil {
-		t.Fatalf("LoadFromAll(%v): %v", state, err)
-	}
-	var out []*eventsourcing.Envelope
-	for _, env := range drain(t, it) {
-		if slices.Contains(ids, env.StreamID) {
-			out = append(out, env)
-		}
-	}
-	return out
-}
-
 // wantStreamLen checks id holds exactly n events, reading with Any so a
 // missing stream counts as zero rather than failing.
 func (a *acceptance) wantStreamLen(t *testing.T, id string, n int) {
@@ -604,14 +527,4 @@ func payloadNs(t *testing.T, envs []*eventsourcing.Envelope) []int {
 		out[i] = ev.N
 	}
 	return out
-}
-
-func label(id, first, second string) string {
-	switch id {
-	case first:
-		return "first"
-	case second:
-		return "second"
-	}
-	return id
 }

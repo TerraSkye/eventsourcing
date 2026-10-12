@@ -47,13 +47,6 @@ type EventStore interface {
 	// [Revision]; [Any] starts from the beginning of the stream.
 	LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error)
 
-	// LoadFromAll returns an iterator over events across every stream,
-	// starting at version. Whether version and the iteration order it
-	// produces are globally consistent, or only consistent within each
-	// stream, is implementation-specific; consult the implementation before
-	// relying on cross-stream ordering.
-	LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error)
-
 	// Close releases any resources held by the EventStore, such as network
 	// connections or file handles. Implementations should make Close
 	// idempotent. The EventStore must not be used after Close is called.

@@ -42,7 +42,7 @@ go func() {
 ## Behaviour
 
 - All events are stored in a `map[string][]*Envelope` (per stream) and a global `[]*Envelope` slice.
-- `LoadFromAll` uses the global slice; `version` is treated as a slice offset.
+- `ReadAll` and `Head` (`GlobalReader`) read the global slice; `GlobalVersion` is the event's index in it plus one. `Notify` (`Notifier`) signals every `Save`.
 - `LoadStream` requires the stream to exist (`StreamExists` semantics).
 - `LoadStreamFrom` with `Any{}` or `Revision` starts from the given offset.
 - Thread-safe via `sync.RWMutex`.
@@ -52,4 +52,3 @@ go func() {
 
 - No durability — data lost on process exit.
 - No event registration required (events are not serialized).
-- `LoadFromAll` positions are ordinal offsets, not global sequence numbers.

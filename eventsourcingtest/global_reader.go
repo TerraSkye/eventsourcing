@@ -1,10 +1,38 @@
 package eventsourcingtest
 
 import (
+	"context"
+	"fmt"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 )
+
+// acceptanceOtherEvent is a second event type for the filter checks. Its
+// name extends acceptanceEvent's, so a backend that matches event types by
+// prefix instead of exactly returns it for acceptanceEvent's name too.
+type acceptanceOtherEvent struct {
+	ID string
+	N  int
+}
+
+func (e *acceptanceOtherEvent) AggregateID() string { return e.ID }
+func (e *acceptanceOtherEvent) EventType() string {
+	return "eventsourcingtest.acceptanceEventOther"
+}
+
+func init() {
+	eventsourcing.RegisterEvent(&acceptanceOtherEvent{})
+}
+
+type globalAcceptance struct {
+	store  eventsourcing.EventStore
+	reader eventsourcing.GlobalReader
+}
 
 // GlobalReaderAcceptanceTest runs the [eventsourcing.GlobalReader] contract
 // against reader as a set of subtests. store must be the store reader reads
@@ -40,5 +68,431 @@ import (
 // commit; run it against the real database, not a mock.
 func GlobalReaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, reader eventsourcing.GlobalReader) {
 	t.Helper()
-	t.Skip("eventsourcingtest: GlobalReaderAcceptanceTest is not implemented yet")
+
+	g := &globalAcceptance{store: store, reader: reader}
+	a := &acceptance{store: store}
+	a.group(t, "GlobalReader", map[string]func(*testing.T){
+		"Order":            g.order,
+		"ExclusiveStart":   g.exclusiveStart,
+		"LimitAndPaging":   g.limitAndPaging,
+		"FilterEventTypes": g.filterEventTypes,
+		"FilterPrefixes":   g.filterPrefixes,
+		"FilterCombined":   g.filterCombined,
+		"AtEnd":            g.atEnd,
+		"Head":             g.head,
+		"ConcurrentSaves":  g.concurrentSaves,
+		"Notify":           g.notify,
+	})
+}
+
+func (g *globalAcceptance) order(t *testing.T) {
+	start := g.headNow(t)
+	first, second, third := newStreamID(), newStreamID(), newStreamID()
+	g.save(t, envelopes(first, 1, 2), eventsourcing.NoStream{})
+	g.save(t, envelopes(second, 1, 1), eventsourcing.NoStream{})
+	g.save(t, envelopes(third, 1, 3), eventsourcing.NoStream{})
+	g.save(t, envelopes(first, 3, 1), eventsourcing.Revision(2))
+
+	got := g.readToEnd(t, start, eventsourcing.ReadOptions{Limit: 2}, first, second, third)
+	var order []string
+	for _, env := range got {
+		order = append(order, fmt.Sprintf("%s@%d", label3(env.StreamID, first, second, third), env.Version))
+	}
+	want := []string{"first@1", "first@2", "second@1", "third@1", "third@2", "third@3", "first@3"}
+	if !slices.Equal(order, want) {
+		t.Errorf("ReadAll order = %v, want %v", order, want)
+	}
+}
+
+func (g *globalAcceptance) exclusiveStart(t *testing.T) {
+	start := g.headNow(t)
+	id := newStreamID()
+	g.save(t, envelopes(id, 1, 3), eventsourcing.NoStream{})
+
+	all := g.readToEnd(t, start, eventsourcing.ReadOptions{}, id)
+	if len(all) != 3 {
+		t.Fatalf("ReadAll returned %d of this test's events, want 3", len(all))
+	}
+	checkpoint := all[0].GlobalVersion
+	got := g.readToEnd(t, checkpoint, eventsourcing.ReadOptions{}, id)
+	if vs := versions(got); !slices.Equal(vs, []uint64{2, 3}) {
+		t.Errorf("ReadAll(after %d) versions = %v, want [2 3]", checkpoint, vs)
+	}
+
+	res, err := g.reader.ReadAll(t.Context(), 0, eventsourcing.ReadOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("ReadAll(after 0): %v", err)
+	}
+	if len(res.Events) != 1 {
+		t.Fatalf("ReadAll(after 0, Limit 1) on a log with events returned %d events, want 1", len(res.Events))
+	}
+	if gv := res.Events[0].GlobalVersion; gv == 0 || gv > all[0].GlobalVersion {
+		t.Errorf("ReadAll(after 0) starts at GlobalVersion %d, want the first event of the log (0 < gv <= %d)", gv, all[0].GlobalVersion)
+	}
+}
+
+func (g *globalAcceptance) limitAndPaging(t *testing.T) {
+	start := g.headNow(t)
+	id := newStreamID()
+	g.save(t, envelopes(id, 1, 5), eventsourcing.NoStream{})
+
+	for _, limit := range []int{1, 2, 3} {
+		got := g.readToEnd(t, start, eventsourcing.ReadOptions{Limit: limit}, id)
+		if vs := versions(got); !slices.Equal(vs, []uint64{1, 2, 3, 4, 5}) {
+			t.Errorf("paging with Limit %d visited versions %v, want [1 2 3 4 5]", limit, vs)
+		}
+	}
+}
+
+// saveMixed saves, to two fresh streams with distinct prefixes, events of
+// both acceptance types and returns the two stream IDs (whose prefixes are
+// the IDs minus their last character) and the GlobalVersion of the last
+// event saved.
+func (g *globalAcceptance) saveMixed(t *testing.T) (a, b string, last uint64) {
+	t.Helper()
+	start := g.headNow(t)
+	tag := uuid.NewString()
+	a, b = "acceptance-a-"+tag, "acceptance-b-"+tag
+	g.save(t, envelopes(a, 1, 2), eventsourcing.NoStream{})
+	g.save(t, otherEnvelopes(b, 1, 2), eventsourcing.NoStream{})
+	g.save(t, otherEnvelopes(a, 3, 1), eventsourcing.Revision(2))
+	g.save(t, envelopes(b, 3, 1), eventsourcing.Revision(2))
+	all := g.readToEnd(t, start, eventsourcing.ReadOptions{}, a, b)
+	if len(all) != 6 {
+		t.Fatalf("unfiltered ReadAll returned %d of this test's events, want 6", len(all))
+	}
+	return a, b, all[len(all)-1].GlobalVersion
+}
+
+func (g *globalAcceptance) filterEventTypes(t *testing.T) {
+	start := g.headNow(t)
+	a, b, last := g.saveMixed(t)
+
+	opts := eventsourcing.ReadOptions{EventTypes: []string{(&acceptanceEvent{}).EventType()}, Limit: 2}
+	got, next := g.readToEndNext(t, start, opts, a, b)
+	if l := streamVersions(got, a, b); !slices.Equal(l, []string{"a@1", "a@2", "b@3"}) {
+		t.Errorf("EventTypes filter returned %v, want [a@1 a@2 b@3] (exact match, not prefix)", l)
+	}
+	if next < last {
+		t.Errorf("filtered read ended with Next = %d, want at least %d: Next must move past filtered-out events", next, last)
+	}
+}
+
+func (g *globalAcceptance) filterPrefixes(t *testing.T) {
+	start := g.headNow(t)
+	a, b, last := g.saveMixed(t)
+
+	opts := eventsourcing.ReadOptions{StreamPrefixes: []string{"no-such-prefix-", a[:len(a)-1]}, Limit: 2}
+	got, next := g.readToEndNext(t, start, opts, a, b)
+	if l := streamVersions(got, a, b); !slices.Equal(l, []string{"a@1", "a@2", "a@3"}) {
+		t.Errorf("StreamPrefixes filter returned %v, want [a@1 a@2 a@3]", l)
+	}
+	if next < last {
+		t.Errorf("filtered read ended with Next = %d, want at least %d", next, last)
+	}
+	// Characters that are wildcards in SQL LIKE must match literally.
+	res, err := g.reader.ReadAll(t.Context(), start, eventsourcing.ReadOptions{StreamPrefixes: []string{"acceptance-_-%"}})
+	if err != nil {
+		t.Fatalf("ReadAll with a wildcard-looking prefix: %v", err)
+	}
+	if n := len(filter(res.Events, a, b)); n != 0 {
+		t.Errorf("prefix %q matched %d of this test's events, want 0: prefixes must match literally", "acceptance-_-%", n)
+	}
+}
+
+func (g *globalAcceptance) filterCombined(t *testing.T) {
+	start := g.headNow(t)
+	a, b, _ := g.saveMixed(t)
+
+	opts := eventsourcing.ReadOptions{
+		EventTypes:     []string{(&acceptanceOtherEvent{}).EventType()},
+		StreamPrefixes: []string{b[:len(b)-1]},
+	}
+	got := g.readToEnd(t, start, opts, a, b)
+	if l := streamVersions(got, a, b); !slices.Equal(l, []string{"b@1", "b@2"}) {
+		t.Errorf("combined filter returned %v, want [b@1 b@2]", l)
+	}
+}
+
+func (g *globalAcceptance) atEnd(t *testing.T) {
+	start := g.headNow(t)
+	g.save(t, envelopes(newStreamID(), 1, 2), eventsourcing.NoStream{})
+
+	_, next := g.readToEndNext(t, start, eventsourcing.ReadOptions{Limit: 1})
+	res, err := g.reader.ReadAll(t.Context(), next, eventsourcing.ReadOptions{})
+	if err != nil {
+		t.Fatalf("ReadAll at the head: %v", err)
+	}
+	// Other tests may share the store and append in between; only an
+	// empty page has to be at the end.
+	if len(res.Events) == 0 && !res.AtEnd {
+		t.Errorf("ReadAll at the head returned no events and AtEnd = false")
+	}
+	if len(res.Events) == 0 && res.Next != next {
+		t.Errorf("ReadAll at the head returned Next = %d, want %d (unchanged when nothing was scanned)", res.Next, next)
+	}
+}
+
+func (g *globalAcceptance) head(t *testing.T) {
+	start := g.headNow(t)
+	id := newStreamID()
+	g.save(t, envelopes(id, 1, 2), eventsourcing.NoStream{})
+
+	h := g.headNow(t)
+	got, next := g.readToEndNext(t, start, eventsourcing.ReadOptions{}, id)
+	if len(got) != 2 {
+		t.Fatalf("ReadAll returned %d of this test's events, want 2", len(got))
+	}
+	if h < got[1].GlobalVersion {
+		t.Errorf("Head = %d after saving an event at %d, want at least that", h, got[1].GlobalVersion)
+	}
+	if next < h {
+		t.Errorf("reading to the end stopped at Next = %d, below Head %d: Head must not exceed what ReadAll returns", next, h)
+	}
+}
+
+func (g *globalAcceptance) concurrentSaves(t *testing.T) {
+	const writers, savesPerWriter = 12, 15
+	start := g.headNow(t)
+
+	ids := make([]string, writers)
+	for i := range ids {
+		ids[i] = newStreamID()
+	}
+	want := 0
+	for w := range writers {
+		for s := range savesPerWriter {
+			want += 1 + (w+s)%3
+		}
+	}
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	errs := make(chan error, writers)
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var version uint64
+			for s := range savesPerWriter {
+				n := 1 + (w+s)%3
+				if _, err := g.store.Save(context.Background(), envelopes(ids[w], version+1, n), eventsourcing.Revision(version)); err != nil {
+					errs <- fmt.Errorf("writer %d save %d: %w", w, s, err)
+					return
+				}
+				version += uint64(n)
+			}
+		}()
+	}
+	go func() { wg.Wait(); close(done) }()
+
+	seen := make(map[string]uint64) // stream -> last version seen
+	count := 0
+	after := start
+	writing := true
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("reader did not finish within 2 minutes; saw %d of %d events", count, want)
+		}
+		res, err := g.reader.ReadAll(t.Context(), after, eventsourcing.ReadOptions{Limit: 7})
+		if err != nil {
+			t.Fatalf("ReadAll(after %d): %v", after, err)
+		}
+		g.checkPage(t, after, res)
+		for _, env := range res.Events {
+			if !slices.Contains(ids, env.StreamID) {
+				continue
+			}
+			if expected := seen[env.StreamID] + 1; env.Version != expected {
+				t.Fatalf("stream %s: saw version %d after %d; an event was skipped or repeated (GlobalVersion %d)",
+					env.StreamID, env.Version, seen[env.StreamID], env.GlobalVersion)
+			}
+			seen[env.StreamID] = env.Version
+			count++
+		}
+		after = res.Next
+		if res.AtEnd {
+			if !writing {
+				break
+			}
+			select {
+			case <-done:
+				writing = false // one more pass after the last Save
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if count != want {
+		t.Errorf("reader saw %d events, want %d", count, want)
+	}
+}
+
+func (g *globalAcceptance) notify(t *testing.T) {
+	n, ok := g.reader.(eventsourcing.Notifier)
+	if !ok {
+		t.Skip("reader does not implement eventsourcing.Notifier")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	ch, err := n.Notify(ctx)
+	if err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	g.save(t, envelopes(newStreamID(), 1, 1), eventsourcing.NoStream{})
+	select {
+	case _, open := <-ch:
+		if !open {
+			t.Fatal("notification channel closed before ctx was done")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification within 5s of a Save")
+	}
+
+	cancel()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case _, open := <-ch:
+			if !open {
+				return
+			}
+		case <-timeout:
+			t.Fatal("notification channel not closed within 5s of ctx being done")
+		}
+	}
+}
+
+// --- helpers ---
+
+func (g *globalAcceptance) headNow(t *testing.T) uint64 {
+	t.Helper()
+	h, err := g.reader.Head(t.Context())
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	return h
+}
+
+func (g *globalAcceptance) save(t *testing.T, events []eventsourcing.Envelope, state eventsourcing.StreamState) {
+	t.Helper()
+	if _, err := g.store.Save(t.Context(), events, state); err != nil {
+		t.Fatalf("Save(%v) to %q: %v", state, events[0].StreamID, err)
+	}
+}
+
+func (g *globalAcceptance) readToEnd(t *testing.T, after uint64, opts eventsourcing.ReadOptions, ids ...string) []*eventsourcing.Envelope {
+	t.Helper()
+	got, _ := g.readToEndNext(t, after, opts, ids...)
+	return got
+}
+
+// readToEndNext pages through the log from after until AtEnd, checking
+// every page against the contract, and returns the events of ids (all
+// events when ids is empty) and the final Next.
+func (g *globalAcceptance) readToEndNext(t *testing.T, after uint64, opts eventsourcing.ReadOptions, ids ...string) ([]*eventsourcing.Envelope, uint64) {
+	t.Helper()
+	var out []*eventsourcing.Envelope
+	for range 100_000 {
+		res, err := g.reader.ReadAll(t.Context(), after, opts)
+		if err != nil {
+			t.Fatalf("ReadAll(after %d, %+v): %v", after, opts, err)
+		}
+		g.checkPage(t, after, res)
+		if opts.Limit > 0 && len(res.Events) > opts.Limit {
+			t.Fatalf("ReadAll(Limit %d) returned %d events", opts.Limit, len(res.Events))
+		}
+		for _, env := range res.Events {
+			if len(opts.EventTypes) > 0 && !slices.Contains(opts.EventTypes, env.Event.EventType()) {
+				t.Errorf("ReadAll(EventTypes %v) returned an event of type %q", opts.EventTypes, env.Event.EventType())
+			}
+			if len(opts.StreamPrefixes) > 0 && !slices.ContainsFunc(opts.StreamPrefixes, func(p string) bool {
+				return len(env.StreamID) >= len(p) && env.StreamID[:len(p)] == p
+			}) {
+				t.Errorf("ReadAll(StreamPrefixes %v) returned an event of stream %q", opts.StreamPrefixes, env.StreamID)
+			}
+		}
+		if len(ids) == 0 {
+			out = append(out, res.Events...)
+		} else {
+			out = append(out, filter(res.Events, ids...)...)
+		}
+		after = res.Next
+		if res.AtEnd {
+			return out, after
+		}
+	}
+	t.Fatalf("ReadAll did not reach AtEnd")
+	return nil, 0
+}
+
+// checkPage checks one ReadAll result against the contract.
+func (g *globalAcceptance) checkPage(t *testing.T, after uint64, res eventsourcing.ReadResult) {
+	t.Helper()
+	prev := after
+	for _, env := range res.Events {
+		if env.GlobalVersion <= prev {
+			t.Fatalf("ReadAll(after %d) returned GlobalVersion %d after %d: not strictly ascending, or not exclusive of after",
+				after, env.GlobalVersion, prev)
+		}
+		prev = env.GlobalVersion
+	}
+	if len(res.Events) > 0 && res.Next < prev {
+		t.Fatalf("ReadAll(after %d) returned Next = %d, below its last event's GlobalVersion %d", after, res.Next, prev)
+	}
+	if res.Next < after {
+		t.Fatalf("ReadAll(after %d) returned Next = %d, before after", after, res.Next)
+	}
+	if !res.AtEnd && res.Next <= after {
+		t.Fatalf("ReadAll(after %d) returned AtEnd = false without progress (Next = %d)", after, res.Next)
+	}
+}
+
+func otherEnvelopes(id string, from uint64, count int) []eventsourcing.Envelope {
+	out := envelopes(id, from, count)
+	for i := range out {
+		v := from + uint64(i)
+		out[i].Event = &acceptanceOtherEvent{ID: id, N: int(v)}
+	}
+	return out
+}
+
+func filter(envs []*eventsourcing.Envelope, ids ...string) []*eventsourcing.Envelope {
+	var out []*eventsourcing.Envelope
+	for _, env := range envs {
+		if slices.Contains(ids, env.StreamID) {
+			out = append(out, env)
+		}
+	}
+	return out
+}
+
+func streamVersions(envs []*eventsourcing.Envelope, a, b string) []string {
+	var out []string
+	for _, env := range envs {
+		out = append(out, fmt.Sprintf("%s@%d", label3(env.StreamID, a, b, ""), env.Version))
+	}
+	return out
+}
+
+func label3(id, first, second, third string) string {
+	switch id {
+	case first:
+		if third == "" {
+			return "a"
+		}
+		return "first"
+	case second:
+		if third == "" {
+			return "b"
+		}
+		return "second"
+	case third:
+		return "third"
+	}
+	return id
 }

@@ -51,9 +51,6 @@ func (s *testStore) LoadStreamFrom(ctx context.Context, id string, version Strea
 	s.loadCalled++
 	return s.loadFn(ctx, id, version)
 }
-func (s *testStore) LoadFromAll(_ context.Context, _ StreamState) (*Iterator[*Envelope], error) {
-	return nil, nil
-}
 func (s *testStore) Close() error { return nil }
 
 // ---------------------- Tests ----------------------

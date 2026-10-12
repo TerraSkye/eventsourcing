@@ -144,18 +144,18 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_HangsPastLastEvent is a regression test for GitHub issue
-// #44: LoadFromAll passed count=0 to (*kurrentdb.Client).ReadAll, unlike
-// LoadStream/LoadStreamFrom in the same file, which both pass 5000. Against
-// a real server, count=0 does not bound the read — once the iterator
-// consumed every currently-existing event, Next blocked forever instead of
-// returning false.
-func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
+// TestReadAll_ReachesTheEndOfAll pages through all of $all and requires
+// the read to end with AtEnd, rather than block. It descends from GitHub
+// issue #44, where a global read passed count=0 to
+// (*kurrentdb.Client).ReadAll and blocked forever past the last event; and
+// $all carries KurrentDB's own records, such as $metadata, which ReadAll
+// must skip rather than fail to decode.
+func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 	store := kdbstore.NewEventStore(testDB)
+	reader := store.(cqrs.GlobalReader)
 	ctx := context.Background()
-	streamID := "check-loadfromall-hangs"
+	streamID := "check-readall-end"
 
-	// Save 3 events so the $all stream has a known non-empty tail.
 	for i := 0; i < 3; i++ {
 		if _, err := store.Save(ctx, []cqrs.Envelope{{
 			StreamID:   streamID,
@@ -167,33 +167,30 @@ func TestLoadFromAll_HangsPastLastEvent(t *testing.T) {
 		}
 	}
 
-	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
-	if err != nil {
-		t.Fatalf("load from all: %v", err)
-	}
-
-	// Drain every event currently in the $all stream. Once exhausted, Next
-	// MUST return false (with iter.Err() == nil) rather than blocking forever.
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		for iter.Next() {
+		var after uint64
+		for {
+			res, err := reader.ReadAll(ctx, after, cqrs.ReadOptions{Limit: 100})
+			if err != nil {
+				done <- err
+				return
+			}
+			after = res.Next
+			if res.AtEnd {
+				done <- nil
+				return
+			}
 		}
 	}()
 
 	select {
-	case <-done:
-		// The drain loop terminating at all is the point of this test (the
-		// bug was that it never did). It must also end cleanly: $all carries
-		// KurrentDB's own records, such as $metadata, which LoadFromAll
-		// skips rather than failing to decode.
-		if err := iter.Err(); err != nil {
-			t.Fatalf("iterator ended with an error: %v", err)
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ReadAll failed: %v", err)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatalf("LoadFromAll's iterator did not terminate within 15s after exhausting the $all stream: " +
-			"Next() blocks forever instead of returning false, because LoadFromAll passes count=0 to " +
-			"(*kurrentdb.Client).ReadAll (eventstore.go)")
+		t.Fatal("paging through $all did not reach AtEnd within 15s")
 	}
 }
 
@@ -274,9 +271,8 @@ func init() {
 // events yielded only its first 5000, with iter.Err() == nil --
 // indistinguishable from a complete read.
 //
-// LoadStreamFrom and LoadFromAll were bounded the same way and take the same
-// fix; they are not covered separately here because each case needs its own
-// >5000-event stream.
+// LoadStreamFrom was bounded the same way and takes the same fix; it is not
+// covered separately here because it needs its own >5000-event stream.
 func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 	if testing.Short() {
 		t.Skip("appends and reads back 5001 events")
@@ -420,4 +416,9 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 // every other test in this package shares.
 func TestAcceptance(t *testing.T) {
 	eventsourcingtest.AcceptanceTest(t, kdbstore.NewEventStore(testDB))
+}
+
+func TestGlobalReaderAcceptance(t *testing.T) {
+	store := kdbstore.NewEventStore(testDB)
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store.(cqrs.GlobalReader))
 }

@@ -60,29 +60,32 @@ func evolve(state *TaskList, envelope *eventsourcing.Envelope) *TaskList {
 
 // QueryHandler rebuilds the read model on every call.
 type QueryHandler struct {
-    store eventsourcing.EventStore
+    store eventsourcing.GlobalReader
 }
 
-func NewQueryHandler(store eventsourcing.EventStore) *QueryHandler {
+func NewQueryHandler(store eventsourcing.GlobalReader) *QueryHandler {
     return &QueryHandler{store: store}
 }
 
 func (h *QueryHandler) HandleQuery(ctx context.Context, _ ListTasks) (*TaskList, error) {
-    iter, err := h.store.LoadFromAll(ctx, eventsourcing.Any{})
-    if err != nil {
-        return nil, fmt.Errorf("list tasks: %w", err)
-    }
-    defer iter.Close()
-
     result := &TaskList{Tasks: make([]Task, 0)}
-    for iter.Next() {
-        result = evolve(result, iter.Value())
-    }
-    if err := iter.Err(); err != nil {
-        return nil, err
-    }
 
-    return result, nil
+    // Read the global log a page at a time, from the beginning (position 0)
+    // until the read reports it reached the end.
+    var after uint64
+    for {
+        page, err := h.store.ReadAll(ctx, after, eventsourcing.ReadOptions{})
+        if err != nil {
+            return nil, fmt.Errorf("list tasks: %w", err)
+        }
+        for _, env := range page.Events {
+            result = evolve(result, env)
+        }
+        after = page.Next
+        if page.AtEnd {
+            return result, nil
+        }
+    }
 }
 ```
 
@@ -162,7 +165,9 @@ Expected:
 
 ## How it works
 
-`LoadFromAll` returns an iterator over every event ever stored. The query handler walks through all events and applies only the ones it cares about (`TaskCreated`) to build the list.
+`ReadAll` returns the global log — every event across all streams, in the order they were stored — a page at a time. The query handler pages through all of it and applies only the events it cares about (`TaskCreated`) to build the list. It could also ask `ReadAll` for only those events with `ReadOptions{EventTypes: ...}`.
+
+`ReadAll` belongs to `eventsourcing.GlobalReader`, which the memory, file, Postgres and KurrentDB stores implement next to `EventStore`. `memory.NewMemoryStore` returns the concrete store, so `main.go` can pass it to both handlers; for a store whose constructor returns an `EventStore`, assert it with `store.(eventsourcing.GlobalReader)`.
 
 This is the same `evolve` pattern used in commands — the only difference is the output is a read model rather than aggregate state used for business rules.
 
