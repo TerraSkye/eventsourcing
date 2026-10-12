@@ -7,14 +7,14 @@ import (
 )
 
 // Nudger is anything that can be asked to check for new work right away;
-// [*Runner] is one, and so is an automation.
+// [*Runner] is one.
 type Nudger interface {
 	// Nudge asks for a check without blocking. Repeated nudges may be
 	// coalesced into one check.
 	Nudge()
 }
 
-// Nudgers is a group of [Nudger] values that is itself a Nudger, so that one
+// Nudgers is a group of [Nudger] values that is itself a Nudger, so one
 // call wakes them all.
 type Nudgers []Nudger
 
@@ -34,10 +34,10 @@ func (ns Nudgers) Nudge() {
 //
 //	raw := memory.NewMemoryStore(100)
 //
-//	taskList := projection.NewRunner("task-list", projector.EventHandlers(), raw)
+//	taskList := projection.NewRunner(..., raw, store)
 //
-//	store := projection.NudgeOnSave(taskList)(raw)
-//	createTask := createtask.NewHandler(store)
+//	writes := projection.NudgeOnSave(taskList)(raw)
+//	createTask := createtask.NewHandler(writes)
 //
 // Nudges only reach runners in this process; runners elsewhere rely on the
 // store's [eventsourcing.Notifier] or on polling.
