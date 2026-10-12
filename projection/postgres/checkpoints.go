@@ -32,6 +32,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,10 +41,6 @@ import (
 	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/projection"
 )
-
-// errNotImplemented marks the parts of this package that are still a
-// design draft: signatures and documentation only.
-var errNotImplemented = errors.New("projection/postgres: not implemented yet")
 
 // Schema creates the tables [Checkpoints] uses. It is idempotent; run it
 // with your migrations, or once at startup.
@@ -303,14 +301,105 @@ func toInt64(v uint64) int64 {
 // takes over. Without that watch, a runner could keep believing it holds a
 // lock that another instance has already acquired.
 func (c *Checkpoints) TryLock(ctx context.Context, name string) (projection.Lock, bool, error) {
-	panic(errNotImplemented)
+	conn, err := c.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, hashtext($2))`, lockClass, name).Scan(&ok); err != nil {
+		conn.Release()
+		return nil, false, err
+	}
+	if !ok {
+		conn.Release()
+		return nil, false, nil
+	}
+	host, _ := os.Hostname()
+	l := &lock{
+		conn:    conn,
+		name:    name,
+		owner:   fmt.Sprintf("%s-%d", host, os.Getpid()),
+		lost:    make(chan struct{}),
+		stop:    make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
+	go l.watch()
+	return l, true, nil
+}
+
+// lockClass namespaces projection locks among the database's advisory
+// locks ("proj"); the event store uses another class for its append lock.
+const lockClass = 0x70726f6a
+
+// lockCheckInterval is how often a held lock checks its connection.
+const lockCheckInterval = time.Second
+
+// lock is a session-level advisory lock held on a dedicated connection.
+type lock struct {
+	conn    *pgxpool.Conn
+	name    string
+	owner   string
+	lost    chan struct{}
+	stop    chan struct{}
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func (l *lock) Lost() <-chan struct{} { return l.lost }
+func (l *lock) Owner() string         { return l.owner }
+
+// watch pings the lock's connection. A connection that fails takes the
+// lock with it on the server, so Lost is closed.
+func (l *lock) watch() {
+	defer close(l.stopped)
+	t := time.NewTicker(lockCheckInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(context.Background(), lockCheckInterval)
+			err := l.conn.Ping(ctx)
+			cancel()
+			if err != nil {
+				close(l.lost)
+				return
+			}
+		}
+	}
+}
+
+func (l *lock) Release(ctx context.Context) error {
+	var err error
+	l.once.Do(func() {
+		close(l.stop)
+		<-l.stopped
+		select {
+		case <-l.lost:
+			// The connection is broken; the lock went with it.
+			_ = l.conn.Conn().Close(ctx)
+		default:
+			_, err = l.conn.Exec(ctx, `SELECT pg_advisory_unlock($1, hashtext($2))`, lockClass, l.name)
+			if err != nil {
+				// Closing the session releases the lock too.
+				_ = l.conn.Conn().Close(ctx)
+			}
+		}
+		l.conn.Release()
+	})
+	return err
 }
 
 // SaveDeadLetter records in projection_dead_letters that the projection
 // called name skipped env because of cause. It writes through the batch's
 // transaction, taken from ctx.
 func (c *Checkpoints) SaveDeadLetter(ctx context.Context, name string, env *eventsourcing.Envelope, cause error) error {
-	panic(errNotImplemented)
+	_, err := Tx(ctx).Exec(ctx, `
+		INSERT INTO projection_dead_letters (projection, global_version, event_id, stream_id, event_type, error)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		name, toInt64(env.GlobalVersion), env.EventID, env.StreamID, env.Event.EventType(), cause.Error())
+	return err
 }
 
 // InitPartitions inserts a row at position 0 for every partition of name

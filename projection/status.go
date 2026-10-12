@@ -182,5 +182,33 @@ func MinVersion(v int) RemoteOption {
 // the [MaxAge] and [MinVersion] conditions hold. A projection that has never
 // published a status is not live.
 func Remote(name string, store StatusStore, opts ...RemoteOption) Dependency {
-	panic(errNotImplemented)
+	var cfg remoteConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return &remote{name: name, store: store, cfg: cfg}
+}
+
+type remote struct {
+	name  string
+	store StatusStore
+	cfg   remoteConfig
+}
+
+func (r *remote) Name() string { return r.name }
+
+func (r *remote) Live(ctx context.Context) (bool, error) {
+	s, found, err := r.store.LoadStatus(ctx, r.name)
+	if err != nil || !found {
+		return false, err
+	}
+	switch {
+	case s.Phase != Live:
+		return false, nil
+	case r.cfg.maxAge > 0 && s.Age > r.cfg.maxAge:
+		return false, nil
+	case s.Version < r.cfg.minVersion:
+		return false, nil
+	}
+	return true, nil
 }
