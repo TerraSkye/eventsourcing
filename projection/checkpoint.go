@@ -67,9 +67,17 @@ type StatusStore interface {
 	// immediately, outside any batch's unit of work.
 	SaveStatus(ctx context.Context, name string, s Status) error
 
+	// A partitioned runner (see [WithPartitions]) saves one status per
+	// partition it owns, with [Status.Partitions] and [Status.Partition]
+	// set; the store keeps them apart by partition.
+	//
 	// LoadStatus returns the last status saved for name, with Age set to
 	// how long ago it was saved. found is false if no status was ever
-	// saved for name.
+	// saved for name. For a partitioned projection it returns the status of
+	// the whole projection, combined from its partitions as described at
+	// [Status.Partition]; a partition that never saved a status counts as
+	// [Starting], so the projection is not live until every partition has
+	// reported in.
 	LoadStatus(ctx context.Context, name string) (s Status, found bool, err error)
 }
 

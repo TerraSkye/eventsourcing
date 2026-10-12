@@ -2,6 +2,7 @@ package projection
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -24,6 +25,12 @@ type config struct {
 	onCatchingUp func(ctx context.Context, s Status) error
 	onLive       func(ctx context.Context, s Status) error
 	newBuffer    func() Flusher
+	partitions   int
+	partitionKey PartitionKey
+	leases       LeaseStore
+	member       string
+	leaseTTL     time.Duration
+	logger       *slog.Logger
 }
 
 func defaultConfig() config {
@@ -32,6 +39,8 @@ func defaultConfig() config {
 		pollInterval: time.Second,
 		retry:        backoff.NewExponentialBackOff(backoff.WithMaxElapsedTime(0)),
 		errorPolicy:  StallOnError,
+		leaseTTL:     15 * time.Second,
+		logger:       slog.Default(),
 	}
 }
 
@@ -46,10 +55,10 @@ func defaultConfig() config {
 // models and tests. It cannot roll back a failed batch, so handlers used
 // with it must be safe to apply twice.
 //
-// The runner looks for the optional [StatusStore], [Locker] and
-// [DeadLetterStore] interfaces on the store passed here. A wrapper around a
-// checkpoint store (for telemetry, say) hides them unless it implements
-// them too.
+// The runner looks for the optional [StatusStore], [Locker],
+// [DeadLetterStore] and [PartitionedCheckpointStore] interfaces on the store
+// passed here. A wrapper around a checkpoint store (for telemetry, say)
+// hides them unless it implements them too.
 func WithCheckpoints(store CheckpointStore) Option {
 	return func(c *config) { c.checkpoints = store }
 }
@@ -131,6 +140,10 @@ func WithMiddleware(mw ...eventsourcing.EventHandlerMiddleware) Option {
 // WithRetryStrategy sets how long the runner waits before retrying after a
 // failure. It is reset after every successful batch.
 //
+// A partitioned runner (see [WithPartitions]) retries each partition on its
+// own, with exponential backoff from half a second up to 30 seconds, and
+// ignores this option.
+//
 // The default is exponential backoff without an upper limit on total time:
 // a projection keeps retrying until the cause is fixed. A strategy that
 // eventually returns [backoff.Stop] makes the runner wait for its maximum
@@ -198,4 +211,10 @@ func WithOnCatchingUp(fn func(ctx context.Context, s Status) error) Option {
 // work, and an error stalls the runner and makes it call fn again.
 func WithOnLive(fn func(ctx context.Context, s Status) error) Option {
 	return func(c *config) { c.onLive = fn }
+}
+
+// WithLogger sets where the runner logs failures and partition moves. The
+// default is [slog.Default].
+func WithLogger(l *slog.Logger) Option {
+	return func(c *config) { c.logger = l }
 }

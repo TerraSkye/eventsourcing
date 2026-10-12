@@ -55,6 +55,10 @@ type Runner struct {
 
 	nudge  chan struct{}
 	status atomic.Pointer[Status]
+
+	// Set for a runner created with WithPartitions.
+	disp *dispatcher
+	part partitioned
 }
 
 // NewRunner creates a Runner for the projection called name, which routes
@@ -75,7 +79,8 @@ type Runner struct {
 //
 // NewRunner panics on wiring mistakes that would otherwise fail silently:
 // an empty name, nil handlers or store, a StreamFilter that returns no
-// event types, or [WithVersion] without [WithReset].
+// event types, [WithVersion] without [WithReset], or an incomplete
+// [WithPartitions].
 func NewRunner(name string, handlers Router, store eventsourcing.GlobalReader, opts ...Option) *Runner {
 	switch {
 	case name == "":
@@ -94,6 +99,7 @@ func NewRunner(name string, handlers Router, store eventsourcing.GlobalReader, o
 	if cfg.version != 0 && cfg.reset == nil {
 		panic(fmt.Sprintf("projection %s: WithVersion requires WithReset", name))
 	}
+	validatePartitions(name, cfg)
 
 	filter := handlers.StreamFilter()
 	if len(filter) == 0 {
@@ -112,8 +118,9 @@ func NewRunner(name string, handlers Router, store eventsourcing.GlobalReader, o
 		store:    store,
 		cfg:      cfg,
 		nudge:    make(chan struct{}, 1),
+		part:     partitioned{statuses: make(map[int]Status)},
 	}
-	r.status.Store(&Status{Phase: Starting, Version: cfg.version})
+	r.status.Store(&Status{Phase: Starting, Version: cfg.version, Partitions: cfg.partitions})
 	return r
 }
 
@@ -137,8 +144,19 @@ func (r *Runner) Name() string { return r.name }
 // lost later, Run stops processing at the next batch boundary and competes
 // again.
 //
+// On a runner created with [WithPartitions], Run instead initialises the
+// projection's leases and checkpoints if needed, claims this instance's
+// share of the partitions, and processes them; it reports [Standby] while
+// it owns none. When ctx is done, it commits what each partition has read,
+// releases its leases and leaves the live members, so other instances take
+// over at once instead of after the lease TTL. Run the runner's ctx off the
+// process's termination signal.
+//
 // Call Run once per Runner, typically in its own goroutine.
 func (r *Runner) Run(ctx context.Context) error {
+	if r.cfg.partitions > 0 {
+		return r.runPartitioned(ctx)
+	}
 	panic(errNotImplemented)
 }
 
@@ -159,8 +177,15 @@ func (r *Runner) Status() Status {
 // to the checkpoint store, which requires a [StatusStore]; without one,
 // it reports false.
 //
+// On a partitioned runner (see [WithPartitions]), Live reports whether every
+// partition is live. Since other instances own the rest, it always reads
+// the published statuses, and reports false without a [StatusStore].
+//
 // Live implements [Dependency].
 func (r *Runner) Live(ctx context.Context) (bool, error) {
+	if r.cfg.partitions > 0 {
+		return r.liveRemote(ctx)
+	}
 	panic(errNotImplemented)
 }
 
@@ -174,10 +199,15 @@ func (r *Runner) Live(ctx context.Context) (bool, error) {
 // up to the old checkpoint are reported as replayed (see [IsReplaying]).
 //
 // Rebuild only reaches the runner in this process. It returns [ErrNotActive]
-// when this instance is not running the projection, and [ErrNoReset] when
-// the runner has no reset function. To rebuild across instances, bump
-// [WithVersion] instead.
+// when this instance is not running the projection, [ErrNoReset] when
+// the runner has no reset function, and [ErrPartitioned] when it was
+// created with [WithPartitions]. To rebuild across instances, bump
+// [WithVersion] instead, or for a partitioned projection start it under a
+// new name.
 func (r *Runner) Rebuild(ctx context.Context) error {
+	if r.cfg.partitions > 0 {
+		return ErrPartitioned
+	}
 	panic(errNotImplemented)
 }
 
@@ -200,11 +230,16 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 // returns as soon as the checkpoint reaches position, whether or not the
 // event at position was relevant to it. On an instance in [Standby],
 // WaitUntil follows the status the active instance publishes, which
-// requires a [StatusStore].
+// requires a [StatusStore]. On a partitioned runner, WaitUntil waits for
+// every partition's checkpoint to reach position, following the published
+// statuses of the partitions other instances own.
 //
 // WaitUntil is also the way to wait for a projection in tests:
 // append events, then wait for the position of the last one.
 func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
+	if r.cfg.partitions > 0 {
+		return r.waitRemote(ctx, position)
+	}
 	panic(errNotImplemented)
 }
 
@@ -232,8 +267,14 @@ func (r *Runner) Nudge() {
 //
 // fn runs on the runner's goroutine and must not block; typically it is
 // another component's Nudge method. Watch implements [Watcher].
+//
+// On a partitioned runner, fn is called for the partitions this instance
+// owns only; dependents notice changes in other partitions at their next
+// poll.
 func (r *Runner) Watch(fn func()) {
-	panic(errNotImplemented)
+	r.part.mu.Lock()
+	defer r.part.mu.Unlock()
+	r.part.watchers = append(r.part.watchers, fn)
 }
 
 var (
