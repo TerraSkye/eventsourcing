@@ -78,8 +78,8 @@ func (t TelemetryProjectionStore) spanAttrs(ctx context.Context, l projection.Le
 }
 
 // Init implements [projection.Store].
-func (t TelemetryProjectionStore) Init(ctx context.Context, name string, segments int) error {
-	return t.next.Init(ctx, name, segments)
+func (t TelemetryProjectionStore) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
+	return t.next.Init(ctx, name, segments, replayUntil)
 }
 
 // Claim implements [projection.Store] and records [ProjectionClaims]. It is

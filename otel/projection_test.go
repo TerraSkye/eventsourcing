@@ -150,7 +150,7 @@ func TestProjectionTelemetry_Runner(t *testing.T) {
 func TestWithProjectionStoreTelemetry_Claim(t *testing.T) {
 	name := newProjectionName()
 	store := WithProjectionStoreTelemetry(memory.NewStore())
-	if err := store.Init(t.Context(), name, 1); err != nil {
+	if err := store.Init(t.Context(), name, 1, 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	for _, owner := range []string{"a", "b"} {
@@ -173,7 +173,7 @@ func TestWithProjectionStoreTelemetry_Claim(t *testing.T) {
 func TestWithProjectionStoreTelemetry_CommitClaimLost(t *testing.T) {
 	name := newProjectionName()
 	store := WithProjectionStoreTelemetry(memory.NewStore())
-	if err := store.Init(t.Context(), name, 1); err != nil {
+	if err := store.Init(t.Context(), name, 1, 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	err := store.Commit(t.Context(), projection.Lease{Name: name, Owner: "a"}, projection.Checkpoint{Position: 1}, projection.Status{},
@@ -194,7 +194,7 @@ func TestWithProjectionStoreTelemetry_Reset(t *testing.T) {
 	name := newProjectionName()
 	store := WithProjectionStoreTelemetry(memory.NewStore())
 	l := projection.Lease{Name: name, Owner: "a"}
-	if err := store.Init(t.Context(), name, 1); err != nil {
+	if err := store.Init(t.Context(), name, 1, 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if _, ok, err := store.Claim(t.Context(), l, time.Minute); err != nil || !ok {
