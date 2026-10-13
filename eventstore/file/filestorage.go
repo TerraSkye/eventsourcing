@@ -381,6 +381,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		StreamID:            streamID,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
+		GlobalVersion:       events[len(events)-1].GlobalVersion,
 	}, nil
 
 }
