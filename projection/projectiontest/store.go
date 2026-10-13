@@ -245,7 +245,7 @@ func (s *storeAcceptance) commitStoresStatus(t *testing.T) {
 	s.claim(t, name, 0, owner, longTTL)
 	cp := projection.Checkpoint{Position: 10, Version: 2}
 	st := projection.Status{Phase: projection.Live, Position: 10, Head: 12, Version: 2, Owner: owner}
-	if err := s.store.Commit(t.Context(), name, 0, owner, cp, st, nop); err != nil {
+	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, cp, st, nop); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func (s *storeAcceptance) commitRunsFnOnce(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	calls := 0
-	err := s.store.Commit(t.Context(), name, 0, owner, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
+	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
 		func(ctx context.Context) error {
 			calls++
 			if ctx == nil {
@@ -281,7 +281,7 @@ func (s *storeAcceptance) commitFnErrorKeepsState(t *testing.T) {
 	cp := projection.Checkpoint{Position: 3, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Commit(t.Context(), name, 0, owner,
+	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner},
 		projection.Checkpoint{Position: 9, Version: 1},
 		projection.Status{Phase: projection.Live, Position: 9, Owner: owner},
 		func(context.Context) error { return errWrite })
@@ -343,7 +343,7 @@ func (s *storeAcceptance) resetMovesCheckpoint(t *testing.T) {
 	s.claim(t, name, 0, owner, longTTL)
 	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, ReplayUntil: 2})
 
-	if err := s.store.Reset(t.Context(), name, 0, owner, 2, nop); err != nil {
+	if err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 2, nop); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	want := projection.Checkpoint{Position: 0, Version: 2, ReplayUntil: 8}
@@ -359,7 +359,7 @@ func (s *storeAcceptance) resetRunsWipeOnce(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	calls := 0
-	err := s.store.Reset(t.Context(), name, 0, owner, 1, func(context.Context) error {
+	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 1, func(context.Context) error {
 		calls++
 		return nil
 	})
@@ -377,7 +377,7 @@ func (s *storeAcceptance) resetWipeErrorKeepsState(t *testing.T) {
 	cp := projection.Checkpoint{Position: 5, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Reset(t.Context(), name, 0, owner, 2, func(context.Context) error { return errWrite })
+	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 2, func(context.Context) error { return errWrite })
 	if !errors.Is(err, errWrite) {
 		t.Fatalf("Reset with a failing wipe: got %v, want wipe's error", err)
 	}
@@ -392,7 +392,7 @@ func (s *storeAcceptance) resetNotOwner(t *testing.T) {
 	cp := projection.Checkpoint{Position: 5, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Reset(t.Context(), name, 0, other, 2, nop)
+	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, 2, nop)
 	if !errors.Is(err, projection.ErrClaimLost) {
 		t.Fatalf("Reset by a non-owner: got %v, want ErrClaimLost", err)
 	}
@@ -435,7 +435,7 @@ func (s *storeAcceptance) saveStatusPublishes(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), name, 0, owner, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	got := s.statuses(t, name)[0]
@@ -444,7 +444,7 @@ func (s *storeAcceptance) saveStatusPublishes(t *testing.T) {
 	}
 
 	st = projection.Status{Phase: projection.Live, Head: 9, Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), name, 0, owner, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	if got := s.statuses(t, name)[0]; got.Phase != projection.Live || got.LastError != "" {
@@ -461,7 +461,7 @@ func (s *storeAcceptance) saveStatusKeepsCheckpoint(t *testing.T) {
 	// A status whose Position and Version disagree with the checkpoint:
 	// SaveStatus publishes phase, head and error, never progress.
 	st := projection.Status{Phase: projection.Live, Position: 99, Version: 99, Head: 7, Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), name, 0, owner, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
@@ -476,7 +476,7 @@ func (s *storeAcceptance) saveStatusNotOwnerIgnored(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: other}
-	_ = s.store.SaveStatus(t.Context(), name, 0, other, st) // may fail or be ignored
+	_ = s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, st) // may fail or be ignored
 	got := s.statuses(t, name)[0]
 	if got.Phase == projection.Stalled || got.LastError != "" || got.Owner != owner {
 		t.Fatalf("status after a non-owner SaveStatus: got %+v, want it unchanged", got)
@@ -513,9 +513,9 @@ func (s *storeAcceptance) deadLetterInsideCommit(t *testing.T) {
 	dls := s.store.(projection.DeadLetterStore)
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	err := s.store.Commit(t.Context(), name, 0, owner, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
+	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
 		func(ctx context.Context) error {
-			return dls.SaveDeadLetter(ctx, name, 0, 1, "projectiontest.Event", errWrite)
+			return dls.SaveDeadLetter(ctx, projection.Lease{Name: name, Segment: 0, Owner: owner}, 1, "projectiontest.Event", errWrite)
 		})
 	if err != nil {
 		t.Fatalf("Commit with SaveDeadLetter: %v", err)
@@ -539,7 +539,7 @@ func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 // claim claims segment for who and fails the test if it is not granted.
 func (s *storeAcceptance) claim(t *testing.T, name string, segment int, who string, ttl time.Duration) projection.Checkpoint {
 	t.Helper()
-	cp, ok, err := s.store.Claim(t.Context(), name, segment, who, ttl)
+	cp, ok, err := s.store.Claim(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, ttl)
 	if err != nil {
 		t.Fatalf("Claim(%d, %s): %v", segment, who, err)
 	}
@@ -552,7 +552,7 @@ func (s *storeAcceptance) claim(t *testing.T, name string, segment int, who stri
 // claimFails fails the test if segment can be claimed by who.
 func (s *storeAcceptance) claimFails(t *testing.T, name string, segment int, who string, ttl time.Duration) {
 	t.Helper()
-	_, ok, err := s.store.Claim(t.Context(), name, segment, who, ttl)
+	_, ok, err := s.store.Claim(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, ttl)
 	if err != nil {
 		t.Fatalf("Claim(%d, %s): %v", segment, who, err)
 	}
@@ -565,7 +565,7 @@ func (s *storeAcceptance) claimFails(t *testing.T, name string, segment int, who
 func (s *storeAcceptance) commit(t *testing.T, name string, segment int, who string, cp projection.Checkpoint) {
 	t.Helper()
 	st := projection.Status{Phase: projection.Live, Position: cp.Position, Head: cp.Position, Version: cp.Version, Owner: who, Segment: segment}
-	if err := s.store.Commit(t.Context(), name, segment, who, cp, st, nop); err != nil {
+	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, cp, st, nop); err != nil {
 		t.Fatalf("Commit(%d, %s): %v", segment, who, err)
 	}
 }
@@ -575,14 +575,14 @@ func (s *storeAcceptance) commitLost(t *testing.T, name string, segment int, who
 	t.Helper()
 	cp := projection.Checkpoint{Position: 50, Version: 1}
 	st := projection.Status{Phase: projection.Live, Position: 50, Owner: who, Segment: segment}
-	if err := s.store.Commit(t.Context(), name, segment, who, cp, st, nop); !errors.Is(err, projection.ErrClaimLost) {
+	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, cp, st, nop); !errors.Is(err, projection.ErrClaimLost) {
 		t.Fatalf("Commit(%d, %s): got %v, want ErrClaimLost", segment, who, err)
 	}
 }
 
 func (s *storeAcceptance) release(t *testing.T, name string, segment int, who string) {
 	t.Helper()
-	if err := s.store.Release(t.Context(), name, segment, who); err != nil {
+	if err := s.store.Release(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}); err != nil {
 		t.Fatalf("Release(%d, %s): %v", segment, who, err)
 	}
 }

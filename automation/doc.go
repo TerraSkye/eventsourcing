@@ -78,8 +78,8 @@
 // dependency stopped being live are finished normally.
 //
 // The todo list may run in another process or another program; pass a
-// [projection.Remote] dependency instead of a runner. See
-// [projection.Dependency].
+// [Remote] dependency instead of a runner. See
+// [Dependency].
 //
 // # Doing the work safely
 //
@@ -102,7 +102,7 @@
 //
 // An automation claims work at every interval ([WithInterval]), and
 // immediately when nudged. When its dependencies implement
-// [projection.Watcher], as a [projection.Runner] does, the automation is
+// [Watcher], as a [projection.Runner] does, the automation is
 // nudged whenever the todo list commits new events or becomes live, so
 // new work is picked up within milliseconds.
 package automation

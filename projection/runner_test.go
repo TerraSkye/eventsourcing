@@ -157,9 +157,9 @@ func save(t *testing.T, store *testStore, n int) uint64 {
 			Version:  uint64(i + 1),
 		}
 	}
-	res, err := store.Save(context.Background(), envs, eventsourcing.Any{})
+	res, err := store.Save(t.Context(), envs, eventsourcing.Any{})
 	if err != nil {
-		t.Fatalf("save: %v", err)
+		t.Fatalf("Save(%d events) = %v", n, err)
 	}
 	return res.GlobalVersion
 }
@@ -167,7 +167,7 @@ func save(t *testing.T, store *testStore, n int) uint64 {
 // runRunner starts r and returns a cancel func that waits for Run to exit.
 func runRunner(t *testing.T, r *projection.Runner) func() {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
 		_ = r.Run(ctx)
@@ -208,7 +208,7 @@ func TestRunner_CatchesUpAndLive(t *testing.T) {
 	r := newRunner(c, es, 1)
 	defer runRunner(t, r)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v", err)
@@ -216,7 +216,7 @@ func TestRunner_CatchesUpAndLive(t *testing.T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.applied) != 3 {
-		t.Fatalf("want 3 applied, got %d: %v", len(c.applied), c.applied)
+		t.Fatalf("applied %d events, want 3: %v", len(c.applied), c.applied)
 	}
 }
 
@@ -232,14 +232,14 @@ func TestRunner_WaitUntilReturnsOnLive(t *testing.T) {
 	last := save(t, es, 2)
 	r.Nudge()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v", err)
 	}
 	live, err := r.Live(ctx)
 	if err != nil || !live {
-		t.Fatalf("want live=true nil, got %v %v", live, err)
+		t.Fatalf("Live() = %v, %v; want true, nil", live, err)
 	}
 }
 
@@ -251,7 +251,7 @@ func TestRunner_Rebuild(t *testing.T) {
 	r := newRunner(c, es, 1)
 	defer runRunner(t, r)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("initial WaitUntil: %v", err)
@@ -267,11 +267,11 @@ func TestRunner_Rebuild(t *testing.T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.resets != 1 {
-		t.Fatalf("want 1 reset, got %d", c.resets)
+		t.Fatalf("Reset ran %d times, want 1", c.resets)
 	}
 	for gv := uint64(1); gv <= 3; gv++ {
 		if !c.replayed[gv] {
-			t.Fatalf("event %d should be marked replayed after rebuild", gv)
+			t.Fatalf("IsReplaying for event %d after Rebuild = false, want true", gv)
 		}
 	}
 }
@@ -309,7 +309,7 @@ func TestRunner_StallsOnError(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("want Stalled, got %s", r.Status().Phase)
+	t.Fatalf("Status().Phase = %s, want %s", r.Status().Phase, projection.Stalled)
 }
 
 func TestRunner_Panics(t *testing.T) {
@@ -342,7 +342,7 @@ func TestRunner_Panics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
 				if r := recover(); r == nil {
-					t.Fatal("expected panic")
+					t.Fatal("NewRunner did not panic")
 				}
 			}()
 			tc.fn()
@@ -360,7 +360,7 @@ func TestRunner_Segmented(t *testing.T) {
 			{EventID: uuid.New(), StreamID: sid, Event: &taskCreated{ID: sid}, Version: 1},
 			{EventID: uuid.New(), StreamID: sid, Event: &taskCreated{ID: sid}, Version: 2},
 		}
-		if _, err := es.Save(context.Background(), envs, eventsourcing.Any{}); err != nil {
+		if _, err := es.Save(t.Context(), envs, eventsourcing.Any{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -377,7 +377,7 @@ func TestRunner_Segmented(t *testing.T) {
 	}, es, memory.NewStore())
 	defer runRunner(t, r)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := r.WaitUntil(ctx, 6); err != nil {
 		t.Fatalf("WaitUntil: %v", err)
@@ -385,7 +385,7 @@ func TestRunner_Segmented(t *testing.T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.applied) != 6 {
-		t.Fatalf("want all 6 events applied across segments, got %d: %v", len(c.applied), c.applied)
+		t.Fatalf("segments applied %d events together, want 6: %v", len(c.applied), c.applied)
 	}
 }
 
@@ -415,13 +415,13 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 		ClaimTTL:     time.Second,
 	}, es, memory.NewStore())
 
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- r.Run(runCtx) }()
 	time.Sleep(100 * time.Millisecond)
 
-	ctx, cancelRebuild := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancelRebuild := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancelRebuild()
 	_ = r.Rebuild(ctx)
 
@@ -436,7 +436,7 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 // running returns ErrNotActive instead of blocking until ctx is done.
 func TestRunner_RebuildNotActive(t *testing.T) {
 	r := newRunner(newCounter(), &testStore{}, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	if err := r.Rebuild(ctx); !errors.Is(err, projection.ErrNotActive) {
 		t.Fatalf("Rebuild on a runner that is not running = %v, want ErrNotActive", err)
@@ -472,7 +472,7 @@ func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 	r := newSkipRunner()
 	defer runRunner(t, r)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v; status %+v", err, r.Status())
@@ -495,7 +495,7 @@ func TestRunner_SegmentedVersionBumpKeepsEveryRow(t *testing.T) {
 		sid := "stream-" + strconv.Itoa(i)
 		hit[projection.SegmentOf(sid, segments)] = true
 		envs := []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: sid, Event: &taskCreated{ID: sid}, Version: 1}}
-		if _, err := es.Save(context.Background(), envs, eventsourcing.Any{}); err != nil {
+		if _, err := es.Save(t.Context(), envs, eventsourcing.Any{}); err != nil {
 			t.Fatal(err)
 		}
 		total++
@@ -521,7 +521,7 @@ func TestRunner_SegmentedVersionBumpKeepsEveryRow(t *testing.T) {
 
 	v1 := newVersioned(1, c.Reset)
 	stop := runRunner(t, v1)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if err := v1.WaitUntil(ctx, uint64(total)); err != nil {
 		t.Fatalf("v1 WaitUntil: %v", err)
@@ -555,7 +555,7 @@ func TestRunner_SegmentedVersionBumpKeepsEveryRow(t *testing.T) {
 }
 
 // TestRunner_NotLiveAfterShutdown covers that a projection whose only
-// runner has stopped is not reported Live to other programs.
+// runner has stopped is not reported Live to other instances.
 func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	es := &testStore{}
 	ps := memory.NewStore()
@@ -567,7 +567,7 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 		ClaimTTL:     time.Second,
 	}, es, ps)
 	stop := runRunner(t, r)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	for {
 		if live, _ := r.Live(ctx); live {
@@ -580,12 +580,19 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	}
 	stop()
 
-	live, err := projection.Remote("test", ps).Live(context.Background())
+	// A runner of another instance answers from the store.
+	other := projection.NewRunner(projection.Projection{
+		Name:    "test",
+		Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+		Events:  counterEvents,
+		Owner:   "other",
+	}, es, ps)
+	live, err := other.Live(t.Context())
 	if err != nil {
-		t.Fatalf("Remote.Live: %v", err)
+		t.Fatalf("Live() on another instance: %v", err)
 	}
 	if live {
-		t.Fatal("Remote.Live = true after the only runner stopped")
+		t.Fatal("Live() on another instance = true after the only runner stopped, want false")
 	}
 }
 
