@@ -3,9 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,6 +335,13 @@ func TestRunner_Panics(t *testing.T) {
 			c := newCounter()
 			projection.NewRunner(projection.Projection{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), Events: counterEvents, Segments: 2}, &nopReader{}, memory.NewStore())
 		}},
+		{"segments with version", func() {
+			c := newCounter()
+			projection.NewRunner(projection.Projection{
+				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), Events: counterEvents,
+				Segments: 2, SegmentKey: projection.ByStreamID, Version: 1, Reset: c.Reset,
+			}, &nopReader{}, memory.NewStore())
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -482,76 +487,84 @@ func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 	}
 }
 
-// TestRunner_SegmentedVersionBumpKeepsEveryRow covers that bumping Version
-// on a segmented projection rebuilds every segment's rows: one segment's
-// Reset must not wipe rows another segment has already rebuilt.
-func TestRunner_SegmentedVersionBumpKeepsEveryRow(t *testing.T) {
-	const segments = 2
+// TestRunner_ReplayUntilKeptAcrossRestart covers that events appended
+// while a projection that first started on an empty log was down are new,
+// not replayed: the replay boundary is the head at the first start, not at
+// the restart.
+func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 	es := &testStore{}
 	ps := memory.NewStore()
-	hit := map[int]bool{}
-	var total int
-	for i := 0; i < 8; i++ {
-		sid := "stream-" + strconv.Itoa(i)
-		hit[projection.SegmentOf(sid, segments)] = true
-		envs := []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: sid, Event: &taskCreated{ID: sid}, Version: 1}}
-		if _, err := es.Save(t.Context(), envs, eventsourcing.Any{}); err != nil {
-			t.Fatal(err)
-		}
-		total++
-	}
-	if len(hit) != segments {
-		t.Fatalf("test streams cover %d of %d segments", len(hit), segments)
-	}
-
 	c := newCounter()
-	newVersioned := func(version int, reset func(context.Context) error) *projection.Runner {
+	newPlain := func() *projection.Runner {
 		return projection.NewRunner(projection.Projection{
-			Name:         "test-seg",
+			Name:         "test",
 			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
 			Events:       counterEvents,
-			Version:      version,
-			Reset:        reset,
-			Segments:     segments,
-			SegmentKey:   projection.ByStreamID,
 			PollInterval: 10 * time.Millisecond,
 			ClaimTTL:     time.Second,
 		}, es, ps)
 	}
 
-	v1 := newVersioned(1, c.Reset)
-	stop := runRunner(t, v1)
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	if err := v1.WaitUntil(ctx, uint64(total)); err != nil {
-		t.Fatalf("v1 WaitUntil: %v", err)
-	}
+	stop := runRunner(t, newPlain())
+	time.Sleep(100 * time.Millisecond) // live on an empty log
 	stop()
 
-	// Delay every Reset after the first, so one segment has rebuilt its
-	// share before the other segment resets.
-	var resets atomic.Int32
-	delayed := func(ctx context.Context) error {
-		if resets.Add(1) > 1 {
-			time.Sleep(200 * time.Millisecond)
-		}
-		return c.Reset(ctx)
-	}
-	defer runRunner(t, newVersioned(2, delayed))()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		n := len(c.applied)
-		c.mu.Unlock()
-		if resets.Load() == segments && n == total {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	last := save(t, es, 2)
+	r := newPlain()
+	defer runRunner(t, r)()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil(%d): %v", last, err)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	t.Fatalf("after the v2 rebuild (%d resets) the read model holds %d of %d events", resets.Load(), len(c.applied), total)
+	for gv := uint64(1); gv <= last; gv++ {
+		if c.replayed[gv] {
+			t.Errorf("IsReplaying for event %d appended after the first start = true, want false", gv)
+		}
+	}
+}
+
+// TestRunner_DropsSegmentWhenSaveStatusLosesClaim covers that a runner
+// whose status publish is refused because another instance took the
+// segment stops reporting the segment as its own.
+func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
+	es := &testStore{}
+	ps := memory.NewStore()
+	r := projection.NewRunner(projection.Projection{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+		Events:       counterEvents,
+		Owner:        "a",
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Hour,
+	}, es, ps)
+	defer runRunner(t, r)()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	for r.Status().Owner != "a" {
+		if ctx.Err() != nil {
+			t.Fatalf("runner never claimed the segment; status %+v", r.Status())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Take the segment over: release it as a, then claim it as b.
+	if err := ps.Release(t.Context(), projection.Lease{Name: "test", Owner: "a"}); err != nil {
+		t.Fatalf("Release(a): %v", err)
+	}
+	if _, ok, err := ps.Claim(t.Context(), projection.Lease{Name: "test", Owner: "b"}, time.Hour); err != nil || !ok {
+		t.Fatalf("Claim(b) = %v, %v; want true, nil", ok, err)
+	}
+
+	for r.Status().Phase != projection.Standby {
+		if ctx.Err() != nil {
+			t.Fatalf("Status() after b took the segment = %+v, want phase %s", r.Status(), projection.Standby)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestRunner_NotLiveAfterShutdown covers that a projection whose only

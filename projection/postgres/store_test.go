@@ -86,7 +86,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	a := projection.Lease{Name: name, Segment: 0, Owner: "a"}
 	b := projection.Lease{Name: name, Segment: 0, Owner: "b"}
 
-	if err := store.Init(ctx, name, 1); err != nil {
+	if err := store.Init(ctx, name, 1, 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if _, ok, err := store.Claim(ctx, a, ttl); err != nil || !ok {

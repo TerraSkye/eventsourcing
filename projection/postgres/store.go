@@ -109,9 +109,9 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-// Init creates the segment rows for name on first use, and verifies the
-// count has not changed since.
-func (s *Store) Init(ctx context.Context, name string, segments int) error {
+// Init implements [projection.Store]: it creates the segment rows for name
+// on first use, and verifies the count has not changed since.
+func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	// Count existing rows; if none, insert; if some, verify the count.
 	var count int
 	err := s.db.QueryRow(ctx,
@@ -121,7 +121,7 @@ func (s *Store) Init(ctx context.Context, name string, segments int) error {
 		return fmt.Errorf("projection/postgres: init %q: count segments: %w", name, err)
 	}
 	if count == 0 {
-		return s.insertSegments(ctx, name, segments)
+		return s.insertSegments(ctx, name, segments, replayUntil)
 	}
 	if count != segments {
 		return projection.ErrSegmentsChanged
@@ -129,13 +129,13 @@ func (s *Store) Init(ctx context.Context, name string, segments int) error {
 	return nil
 }
 
-func (s *Store) insertSegments(ctx context.Context, name string, segments int) error {
+func (s *Store) insertSegments(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	batch := &pgx.Batch{}
 	for i := 0; i < segments; i++ {
 		batch.Queue(
-			`INSERT INTO projection_segments (name, segment) VALUES ($1, $2)
+			`INSERT INTO projection_segments (name, segment, replay_until) VALUES ($1, $2, $3)
 			 ON CONFLICT (name, segment) DO NOTHING`,
-			name, i,
+			name, i, replayUntil,
 		)
 	}
 	br := s.db.SendBatch(ctx, batch)
@@ -255,7 +255,7 @@ func lockOwned(ctx context.Context, tx pgx.Tx, l projection.Lease) (uint64, erro
 func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
-		SET owner = NULL
+		SET owner = NULL, phase = 'standby'
 		WHERE name = $1 AND segment = $2 AND owner = $3`,
 		l.Name, l.Segment, l.Owner,
 	)
@@ -271,7 +271,7 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 	if status.LastError != "" {
 		lastErr = status.LastError
 	}
-	_, err := s.db.Exec(ctx, `
+	tag, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET phase = $3, head = $4, last_error = $5, heartbeat = clock_timestamp()
 		WHERE name = $1 AND segment = $2 AND owner = $6`,
@@ -279,6 +279,9 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 	)
 	if err != nil {
 		return fmt.Errorf("projection/postgres: save status of %q segment %d: %w", l.Name, l.Segment, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return projection.ErrClaimLost
 	}
 	return nil
 }

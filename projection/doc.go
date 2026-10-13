@@ -124,7 +124,8 @@
 //
 //   - Bump [Projection.Version] when you change how the projection writes
 //     its read model. On start, a runner whose stored version differs from
-//     its configured one rebuilds automatically.
+//     its configured one rebuilds automatically. A segmented projection
+//     has no Version: rebuild it under a new [Projection.Name].
 //   - Call [Runner.Rebuild] on the active instance.
 //
 // Adding an event type to [Projection.Events] counts as a change: without

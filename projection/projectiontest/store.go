@@ -61,6 +61,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"Idempotent":          s.initIdempotent,
 		"SegmentsChanged":     s.initSegmentsChanged,
 		"KeepsStoredProgress": s.initKeepsStoredProgress,
+		"SetsReplayUntil":     s.initSetsReplayUntil,
 	})
 	s.group(t, "Claim", map[string]func(*testing.T){
 		"Fresh":               s.claimFresh,
@@ -90,12 +91,13 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	s.group(t, "Release", map[string]func(*testing.T){
 		"LetsOtherClaim": s.releaseLetsOtherClaim,
 		"ClearsOwner":    s.releaseClearsOwner,
+		"MarksStandby":   s.releaseMarksStandby,
 		"NotOwnerNoop":   s.releaseNotOwnerNoop,
 	})
 	s.group(t, "SaveStatus", map[string]func(*testing.T){
 		"Publishes":       s.saveStatusPublishes,
 		"KeepsCheckpoint": s.saveStatusKeepsCheckpoint,
-		"NotOwnerIgnored": s.saveStatusNotOwnerIgnored,
+		"NotOwnerRefused": s.saveStatusNotOwnerRefused,
 	})
 	s.group(t, "LoadStatuses", map[string]func(*testing.T){
 		"UnknownName": s.loadStatusesUnknownName,
@@ -143,7 +145,7 @@ func (s *storeAcceptance) initCreatesSegments(t *testing.T) {
 
 func (s *storeAcceptance) initIdempotent(t *testing.T) {
 	name := s.newProjection(t, 2)
-	if err := s.store.Init(t.Context(), name, 2); err != nil {
+	if err := s.store.Init(t.Context(), name, 2, 0); err != nil {
 		t.Fatalf("second Init with the same segments: %v", err)
 	}
 	if n := len(s.statuses(t, name)); n != 2 {
@@ -153,7 +155,7 @@ func (s *storeAcceptance) initIdempotent(t *testing.T) {
 
 func (s *storeAcceptance) initSegmentsChanged(t *testing.T) {
 	name := s.newProjection(t, 2)
-	if err := s.store.Init(t.Context(), name, 3); !errors.Is(err, projection.ErrSegmentsChanged) {
+	if err := s.store.Init(t.Context(), name, 3, 0); !errors.Is(err, projection.ErrSegmentsChanged) {
 		t.Fatalf("Init with a different segment count: got %v, want ErrSegmentsChanged", err)
 	}
 }
@@ -164,11 +166,27 @@ func (s *storeAcceptance) initKeepsStoredProgress(t *testing.T) {
 	cp := projection.Checkpoint{Position: 4, Version: 1, ReplayUntil: 2}
 	s.commit(t, name, 0, owner, cp)
 
-	if err := s.store.Init(t.Context(), name, 1); err != nil {
+	if err := s.store.Init(t.Context(), name, 1, 0); err != nil {
 		t.Fatalf("second Init: %v", err)
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
 		t.Fatalf("checkpoint after a repeated Init: got %+v, want %+v", got, cp)
+	}
+}
+
+func (s *storeAcceptance) initSetsReplayUntil(t *testing.T) {
+	name := "projectiontest-" + uuid.NewString()
+	if err := s.store.Init(t.Context(), name, 2, 9); err != nil {
+		t.Fatalf("Init(2, replayUntil 9): %v", err)
+	}
+	if err := s.store.Init(t.Context(), name, 2, 12); err != nil {
+		t.Fatalf("second Init(2, replayUntil 12): %v", err)
+	}
+	for seg := range 2 {
+		want := projection.Checkpoint{ReplayUntil: 9}
+		if got := s.claim(t, name, seg, owner, longTTL); got != want {
+			t.Errorf("Claim of segment %d = %+v, want %+v from the first Init", seg, got, want)
+		}
 	}
 }
 
@@ -419,6 +437,16 @@ func (s *storeAcceptance) releaseClearsOwner(t *testing.T) {
 	}
 }
 
+func (s *storeAcceptance) releaseMarksStandby(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 1})
+	s.release(t, name, 0, owner)
+	if got := s.statuses(t, name)[0].Phase; got != projection.Standby {
+		t.Fatalf("Phase after Release = %s, want %s", got, projection.Standby)
+	}
+}
+
 func (s *storeAcceptance) releaseNotOwnerNoop(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
@@ -472,11 +500,13 @@ func (s *storeAcceptance) saveStatusKeepsCheckpoint(t *testing.T) {
 	}
 }
 
-func (s *storeAcceptance) saveStatusNotOwnerIgnored(t *testing.T) {
+func (s *storeAcceptance) saveStatusNotOwnerRefused(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: other}
-	_ = s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, st) // may fail or be ignored
+	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, st); !errors.Is(err, projection.ErrClaimLost) {
+		t.Errorf("SaveStatus by a non-owner = %v, want ErrClaimLost", err)
+	}
 	got := s.statuses(t, name)[0]
 	if got.Phase == projection.Stalled || got.LastError != "" || got.Owner != owner {
 		t.Fatalf("status after a non-owner SaveStatus: got %+v, want it unchanged", got)
@@ -530,7 +560,7 @@ func nop(context.Context) error { return nil }
 func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 	t.Helper()
 	name := "projectiontest-" + uuid.NewString()
-	if err := s.store.Init(t.Context(), name, segments); err != nil {
+	if err := s.store.Init(t.Context(), name, segments, 0); err != nil {
 		t.Fatalf("Init(%d): %v", segments, err)
 	}
 	return name
