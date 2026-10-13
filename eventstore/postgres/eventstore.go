@@ -20,8 +20,8 @@ import (
 const pgUniqueViolation = "23505"
 
 var (
-	_ cqrs.EventStore   = (*eventstore)(nil)
-	_ cqrs.GlobalReader = (*eventstore)(nil)
+	_ cqrs.EventStore   = (*EventStore)(nil)
+	_ cqrs.GlobalReader = (*EventStore)(nil)
 )
 
 // appendLockKey is the two-key advisory lock every Save takes before it
@@ -30,19 +30,20 @@ var (
 // collides with a stream's hashtext.
 const appendLockKey1, appendLockKey2 = 0x65766e74, 0x616c6c00 // "evnt", "all"
 
-// eventstore is a PostgreSQL-backed [cqrs.EventStore]. Stream membership and
-// per-stream ordering are recorded in the events table's stream_id and
-// stream_position columns; the table's own auto-incrementing id column
-// is the GlobalVersion that [eventstore.ReadAll] orders by.
-type eventstore struct {
+// EventStore is a PostgreSQL-backed [cqrs.EventStore] that also implements
+// [cqrs.GlobalReader]. Stream membership and per-stream ordering are recorded
+// in the events table's stream_id and stream_position columns; the table's
+// own auto-incrementing id column is the GlobalVersion that
+// [EventStore.ReadAll] orders by. Create one with [NewEventStore].
+type EventStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewEventStore returns a PostgreSQL-backed [cqrs.EventStore]. The pool must
+// NewEventStore returns a PostgreSQL-backed [EventStore]. The pool must
 // already be configured to connect to a database containing the events
 // table; NewEventStore does not create or migrate the schema.
-func NewEventStore(pool *pgxpool.Pool) cqrs.EventStore {
-	return &eventstore{pool: pool}
+func NewEventStore(pool *pgxpool.Pool) *EventStore {
+	return &EventStore{pool: pool}
 }
 
 // Save appends events to the stream they share, enforcing the concurrency
@@ -61,13 +62,13 @@ func NewEventStore(pool *pgxpool.Pool) cqrs.EventStore {
 // visible at COMMIT; without that lock, a transaction could commit id 52
 // while another still holds 51, and a reader that moved past 52 would
 // never see 51. With it, appends assign ids and commit one at a time, so
-// ids become visible in order and [eventstore.ReadAll] needs no visibility
+// ids become visible in order and [EventStore.ReadAll] needs no visibility
 // filter. The cost is that appends to different streams no longer commit in
 // parallel; only the inserts and the commit run under the lock.
 //
 // On success it returns a [cqrs.AppendResult] whose NextExpectedVersion is
 // the stream's new length.
-func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
+func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true}, nil
 	}
@@ -203,7 +204,7 @@ func (s *eventstore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 // LoadStream returns a lazy iterator over all events in the stream
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
-func (s *eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (s *EventStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM events WHERE stream_id = $1)", id).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("load stream %q: check existence: %w", id, err)
@@ -227,7 +228,7 @@ func (s *eventstore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 // returned, so a caller that has already processed n events resumes exactly
 // where it left off; a zero revision behaves like reading from the
 // beginning.
-func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	switch version.(type) {
 	case cqrs.NoStream:
 		var exists bool
@@ -274,9 +275,9 @@ func (s *eventstore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 // the highest visible id is either committed or permanently abandoned (a
 // rolled-back insert leaves a hole in the sequence, never a late row), so
 // ReadAll reads up to that id without a visibility filter.
-func (s *eventstore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
+func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
 	if after > math.MaxInt64 {
-		return cqrs.ReadResult{}, fmt.Errorf("read all after %d: %w", after, cqrs.ErrInvalidRevision)
+		return cqrs.ReadResult{}, fmt.Errorf("%w: read all after %d", cqrs.ErrInvalidRevision, after)
 	}
 	limit := opts.Limit
 	if limit <= 0 {
@@ -338,7 +339,7 @@ func (s *eventstore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 
 // Head implements [cqrs.GlobalReader]: the highest id in the events table,
 // or 0 if it is empty.
-func (s *eventstore) Head(ctx context.Context) (uint64, error) {
+func (s *EventStore) Head(ctx context.Context) (uint64, error) {
 	var head int64
 	if err := s.pool.QueryRow(ctx, "SELECT coalesce(max(id), 0) FROM events").Scan(&head); err != nil {
 		return 0, fmt.Errorf("head: %w", err)
@@ -348,7 +349,7 @@ func (s *eventstore) Head(ctx context.Context) (uint64, error) {
 
 // Close closes the underlying connection pool. It is safe to call more than
 // once.
-func (s *eventstore) Close() error {
+func (s *EventStore) Close() error {
 	s.pool.Close()
 	return nil
 }
@@ -356,7 +357,7 @@ func (s *eventstore) Close() error {
 // queryRows executes a SELECT and returns a lazy [cqrs.Iterator] over the
 // resulting [cqrs.Envelope] values. The underlying rows are held open until
 // the iterator is exhausted or an error occurs.
-func (s *eventstore) queryRows(ctx context.Context, sql string, args ...any) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (s *EventStore) queryRows(ctx context.Context, sql string, args ...any) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err

@@ -31,12 +31,14 @@ CREATE INDEX IF NOT EXISTS idx_events_stream_id ON events (stream_id);
 ## Constructor
 
 ```go
-func NewEventStore(pool *pgxpool.Pool) cqrs.EventStore
+func NewEventStore(pool *pgxpool.Pool) *EventStore
 ```
 
 | Parameter | Description |
 |---|---|
 | `pool` | A `pgxpool.Pool` connected to a database containing the events table. |
+
+The returned `*EventStore` implements both `EventStore` and `GlobalReader`.
 
 ```go
 pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))

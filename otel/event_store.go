@@ -2,7 +2,6 @@ package otel
 
 import (
 	"context"
-	"errors"
 	"io"
 	"maps"
 	"math"
@@ -18,8 +17,9 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = (*TelemetryStore)(nil)
-	_ eventsourcing.GlobalReader = (*TelemetryStore)(nil)
+	_ eventsourcing.EventStore   = TelemetryStore{}
+	_ eventsourcing.EventStore   = telemetryGlobalStore{}
+	_ eventsourcing.GlobalReader = telemetryGlobalStore{}
 )
 
 // TelemetryStore wraps an [eventsourcing.EventStore], instrumenting every
@@ -257,23 +257,20 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 		}), nil
 }
 
-// ErrGlobalReadUnsupported is returned by [TelemetryStore.ReadAll] and
-// [TelemetryStore.Head] when the wrapped store does not implement
-// [eventsourcing.GlobalReader].
-var ErrGlobalReadUnsupported = errors.New("otel: wrapped event store does not implement eventsourcing.GlobalReader")
+// telemetryGlobalStore is a [TelemetryStore] around a store that also
+// implements [eventsourcing.GlobalReader]. [WithEventStoreTelemetry] returns
+// one in that case, so the wrapper reads the global log exactly when the
+// wrapped store can.
+type telemetryGlobalStore struct {
+	TelemetryStore
+	reader eventsourcing.GlobalReader
+}
 
-// ReadAll reads a page of the global log from the wrapped store, which must
-// implement [eventsourcing.GlobalReader], inside a client span tagged with
-// the after position and, once done, the number of events returned. It
-// records [EventStoreDuration] and [EventsLoaded], and [EventStoreErrors] on
-// failure. If the wrapped store cannot read the global log, it returns
-// [ErrGlobalReadUnsupported].
-func (t TelemetryStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
-	reader, ok := t.next.(eventsourcing.GlobalReader)
-	if !ok {
-		return eventsourcing.ReadResult{}, ErrGlobalReadUnsupported
-	}
-
+// ReadAll reads a page of the global log from the wrapped store inside a
+// client span tagged with the after position and, once done, the number of
+// events returned. It records [EventStoreDuration] and [EventsLoaded], and
+// [EventStoreErrors] on failure.
+func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	startedAt := time.Now()
 	ctx, span := tracer.Start(ctx, "read_all eventstore",
 		trace.WithSpanKind(trace.SpanKindClient),
@@ -284,7 +281,7 @@ func (t TelemetryStore) ReadAll(ctx context.Context, after uint64, opts eventsou
 	)
 	defer span.End()
 
-	res, err := reader.ReadAll(ctx, after, opts)
+	res, err := t.reader.ReadAll(ctx, after, opts)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("read_all")))
 		span.RecordError(err)
@@ -297,16 +294,10 @@ func (t TelemetryStore) ReadAll(ctx context.Context, after uint64, opts eventsou
 	return res, nil
 }
 
-// Head returns the head of the global log from the wrapped store, which
-// must implement [eventsourcing.GlobalReader]. It is not traced: it is a
-// cheap call made often to measure lag. If the wrapped store cannot read
-// the global log, it returns [ErrGlobalReadUnsupported].
-func (t TelemetryStore) Head(ctx context.Context) (uint64, error) {
-	reader, ok := t.next.(eventsourcing.GlobalReader)
-	if !ok {
-		return 0, ErrGlobalReadUnsupported
-	}
-	return reader.Head(ctx)
+// Head returns the head of the global log from the wrapped store. It is not
+// traced: it is a cheap call made often to measure lag.
+func (t telemetryGlobalStore) Head(ctx context.Context) (uint64, error) {
+	return t.reader.Head(ctx)
 }
 
 // Close closes the underlying [eventsourcing.EventStore]. It delegates
@@ -319,12 +310,20 @@ func (t TelemetryStore) Close() error {
 // every save and load with OpenTelemetry tracing and metrics as described on
 // [TelemetryStore]. Options such as [WithAttributes] and [WithOperation]
 // customize the spans produced.
+//
+// If next also implements [eventsourcing.GlobalReader], so does the returned
+// store, and its ReadAll is traced as well; otherwise the returned store is
+// only an [eventsourcing.EventStore].
 func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) eventsourcing.EventStore {
 	cfg := &config{}
 	for _, o := range options {
 		o.apply(cfg)
 	}
-	return TelemetryStore{next: next, cfg: cfg}
+	store := TelemetryStore{next: next, cfg: cfg}
+	if reader, ok := next.(eventsourcing.GlobalReader); ok {
+		return telemetryGlobalStore{TelemetryStore: store, reader: reader}
+	}
+	return store
 }
 
 // EventStoreTelemetry returns an [eventsourcing.EventStoreMiddleware] that

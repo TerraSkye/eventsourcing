@@ -152,7 +152,6 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 // must skip rather than fail to decode.
 func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 	store := kdbstore.NewEventStore(testDB)
-	reader := store.(cqrs.GlobalReader)
 	ctx := context.Background()
 	streamID := "check-readall-end"
 
@@ -171,7 +170,7 @@ func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 	go func() {
 		var after uint64
 		for {
-			res, err := reader.ReadAll(ctx, after, cqrs.ReadOptions{Limit: 100})
+			res, err := store.ReadAll(ctx, after, cqrs.ReadOptions{Limit: 100})
 			if err != nil {
 				done <- err
 				return
@@ -420,5 +419,5 @@ func TestAcceptance(t *testing.T) {
 
 func TestGlobalReaderAcceptance(t *testing.T) {
 	store := kdbstore.NewEventStore(testDB)
-	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store.(cqrs.GlobalReader))
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }

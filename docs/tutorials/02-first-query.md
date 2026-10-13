@@ -167,7 +167,7 @@ Expected:
 
 `ReadAll` returns the global log — every event across all streams, in the order they were stored — a page at a time. The query handler pages through all of it and applies only the events it cares about (`TaskCreated`) to build the list. It could also ask `ReadAll` for only those events with `ReadOptions{EventTypes: ...}`.
 
-`ReadAll` belongs to `eventsourcing.GlobalReader`, which the memory, file, Postgres and KurrentDB stores implement next to `EventStore`. `memory.NewMemoryStore` returns the concrete store, so `main.go` can pass it to both handlers; for a store whose constructor returns an `EventStore`, assert it with `store.(eventsourcing.GlobalReader)`.
+`ReadAll` belongs to `eventsourcing.GlobalReader`, which the memory, file, Postgres and KurrentDB stores implement next to `EventStore`. Their constructors return the concrete store, so `main.go` can pass `memory.NewMemoryStore`'s result to both handlers.
 
 This is the same `evolve` pattern used in commands — the only difference is the output is a read model rather than aggregate state used for business rules.
 

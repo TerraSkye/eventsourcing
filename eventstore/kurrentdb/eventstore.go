@@ -18,21 +18,23 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = eventstore{}
-	_ eventsourcing.GlobalReader = eventstore{}
+	_ eventsourcing.EventStore   = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader = (*EventStore)(nil)
 )
 
-// eventstore is a KurrentDB-backed [cqrs.EventStore], delegating stream
-// storage, ordering, and revision checks to the KurrentDB server itself.
-type eventstore struct {
+// EventStore is a KurrentDB-backed [eventsourcing.EventStore] that also
+// implements [eventsourcing.GlobalReader], delegating stream storage,
+// ordering, and revision checks to the KurrentDB server itself. Create one
+// with [NewEventStore].
+type EventStore struct {
 	client     *kurrentdb.Client
 	newBackoff func() backoff.BackOff
 }
 
-// NewEventStore returns a KurrentDB-backed [cqrs.EventStore] that uses db for
-// all operations.
-func NewEventStore(db *kurrentdb.Client, opts ...Option) eventsourcing.EventStore {
-	e := &eventstore{
+// NewEventStore returns a KurrentDB-backed [EventStore] that uses db for all
+// operations.
+func NewEventStore(db *kurrentdb.Client, opts ...Option) *EventStore {
+	e := &EventStore{
 		client:     db,
 		newBackoff: defaultSaveBackoff,
 	}
@@ -42,8 +44,8 @@ func NewEventStore(db *kurrentdb.Client, opts ...Option) eventsourcing.EventStor
 	return e
 }
 
-// Option configures an [eventstore] returned by [NewEventStore].
-type Option func(*eventstore)
+// Option configures an [EventStore] returned by [NewEventStore].
+type Option func(*EventStore)
 
 // WithBackoff overrides the [backoff.BackOff] Save uses to retry transient
 // gRPC errors, in place of the default described on Save's doc comment.
@@ -51,7 +53,7 @@ type Option func(*eventstore)
 // zero-state backoff.BackOff each time rather than a shared, already-used
 // instance.
 func WithBackoff(newBackoff func() backoff.BackOff) Option {
-	return func(e *eventstore) {
+	return func(e *EventStore) {
 		e.newBackoff = newBackoff
 	}
 }
@@ -103,7 +105,7 @@ func defaultSaveBackoff() backoff.BackOff {
 // [cqrs.StreamExists] expectation matches [cqrs.ErrStreamNotFound], a
 // violated [cqrs.Revision] is a [cqrs.StreamRevisionConflictError], and
 // anything else is mapped by [mapError].
-func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
+func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
@@ -232,7 +234,7 @@ func (e eventstore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 // count may already be newer than the one the append was rejected against.
 // It returns nil if the read fails; [eventsourcing.StreamRevisionConflictError]
 // renders a nil revision without trouble.
-func (e eventstore) currentRevision(ctx context.Context, streamID string) eventsourcing.StreamState {
+func (e EventStore) currentRevision(ctx context.Context, streamID string) eventsourcing.StreamState {
 	streamer, err := e.client.ReadStream(ctx, streamID, kurrentdb.ReadStreamOptions{
 		Direction: kurrentdb.Backwards,
 		From:      kurrentdb.End{},
@@ -263,7 +265,7 @@ func (e eventstore) currentRevision(ctx context.Context, streamID string) events
 // the server only reports the missing stream once the first event is
 // requested. Every other failure reaches Err too, mapped through
 // [mapError]; only a genuine end of stream ends iteration with a nil Err.
-func (e eventstore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (e EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	return e.LoadStreamFrom(ctx, id, eventsourcing.StreamExists{})
 }
 
@@ -282,7 +284,7 @@ func (e eventstore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 // missing stream is an empty read, which is what lets a command handler
 // load a brand-new aggregate. Every other failure ends iteration with an
 // error, mapped through [mapError].
-func (e eventstore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (e EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	var (
 		from           kurrentdb.StreamPosition = kurrentdb.Start{}
 		missingIsEmpty                          = true
@@ -361,7 +363,7 @@ const scanLimit = 4096
 //
 // KurrentDB only makes a position readable once everything before it is,
 // so reading $all is gap-free without further work.
-func (e eventstore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+func (e EventStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 500
@@ -432,7 +434,7 @@ func (e eventstore) ReadAll(ctx context.Context, after uint64, opts eventsourcin
 // Head implements [eventsourcing.GlobalReader]: the commit position of the
 // newest application event in $all, skipping KurrentDB's own records the
 // way ReadAll does, or 0 if there is none.
-func (e eventstore) Head(ctx context.Context) (uint64, error) {
+func (e EventStore) Head(ctx context.Context) (uint64, error) {
 	streamer, err := e.client.ReadAll(ctx, kurrentdb.ReadAllOptions{
 		Direction: kurrentdb.Backwards,
 		From:      kurrentdb.End{},
@@ -504,7 +506,7 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 }
 
 // Close closes the underlying KurrentDB client connection.
-func (e eventstore) Close() error {
+func (e EventStore) Close() error {
 	return e.client.Close()
 }
 

@@ -490,7 +490,7 @@ func readEventFile(path string) (*cqrs.Envelope, error) {
 	}
 	var stored storedEvent
 	if err := json.Unmarshal(data, &stored); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", path, err)
+		return nil, fmt.Errorf("decode %q: %w", path, err)
 	}
 	ev, err := cqrs.NewEventByName(stored.EventType)
 	if err != nil {
