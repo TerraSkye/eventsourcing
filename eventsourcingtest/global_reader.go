@@ -56,6 +56,8 @@ type globalAcceptance struct {
 //   - AtEnd is reported at the head, and when AtEnd is false, Next is
 //     greater than after;
 //   - Head never exceeds what ReadAll returns;
+//   - Save reports, in AppendResult.GlobalVersion, the GlobalVersion
+//     ReadAll returns for the last event it appended;
 //   - under many concurrent Saves to different streams, some of them
 //     multi-event, a reader paging along at the same time sees every event
 //     exactly once, so no position is skipped because it became visible
@@ -78,6 +80,7 @@ func GlobalReaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, re
 		"FilterCombined":   g.filterCombined,
 		"AtEnd":            g.atEnd,
 		"Head":             g.head,
+		"AppendResult":     g.appendResult,
 		"ConcurrentSaves":  g.concurrentSaves,
 	})
 }
@@ -327,6 +330,22 @@ func (g *globalAcceptance) concurrentSaves(t *testing.T) {
 	}
 	if count != want {
 		t.Errorf("reader saw %d events, want %d", count, want)
+	}
+}
+
+func (g *globalAcceptance) appendResult(t *testing.T) {
+	start := g.headNow(t)
+	id := newStreamID()
+	res, err := g.store.Save(t.Context(), envelopes(id, 1, 3), eventsourcing.NoStream{})
+	if err != nil {
+		t.Fatalf("Save(NoStream) to %q: %v", id, err)
+	}
+	got := g.readToEnd(t, start, eventsourcing.ReadOptions{}, id)
+	if len(got) != 3 {
+		t.Fatalf("ReadAll returned %d of this test's events, want 3", len(got))
+	}
+	if want := got[2].GlobalVersion; res.GlobalVersion != want {
+		t.Errorf("AppendResult.GlobalVersion = %d, want %d, the GlobalVersion of the last event appended", res.GlobalVersion, want)
 	}
 }
 
