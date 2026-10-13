@@ -7,11 +7,15 @@
 //
 // Handlers reach the batch's transaction with [Tx]:
 //
-//	func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) error {
-//		_, err := postgres.Tx(ctx).Exec(ctx,
-//			`INSERT INTO tasks (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-//			e.TaskID, e.Title)
-//		return err
+//	func handle(ctx context.Context, event eventsourcing.Event) error {
+//		switch e := event.(type) {
+//		case *events.TaskCreated:
+//			_, err := postgres.Tx(ctx).Exec(ctx,
+//				`INSERT INTO tasks (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+//				e.TaskID, e.Title)
+//			return err
+//		}
+//		return nil
 //	}
 //
 // The read model's tables and the tables [Schema] creates must live in the
@@ -34,7 +38,7 @@ import (
 //
 // projection_segments holds one row per segment of each projection: its
 // checkpoint, the owner currently claiming it with its heartbeat, the
-// projector version and replay boundary, and the status columns other
+// projection version and replay boundary, and the status columns other
 // instances read with LoadStatuses. A single-segment projection uses
 // segment 0.
 //
@@ -87,6 +91,13 @@ func Tx(ctx context.Context) pgx.Tx {
 }
 
 // Store is the Postgres [projection.Store]. Create it with [NewStore].
+//
+// Commit and Reset lock the segment's row for the whole unit of work, so
+// a Claim by another instance waits for the batch to finish instead of
+// taking the segment over halfway. Heartbeats use clock_timestamp(), the
+// time of the write, rather than now(), the start of the transaction, so a
+// batch that ran longer than the claim's ttl still leaves a fresh
+// heartbeat behind and the waiting Claim is refused.
 type Store struct {
 	db *pgxpool.Pool
 }
@@ -144,9 +155,9 @@ func (s *Store) Claim(ctx context.Context, name string, segment int, owner strin
 	var cp projection.Checkpoint
 	err := s.db.QueryRow(ctx, `
 		UPDATE projection_segments
-		SET owner = $3, heartbeat = now()
+		SET owner = $3, heartbeat = clock_timestamp()
 		WHERE name = $1 AND segment = $2
-		  AND (owner IS NULL OR owner = $3 OR heartbeat < now() - make_interval(secs => $4))
+		  AND (owner IS NULL OR owner = $3 OR heartbeat < clock_timestamp() - make_interval(secs => $4))
 		RETURNING position, version, replay_until`,
 		name, segment, owner, ttl.Seconds(),
 	).Scan(&cp.Position, &cp.Version, &cp.ReplayUntil)
@@ -194,7 +205,7 @@ func (s *Store) Commit(ctx context.Context, name string, segment int, owner stri
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
 			SET position = $3, version = $4, replay_until = $5,
-			    phase = $6, head = $7, last_error = $8, heartbeat = now()
+			    phase = $6, head = $7, last_error = $8, heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $9`,
 			name, segment,
 			cp.Position, cp.Version, cp.ReplayUntil,
@@ -234,7 +245,7 @@ func (s *Store) Reset(ctx context.Context, name string, segment int, owner strin
 			UPDATE projection_segments
 			SET position = 0, version = $3, replay_until = $4,
 			    phase = 'starting', head = 0, last_error = NULL,
-			    heartbeat = now()
+			    heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $5`,
 			name, segment, newVersion, oldPos, owner,
 		)
@@ -265,7 +276,7 @@ func (s *Store) SaveStatus(ctx context.Context, name string, segment int, owner 
 	}
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
-		SET phase = $3, head = $4, last_error = $5, heartbeat = now()
+		SET phase = $3, head = $4, last_error = $5, heartbeat = clock_timestamp()
 		WHERE name = $1 AND segment = $2 AND owner = $6`,
 		name, segment, st.Phase.String(), st.Head, lastErr, owner,
 	)
@@ -276,7 +287,7 @@ func (s *Store) SaveStatus(ctx context.Context, name string, segment int, owner 
 func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT segment, phase, position, version, head, last_error, owner,
-		       EXTRACT(EPOCH FROM (now() - heartbeat))
+		       EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat))
 		FROM projection_segments
 		WHERE name = $1
 		ORDER BY segment`,

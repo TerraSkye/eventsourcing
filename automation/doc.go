@@ -53,10 +53,8 @@
 // Wiring the todo list and the automation together:
 //
 //	ordersToShip := shipping.NewOrdersToShip(pool)
-//	todoList := projection.NewRunner(projection.Projection{
-//		Name:     "orders-to-ship",
-//		Handlers: ordersToShip.EventHandlers(),
-//	}, eventStore, postgres.NewStore(pool))
+//	todoList := projection.NewRunner(shipping.NewProjection(),
+//		eventStore, postgres.NewStore(pool))
 //
 //	ship := automation.New("ship-orders", todoList,
 //		ordersToShip.Claim,

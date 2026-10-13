@@ -59,9 +59,7 @@ type globalAcceptance struct {
 //   - under many concurrent Saves to different streams, some of them
 //     multi-event, a reader paging along at the same time sees every event
 //     exactly once, so no position is skipped because it became visible
-//     late;
-//   - if reader implements [eventsourcing.Notifier], a Save is followed by
-//     a notification, and the channel is closed when ctx is done.
+//     late.
 //
 // The concurrency check is the one that catches stores whose positions can
 // become visible out of order, such as SQL sequences assigned before
@@ -81,7 +79,6 @@ func GlobalReaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, re
 		"AtEnd":            g.atEnd,
 		"Head":             g.head,
 		"ConcurrentSaves":  g.concurrentSaves,
-		"Notify":           g.notify,
 	})
 }
 
@@ -330,40 +327,6 @@ func (g *globalAcceptance) concurrentSaves(t *testing.T) {
 	}
 	if count != want {
 		t.Errorf("reader saw %d events, want %d", count, want)
-	}
-}
-
-func (g *globalAcceptance) notify(t *testing.T) {
-	n, ok := g.reader.(eventsourcing.Notifier)
-	if !ok {
-		t.Skip("reader does not implement eventsourcing.Notifier")
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	ch, err := n.Notify(ctx)
-	if err != nil {
-		t.Fatalf("Notify: %v", err)
-	}
-	g.save(t, envelopes(newStreamID(), 1, 1), eventsourcing.NoStream{})
-	select {
-	case _, open := <-ch:
-		if !open {
-			t.Fatal("notification channel closed before ctx was done")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no notification within 5s of a Save")
-	}
-
-	cancel()
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case _, open := <-ch:
-			if !open {
-				return
-			}
-		case <-timeout:
-			t.Fatal("notification channel not closed within 5s of ctx being done")
-		}
 	}
 }
 

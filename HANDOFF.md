@@ -1,6 +1,6 @@
 # Handoff: projections (branch `feature/projections`)
 
-Status as of 2026-10-12. This document is for whoever picks the branch up
+Status as of 2026-10-13. This document is for whoever picks the branch up
 next. Delete it when the branch is merged.
 
 ## Where things stand
@@ -9,104 +9,119 @@ next. Delete it when the branch is merged.
 |---|---|
 | `GlobalReader` (`ReadAll`/`Head`) on memory, file, postgres, kurrentdb | done; `EventStore.LoadFromAll` removed |
 | `eventsourcingtest.GlobalReaderAcceptanceTest` | done; runs against all four stores |
-| `projection.Runner`, unpartitioned (one active instance) | done |
-| `projection.Runner` with `WithPartitions` (competing consumers) | done |
-| `projection/postgres`: `Checkpoints`, `Leases`, `TryLock`, dead letters, status | done |
-| `projection.Remote` | done |
-| `automation` package | **design draft only**: signatures and docs; `Run` panics. Deliberately left out of scope for now. |
+| `projection.Runner`: one loop for single-segment and segmented projections | done |
+| `projection/memory` and `projection/postgres` stores | done |
+| `projectiontest.StoreAcceptanceTest` | done; runs against both stores |
+| User docs: `docs/how-to/cached-projection.md` | done |
+| `automation` package | **design draft only**: signatures and docs; `Run` panics |
 
 `go test -race -tags=integration ./...` passes; it needs Docker for
 testcontainers (Postgres, KurrentDB). CI runs exactly that command.
 
 ## How a projection runs
 
-Read the package docs first: `projection/doc.go`, then
-`projection/partition.go` (the `WithPartitions` doc comment explains the
-partitioned design in full) and `projection/postgres/checkpoints.go`.
+Read `projection/doc.go` first, then `projection/processor.go` (the
+`runSegment` loop) and `projection/store.go` (the `Store` contract).
 
-**Unpartitioned** (`projection/single.go`): if the checkpoint store
-implements `Locker`, every instance competes for a Postgres advisory lock
-(class `"proj"`, key `hashtext(name)`, held on a dedicated pooled connection
-that is pinged every second). The holder reads `ReadAll` pages after its
-checkpoint and commits handler writes and the checkpoint in one transaction
-(`postgres.Tx(ctx)` gives handlers that transaction). Others report
-`Standby` and answer `Live`/`WaitUntil` from the published status.
-A failed page is retried event by event to pin the failing event; then it
-stalls (default) or skips to `projection_dead_letters` (`WithErrorPolicy`).
-`WithVersion` + `WithReset` rebuild on start when the stored version
-differs; `Runner.Rebuild` does it on demand.
+A projection is a `projection.Projection` value: a `Name`, one `Handler`
+(`eventsourcing.EventHandler`) and the `Events` (registered names) it
+handles, plus optional `Version`/`Reset`, `Segments`/`SegmentKey`,
+`OnError` and tuning. `NewRunner(p, reader, store)` validates it and
+panics on wiring mistakes, including unregistered event names.
 
-**Partitioned** (`projection/partitioned.go`, `dispatcher.go`, `leases.go`):
-ported from the standalone `partition` prototype (`partition.zip`). Each
-instance heartbeats and claims `ceil(n/live)` partitions through a
-`LeaseStore`, reads the log **once** per instance (`dispatcher`) and routes
-each event to `PartitionOf(key(env), n)`. Each partition commits through
-`CommitPartition`, which checks the lease's fence **before** running the
-handlers and keeps the row locked, so a replaced instance can never commit
-again and a new owner's `Acquire` waits for an in-flight batch. Rebuilds are
-done under a new projection name (blue/green), not in place.
+Every segment, and a single-segment projection is just segment 0, runs the
+same loop: `Store.Claim` the segment, `ReadAll` after its checkpoint
+filtered by `Events`, run the handler for the batch inside `Store.Commit`
+(read-model writes and checkpoint in one unit of work, fenced on the
+claim), and at the head wait for `Nudge` or `PollInterval`. Instances that
+do not hold a claim report `Standby` and answer `Live`/`WaitUntil` from the
+status the owner publishes.
 
-## Decisions worth revisiting
+A failed batch is retried event by event to pin the failing event; then it
+stalls (default) or skips per `OnError`, recording a dead letter when the
+store implements `DeadLetterStore`. Errors back off with
+`cenkalti/backoff` (0.5s to 30s, jittered, never stops). `Version` +
+`Reset` rebuild on start; `Runner.Rebuild` rebuilds on demand.
+`IsReplaying(ctx)` is true for events up to the segment's `ReplayUntil`.
 
-1. **Postgres appends are serialised.** The old global read could skip an
-   event forever (ids 1 and 3 visible while 2's transaction was open). The
-   fix in `eventstore/postgres` is one advisory lock shared by every `Save`
-   (`appendLockKey1/2`), held until commit, so ids commit in order and
-   `ReadAll` is a plain `id > $after`. Cost: appends to different streams no
-   longer commit in parallel. The alternative is ordering the log by
-   `(transaction id, id)`, which changes what `GlobalVersion` means.
-   `TestReadAll_AppendsBecomeVisibleInIDOrder` pins the guarantee.
-2. **Partitioned runners reject** `WithVersion`, skipping
-   `WithErrorPolicy`, `WithOnCatchingUp` and `WithOnLive` (`NewRunner`
-   panics), and ignore `WithRetryStrategy` (each partition backs off 0.5s
-   to 30s on its own). Version rebuilds would need every instance to stop
-   writing; skip policies and hooks just weren't ported yet.
-3. **Status after a clean shutdown.** A stopped active runner leaves its last
-   status (often `live`) in the store. Standby instances and `Remote`
-   believe it until another instance takes over; `MaxAge` + `WithHeartbeat`
-   is the guard. A `stopped` phase may be cleaner.
-4. **First run counts history as replayed** (`ReplayUntil = head`). If a
-   projection never commits before restarting (empty log), the boundary is
-   recomputed on the next start.
-5. **Memory checkpoints** (the default) cannot roll back, so delivery is
-   at-least-once after a handler failure. The unit tests use a rollback-able
-   fake (`txCheckpoints` in `projection/single_test.go`) to check
-   exactly-once; the Postgres tests check it for real.
+## Decisions made on this branch
+
+- **Polling only.** The `Notifier` interface on `GlobalReader` and
+  `NudgeOnSave` were removed: they only reduced latency, and only the
+  memory store implemented `Notifier`. Runners poll; `Runner.Nudge` stays
+  (automations use it through `Runner.Watch`). Add a wake-up signal back
+  when a store can offer one across processes (Postgres `LISTEN/NOTIFY`),
+  preferably as an explicit runner option rather than a type assertion.
+- **One handler plus event names**, the same shape as
+  `EventBus.Subscribe` with `WithFilterEvents`. The `Router` interface was
+  removed, so a switch-style handler works as well as an
+  `EventGroupProcessor` (pass `group.StreamFilter()` as `Events`).
+- **No logger in the runner.** Logging is done by wrapping the handler
+  (`logging.WithEventLogging`), like everywhere else in the module.
+- **Stores live in subpackages** (`projection/memory`, `projection/postgres`),
+  mirroring `eventstore/` and `eventbus/`. The `projection` tests are an
+  external test package so they can import `projection/memory`.
+- **Postgres appends are serialised.** The global read could otherwise skip
+  an event forever (ids 1 and 3 visible while 2's transaction was open).
+  `eventstore/postgres` takes one advisory lock in every `Save`, held until
+  commit, so ids commit in order and `ReadAll` is a plain `id > $after`.
+  Cost: appends to different streams no longer commit in parallel.
+  `TestReadAll_AppendsBecomeVisibleInIDOrder` pins the guarantee.
+- **`SaveStatus` publishes phase, head and error only.** Position and
+  Version always come from the checkpoint, Owner from the claim. The
+  acceptance suite caught the memory store deviating; it now matches
+  Postgres.
+
+- **Postgres heartbeats use `clock_timestamp()`**, not `now()` (which is
+  the transaction's start). `Commit` holds the segment row locked for the
+  whole batch, so a competing `Claim` waits for it; with `now()` a batch
+  longer than `ClaimTTL` left an already-expired heartbeat and was taken
+  over right after committing. `TestCommit_BatchLongerThanTTLKeepsClaim`
+  pins it. The memory store does not lock during a batch; documented.
+
+## Known issues
+
+- **`TestRunner_Rebuild` is flaky** (about 1 in 5 under `-race`). Real bug:
+  `processor.go` sends `req.done` right after `Store.Reset`, before the
+  runner updates its in-memory status, so `Rebuild` returns while the
+  status still shows the old position and an immediate `WaitUntil` returns
+  before anything was replayed. Fix: reload and publish the reset status
+  before signalling `done`.
+- `handleFailedBatch` has an unused `firstFailure` parameter and a stray
+  `_ = handlerErr`.
+- **Status after a clean shutdown.** A stopped runner releases its claim
+  but leaves its last phase (often `live`) in the store; standby instances
+  believe it until another instance claims the segment.
+- **Memory store** cannot roll back a handler's writes, so delivery is
+  at-least-once after a handler failure. Postgres is exactly-once.
 
 ## Not done yet
 
 - **Automations** (`automation/`): implement `Automation.Run` against the
   design in `automation/doc.go` (claim with `FOR UPDATE SKIP LOCKED`, wait
   for `Dependency.Live`, nudge via `Watcher`).
-- **Redis lease store** from the prototype (`redisstore`): keeps heartbeats
-  off the Postgres primary. Needs `github.com/redis/go-redis/v9`; the
-  prototype's Lua scripts and its lease conformance suite (`leasetest`)
-  are the starting point. A reusable `LeaseStore` conformance suite in
-  `eventsourcingtest` would be worth having for it.
 - **Store constructors** for Postgres and KurrentDB still return
   `eventsourcing.EventStore`, so callers need
-  `store.(eventsourcing.GlobalReader)` to build a runner. Returning the
-  concrete type, or an interface that embeds both, would remove that.
-- **Notifier** is only implemented by the memory store. Postgres could use
-  `LISTEN/NOTIFY` after commit; until then runners poll (`WithPollInterval`).
-- **Example** of a table projection end to end (the prototype has
-  `examples/orders` with a `main.go` and KEDA lag query) and user docs under
-  `docs/` for projections.
-- `roadmap.md` is untracked in the working copy and was updated for the
-  `LoadFromAll` removal; it was not committed.
+  `store.(eventsourcing.GlobalReader)` to build a runner.
+- **Tutorial 4** still builds its cache on the event bus; it now points to
+  the projection how-to. Rewriting it around the runner would be the next
+  step for the user docs.
+
+- **Guard against `Events` changing without a `Version` bump.** Adding an
+  event type without bumping `Version` silently skips that type's history.
+  Documented for now; a fix is to store a fingerprint of `Events` with the
+  checkpoint and rebuild (with `Reset`) or refuse to start when it changes.
+  Needs a schema column.
+- **One reader per instance for segmented projections.** Each segment runs
+  its own `ReadAll` and drops other segments' events, so N segments read
+  the log N times. The old partitioned design had a per-instance
+  dispatcher that read once and routed events to the owned segments.
+  Documented as a cost for now.
 
 ## Tests to know about
 
-- `projection/single_test.go`: unit tests on the memory store: catch-up,
-  live, IsReplaying, rebuild, version rebuild, stall/skip policies, hooks,
-  lock failover with an in-process locker, `Remote`.
-- `projection/postgres/partition_test.go` (integration): lease rules,
-  fencing, `Acquire` waiting for an in-flight batch, exactly-once while
-  instances leave and join mid-stream, restart, stall and recovery.
-- `projection/postgres/single_test.go` (integration): advisory-lock
-  failover, rebuild with `TRUNCATE`, dead letters, lock lost when its
-  connection is terminated.
-
-The tests were checked by breaking the code on purpose (duplicate delivery
-in the dispatcher, no fence check, skipping regardless of policy); each
-mutation made them fail.
+- `projection/runner_test.go`: the runner on the memory store: catch-up,
+  live, IsReplaying, rebuild, stall, segments, wiring panics.
+- `projection/projectiontest/store.go`: the `Store` contract, run by
+  `projection/memory/store_test.go` and (integration)
+  `projection/postgres/store_test.go`.

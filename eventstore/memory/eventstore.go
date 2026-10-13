@@ -16,7 +16,6 @@ import (
 var (
 	_ eventsourcing.EventStore   = (*MemoryStore)(nil)
 	_ eventsourcing.GlobalReader = (*MemoryStore)(nil)
-	_ eventsourcing.Notifier     = (*MemoryStore)(nil)
 )
 
 // MemoryStore is an in-memory [eventsourcing.EventStore] intended for tests
@@ -30,7 +29,6 @@ type MemoryStore struct {
 	bus    chan *eventsourcing.Envelope
 	global []*eventsourcing.Envelope
 	events map[string][]*eventsourcing.Envelope
-	notify map[chan struct{}]struct{}
 }
 
 // ReadAll implements [eventsourcing.GlobalReader]. Events are kept in a
@@ -97,31 +95,6 @@ func (m *MemoryStore) Head(ctx context.Context) (uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return uint64(len(m.global)), nil
-}
-
-// Notify implements [eventsourcing.Notifier]: the returned channel receives
-// a value after every Save that appended events, until ctx is done.
-func (m *MemoryStore) Notify(ctx context.Context) (<-chan struct{}, error) {
-	ch := make(chan struct{}, 1)
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		close(ch)
-		return ch, nil
-	}
-	m.notify[ch] = struct{}{}
-	m.mu.Unlock()
-
-	go func() {
-		<-ctx.Done()
-		m.mu.Lock()
-		if _, ok := m.notify[ch]; ok {
-			delete(m.notify, ch)
-			close(ch)
-		}
-		m.mu.Unlock()
-	}()
-	return ch, nil
 }
 
 // Save appends events to the stream they share, atomically and under the
@@ -207,13 +180,6 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		case m.bus <- &published:
 		default:
 			// Drop error if channel full
-		}
-	}
-
-	for ch := range m.notify {
-		select {
-		case ch <- struct{}{}:
-		default: // a notification is already pending
 		}
 	}
 
@@ -315,10 +281,6 @@ func (m *MemoryStore) Close() error {
 	m.events = make(map[string][]*eventsourcing.Envelope)
 	m.global = make([]*eventsourcing.Envelope, 0)
 	close(m.bus)
-	for ch := range m.notify {
-		close(ch)
-	}
-	m.notify = nil
 	return nil
 }
 
@@ -329,6 +291,5 @@ func NewMemoryStore(buffer int64) *MemoryStore {
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
 		bus:    make(chan *eventsourcing.Envelope, buffer),
-		notify: make(map[chan struct{}]struct{}),
 	}
 }

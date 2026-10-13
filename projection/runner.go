@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"log/slog"
 	"os"
 	"strconv"
 	"sync"
@@ -36,20 +35,6 @@ var (
 	// run it under a new name.
 	ErrSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
 )
-
-// Router routes events to a projector's handlers and knows which event
-// types it handles.
-//
-// [*eventsourcing.EventGroupProcessor] satisfies Router, so the value a
-// projector's EventHandlers method returns can be passed to [NewRunner]
-// as is.
-type Router interface {
-	eventsourcing.EventHandler
-
-	// StreamFilter returns the registered names of every event type the
-	// router handles. The runner reads only these event types.
-	StreamFilter() []string
-}
 
 // SegmentKey picks which segment an event belongs to in a segmented
 // projection; see [Projection.Segments]. It must return the same key for
@@ -107,50 +92,79 @@ func (p ErrorPolicy) String() string {
 }
 
 // Projection is a projection's definition and tuning. The zero value for
-// every optional field picks sensible defaults, so a simple projection
-// looks like:
+// every optional field picks sensible defaults.
 //
-//	r := projection.NewRunner(projection.Projection{
-//		Name:     "task-list",
-//		Handlers: projector.EventHandlers(),
-//	}, reader, store)
+// A projection is usually defined next to the read model it writes, by a
+// constructor in the same package, and handed to [NewRunner] by main:
+//
+//	func NewProjection(list *TaskList) projection.Projection {
+//		return projection.Projection{
+//			Name:    "task-list",
+//			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
+//			Events:  []string{"TaskCreated", "TaskCompleted"},
+//		}
+//	}
+//
+//	r := projection.NewRunner(tasklist.NewProjection(list), reader, store)
 //
 // A durable projection adds Version and Reset so it can be rebuilt:
 //
-//	r := projection.NewRunner(projection.Projection{
-//		Name:     "task-list",
-//		Handlers: projector.EventHandlers(),
-//		Version:  2,
-//		Reset:    projector.Reset,
-//	}, reader, store)
+//	projection.Projection{
+//		Name:    "task-list",
+//		Handler: eventsourcing.NewEventHandlerFunc(handle),
+//		Events:  []string{"TaskCreated", "TaskCompleted"},
+//		Version: 2,
+//		Reset:   reset,
+//	}
 //
 // A projection whose one instance cannot keep up is segmented:
 //
-//	r := projection.NewRunner(projection.Projection{
+//	projection.Projection{
 //		Name:       "order-summaries-v1",
-//		Handlers:   projector.EventHandlers(),
+//		Handler:    eventsourcing.NewEventHandlerFunc(handle),
+//		Events:     []string{"OrderPlaced", "OrderShipped"},
 //		Segments:   64,
 //		SegmentKey: projection.ByStreamID,
-//	}, reader, store)
+//	}
 //
 // Nothing else changes. A segmented projection is just the same loop
 // scoped to each segment the store lets this instance claim.
+//
+// Projection is a plain value, so main can still adjust deployment
+// settings, such as PollInterval or a logging wrapper around Handler,
+// before passing it to NewRunner.
 type Projection struct {
 	// Name identifies the projection. It keys the checkpoint and the
 	// claim, so it must be unique per read model and stable across
 	// deploys; renaming a projection makes it start from scratch.
 	Name string
 
-	// Handlers routes events to the projector's methods. The runner reads
-	// only the event types Handlers.StreamFilter reports, each of which
-	// must be registered with [eventsourcing.RegisterEvent].
-	Handlers Router
+	// Handler handles every event the runner reads, in log order. Wrap a
+	// function that switches on the event type with
+	// [eventsourcing.NewEventHandlerFunc], or pass an
+	// [*eventsourcing.EventGroupProcessor].
+	Handler eventsourcing.EventHandler
 
-	// Version is the version of the projector's code, stored with the
+	// Events lists the registered names of the event types Handler
+	// handles; the runner reads only these. For an
+	// [*eventsourcing.EventGroupProcessor], pass its StreamFilter.
+	//
+	// Adding an event type is a change to how the read model is written:
+	// bump Version with it. Otherwise the runner carries on from its
+	// checkpoint, and every event of the new type stored before it is
+	// never applied.
+	Events []string
+
+	// Version is the version of the projection's code, stored with the
 	// checkpoint. When the runner starts a segment and finds a stored
 	// version different from this one, the segment is rebuilt before
-	// processing new events. Bump the version whenever the projector
-	// starts writing the read model differently; see Reset.
+	// processing new events. Bump the version whenever the projection
+	// starts writing the read model differently, including when Events
+	// gains a type; see Reset.
+	//
+	// A rebuild empties the read model until the runner has caught up
+	// again. For a large log, build the new version under a new Name
+	// instead and switch queries over once it is live.
 	//
 	// Default 0: no automatic rebuilds (Rebuild can still be called).
 	// Setting a non-zero Version requires Reset.
@@ -160,7 +174,7 @@ type Projection struct {
 	// in the unit of work that moves the checkpoint back to zero, through
 	// the same context handlers use (e.g. postgres.Tx(ctx)):
 	//
-	//	func (p *Projector) Reset(ctx context.Context) error {
+	//	func reset(ctx context.Context) error {
 	//		_, err := postgres.Tx(ctx).Exec(ctx, "TRUNCATE tasks")
 	//		return err
 	//	}
@@ -175,6 +189,12 @@ type Projection struct {
 	//
 	// Set this only when one instance cannot keep up. The segment count is
 	// fixed per name; changing it takes a new name.
+	//
+	// Every segment reads the filtered log on its own and drops the events
+	// of other segments, so N segments read the log N times. A read model
+	// that combines events of many streams into one row, such as a total
+	// or a count, cannot be segmented: no SegmentKey keeps that row within
+	// one segment.
 	Segments int
 
 	// SegmentKey picks which segment an event belongs to; required when
@@ -203,11 +223,14 @@ type Projection struct {
 	// ClaimTTL is how long a claim stays valid without a Commit or
 	// SaveStatus to refresh it. A crashed instance's segments become
 	// available again after this long. Default [DefaultClaimTTL].
+	//
+	// The heartbeat is refreshed when a batch commits, not while its
+	// handlers run. Keep ClaimTTL above the time the slowest batch takes,
+	// or lower BatchSize. The Postgres store locks the segment for the
+	// whole batch, so a slow batch delays a takeover rather than losing
+	// its work; the memory store does not, and another instance can take
+	// the segment over halfway through the batch.
 	ClaimTTL time.Duration
-
-	// Logger is where the runner logs failures and segment moves. Default
-	// [slog.Default].
-	Logger *slog.Logger
 }
 
 // Runner keeps one projection up to date: it claims the segments it can,
@@ -247,14 +270,16 @@ type rebuildRequest struct {
 // NewRunner creates a Runner for p against reader and store.
 //
 // It panics on wiring mistakes that would otherwise fail silently: an empty
-// Name, nil Handlers/reader/store, Version > 0 without Reset, Segments > 1
-// without SegmentKey, or Handlers.StreamFilter() returning no event types.
+// Name, nil Handler/reader/store, no Events or an unregistered one,
+// Version > 0 without Reset, or Segments > 1 without SegmentKey.
 func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Runner {
 	switch {
 	case p.Name == "":
 		panic("projection: Projection.Name is required")
-	case p.Handlers == nil:
-		panic(fmt.Sprintf("projection %s: Handlers is required", p.Name))
+	case p.Handler == nil:
+		panic(fmt.Sprintf("projection %s: Handler is required", p.Name))
+	case len(p.Events) == 0:
+		panic(fmt.Sprintf("projection %s: Events is required", p.Name))
 	case reader == nil:
 		panic(fmt.Sprintf("projection %s: reader is required", p.Name))
 	case store == nil:
@@ -270,8 +295,10 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 	if segments > 1 && p.SegmentKey == nil {
 		panic(fmt.Sprintf("projection %s: Segments > 1 requires SegmentKey", p.Name))
 	}
-	if filter := p.Handlers.StreamFilter(); len(filter) == 0 {
-		panic(fmt.Sprintf("projection %s: handlers cover no registered event types; register them with eventsourcing.RegisterEvent", p.Name))
+	for _, name := range p.Events {
+		if _, err := eventsourcing.NewEventByName(name); err != nil {
+			panic(fmt.Sprintf("projection %s: event %q is not registered; register it with eventsourcing.RegisterEvent", p.Name, name))
+		}
 	}
 
 	// Fill defaults.
@@ -283,9 +310,6 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 	}
 	if p.ClaimTTL <= 0 {
 		p.ClaimTTL = DefaultClaimTTL
-	}
-	if p.Logger == nil {
-		p.Logger = slog.Default()
 	}
 	if p.Owner == "" {
 		p.Owner = defaultOwner()
@@ -575,7 +599,7 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 // Nudge asks the runner to read now instead of waiting for its next poll.
 //
 // Nudge never blocks, and nudges coalesce. Only reaches this process's
-// runner; other instances rely on [eventsourcing.Notifier] or on polling.
+// runner; other instances rely on polling.
 func (r *Runner) Nudge() {
 	select {
 	case r.nudge <- struct{}{}:
@@ -655,7 +679,6 @@ func (r *remote) Live(ctx context.Context) (bool, error) {
 var (
 	_ Dependency = (*Runner)(nil)
 	_ Watcher    = (*Runner)(nil)
-	_ Nudger     = (*Runner)(nil)
 )
 
 // readOptions builds the ReadOptions passed to the global reader on each
@@ -663,6 +686,6 @@ var (
 func (r *Runner) readOptions() eventsourcing.ReadOptions {
 	return eventsourcing.ReadOptions{
 		Limit:      r.p.BatchSize,
-		EventTypes: r.p.Handlers.StreamFilter(),
+		EventTypes: r.p.Events,
 	}
 }

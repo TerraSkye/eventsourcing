@@ -43,7 +43,7 @@ nav:
       - "1. Your First Command": tutorials/01-first-command.md
       - "2. Your First Query": tutorials/02-first-query.md
       - "3. Business Rules": tutorials/03-business-rules.md
-      - "4. Real-time Projections": tutorials/04-projections.md
+      - "4. Projections": tutorials/04-projections.md
       - "5. Background Processing": tutorials/05-background-processing.md
   - How-to guides:
       - Handle concurrency conflicts: how-to/handle-concurrency.md
@@ -56,6 +56,8 @@ nav:
       - Use KurrentDB: how-to/use-kurrentdb.md
       - Add OpenTelemetry tracing: how-to/add-opentelemetry.md
       - Test event-sourced code: how-to/test-event-sourced-code.md
+      - Build a projection: how-to/cached-projection.md
+      - Rebuild a projection without downtime: how-to/rebuild-without-downtime.md
   - Reference:
       - Core interfaces: reference/interfaces.md
       - CommandHandler: reference/command-handler.md
