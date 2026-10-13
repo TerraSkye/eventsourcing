@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/projection"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -24,8 +25,12 @@ import (
 // [EventBusDuration] for every invocation. A returned
 // [eventsourcing.SkippedEventError] is treated as an intentional, non-error
 // skip and marks the span OK, while any other error marks the span as
-// failed; unlike [TelemetryEventBus.Subscribe], it does not record
-// [EventBusErrors].
+// failed and records [EventBusErrors].
+//
+// When next is a [projection.Projection]'s handler and the runner commits
+// through a store wrapped with [WithProjectionStoreTelemetry], the span is a
+// child of the batch's span and is tagged with the projection's name and
+// segment, and the metrics with its name.
 //
 // TODO: extract the consumer group.
 func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) eventsourcing.EventHandler {
@@ -54,6 +59,12 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalVersionFromContext(ctx))),
 			AttrEventStreamPos.Int64(int64(eventsourcing.VersionFromContext(ctx))),
 			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
+		}
+
+		metricAttr := []attribute.KeyValue{AttrEventType.String(event.EventType())}
+		if l, ok := ctx.Value(leaseKey{}).(projection.Lease); ok {
+			attr = append(attr, leaseAttrs(l)...)
+			metricAttr = append(metricAttr, AttrProjectionName.String(l.Name))
 		}
 
 		attr = append(attr, cfg.Attributes...)
@@ -89,13 +100,13 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		)
 		defer span.End()
 
-		EventBusHandled.Add(ctx, 1, metric.WithAttributes(AttrEventType.String(event.EventType())))
+		EventBusHandled.Add(ctx, 1, metric.WithAttributes(metricAttr...))
 
 		startTime := time.Now()
 		err := next.Handle(ctx, event)
 		EventBusDuration.Record(ctx,
 			time.Since(startTime).Seconds(),
-			metric.WithAttributes(AttrEventType.String(event.EventType())),
+			metric.WithAttributes(metricAttr...),
 		)
 
 		if err != nil {
@@ -103,9 +114,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {
-				// TODO: TelemetryEventBus.Subscribe increments EventBusErrors
-				// here; this path does not. Confirm whether that's
-				// intentional or a gap.
+				EventBusErrors.Add(ctx, 1, metric.WithAttributes(metricAttr...))
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
 			}

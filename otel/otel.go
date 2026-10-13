@@ -53,6 +53,13 @@ const (
 	AttrRetryCount   = attribute.Key("eventsourcing.retry.count")
 	AttrRetryMax     = attribute.Key("eventsourcing.retry.max")
 
+	// Projection attributes
+	AttrProjectionName     = attribute.Key("eventsourcing.projection.name")
+	AttrProjectionSegment  = attribute.Key("eventsourcing.projection.segment")
+	AttrProjectionPosition = attribute.Key("eventsourcing.projection.position")
+	AttrProjectionPhase    = attribute.Key("eventsourcing.projection.phase")
+	AttrClaimResult        = attribute.Key("eventsourcing.projection.claim.result") // "acquired" | "held" | "error"
+
 	// Operation attributes
 	AttrOperation    = attribute.Key("eventsourcing.operation")
 	AttrConflictType = attribute.Key("eventsourcing.conflict.type")
@@ -197,5 +204,34 @@ var (
 		"eventsourcing.concurrency.conflicts",
 		metric.WithDescription("Number of concurrency conflicts"),
 		metric.WithUnit("{conflict}"),
+	)
+
+	// Projection metrics
+
+	// ProjectionBatchDuration records how long a projection batch took to
+	// commit, handlers included, in seconds, labelled by
+	// [AttrProjectionName] and [AttrResult] ("success", "failure" or
+	// "claim_lost"). Its count is the number of batches.
+	ProjectionBatchDuration, _ = meter.Float64Histogram(
+		"eventsourcing.projection.batch.duration",
+		metric.WithDescription("Duration of projection batch commits, handlers included"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+	)
+
+	// ProjectionClaims counts attempts to claim a projection segment,
+	// labelled by [AttrProjectionName] and [AttrClaimResult].
+	ProjectionClaims, _ = meter.Int64Counter(
+		"eventsourcing.projection.claims",
+		metric.WithDescription("Attempts to claim a projection segment, labelled by eventsourcing.projection.claim.result"),
+		metric.WithUnit("{claim}"),
+	)
+
+	// ProjectionRebuilds counts projection segment rebuilds, labelled by
+	// [AttrProjectionName] and [AttrResult].
+	ProjectionRebuilds, _ = meter.Int64Counter(
+		"eventsourcing.projection.rebuilds",
+		metric.WithDescription("Projection segment rebuilds, labelled by eventsourcing.result"),
+		metric.WithUnit("{rebuild}"),
 	)
 )
