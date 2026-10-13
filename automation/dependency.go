@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"time"
 
 	"github.com/terraskye/eventsourcing/projection"
 )
@@ -32,17 +33,24 @@ type Watcher interface {
 
 // Remote returns a [Dependency] for the projection called name, run by a
 // different program, judged by the status its runner publishes to store.
+// claimTTL is the [projection.Projection.ClaimTTL] that program runs the
+// projection with, or 0 for [projection.DefaultClaimTTL]; a segment whose
+// status is older than that counts as not live, as its runner has stopped.
 //
 // Use it in an automation whose todo-list projection lives in another
 // service: the dependency pauses the automation until that projection has
 // caught up.
-func Remote(name string, store projection.Store) Dependency {
-	return &remote{name: name, store: store}
+func Remote(name string, store projection.Store, claimTTL time.Duration) Dependency {
+	if claimTTL <= 0 {
+		claimTTL = projection.DefaultClaimTTL
+	}
+	return &remote{name: name, store: store, claimTTL: claimTTL}
 }
 
 type remote struct {
-	name  string
-	store projection.Store
+	name     string
+	store    projection.Store
+	claimTTL time.Duration
 }
 
 func (r *remote) Name() string { return r.name }
@@ -53,7 +61,7 @@ func (r *remote) Live(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	for _, s := range statuses {
-		if s.Phase != projection.Live {
+		if !s.IsLive(r.claimTTL) {
 			return false, nil
 		}
 	}

@@ -25,8 +25,8 @@ var (
 	ErrNoReset = errors.New("projection: rebuild requires a Reset function")
 
 	// ErrSegmented is returned by [Runner.Rebuild] on a segmented projection.
-	// Rebuild a segmented projection by bumping Version and redeploying, or
-	// run it under a new name.
+	// A segmented projection is rebuilt by running it under a new name; see
+	// [Projection.Version].
 	ErrSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
 )
 
@@ -80,7 +80,8 @@ func (req *rebuildRequest) finish(err error) {
 //
 // It panics on wiring mistakes that would otherwise fail silently: an empty
 // Name, nil Handler/reader/store, no Events or an unregistered one,
-// Version > 0 without Reset, or Segments > 1 without SegmentKey.
+// Version > 0 without Reset, or Segments > 1 without SegmentKey or with a
+// Version.
 func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Runner {
 	switch {
 	case p.Name == "":
@@ -100,6 +101,9 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 	segments := max(p.Segments, 1)
 	if segments > 1 && p.SegmentKey == nil {
 		panic(fmt.Sprintf("projection %q: Segments > 1 requires SegmentKey", p.Name))
+	}
+	if segments > 1 && p.Version != 0 {
+		panic(fmt.Sprintf("projection %q: a segmented projection cannot have a Version; rebuild it under a new Name", p.Name))
 	}
 	for _, name := range p.Events {
 		if _, err := eventsourcing.NewEventByName(name); err != nil {
@@ -149,7 +153,8 @@ func defaultOwner() string {
 func (r *Runner) Name() string { return r.p.Name }
 
 // Run processes events until ctx is done, then returns ctx.Err(). It
-// returns early only when [Store.Init] fails, with that error.
+// returns early only when it cannot start: when reading the head of the log
+// or [Store.Init] fails, with that error.
 //
 // Failures while processing never make Run return. When a batch fails the
 // runner reports [Stalled], backs off and retries from its last committed
@@ -162,7 +167,14 @@ func (r *Runner) Name() string { return r.p.Name }
 //
 // Call Run once per Runner. On return it has released every claim it held.
 func (r *Runner) Run(ctx context.Context) error {
-	if err := r.store.Init(ctx, r.p.Name, r.segments); err != nil {
+	// Events already in the log when the projection is first created count
+	// as replayed; see IsReplaying. Init only uses head for segments it
+	// creates, so a restart keeps the boundary of the first start.
+	head, err := r.reader.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
+	}
+	if err := r.store.Init(ctx, r.p.Name, r.segments, head); err != nil {
 		return fmt.Errorf("projection %q: init: %w", r.p.Name, err)
 	}
 
@@ -185,8 +197,8 @@ func (r *Runner) Run(ctx context.Context) error {
 // Rebuild returns [ErrSegmented] on a segmented projection, [ErrNoReset]
 // when the projection has no Reset, and [ErrNotActive] when this instance
 // is not processing the projection, or stops before the rebuild ran. To
-// rebuild across instances or a segmented projection, bump
-// [Projection.Version].
+// rebuild wherever the projection runs, bump [Projection.Version]; to
+// rebuild a segmented projection, run it under a new Name.
 func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.segments > 1 {
 		return ErrSegmented
