@@ -201,9 +201,8 @@ func TestLoadStream_NotFound(t *testing.T) {
 	}
 }
 
-func readAll(t *testing.T, store cqrs.EventStore, after uint64) []*cqrs.Envelope {
+func readAll(t *testing.T, reader cqrs.GlobalReader, after uint64) []*cqrs.Envelope {
 	t.Helper()
-	reader := store.(cqrs.GlobalReader)
 	var out []*cqrs.Envelope
 	for {
 		res, err := reader.ReadAll(context.Background(), after, cqrs.ReadOptions{})
@@ -332,7 +331,7 @@ func TestReadAll_HugePositionIsRefusedNotReplayed(t *testing.T) {
 		t.Fatalf("save: %v", err)
 	}
 
-	res, err := store.(cqrs.GlobalReader).ReadAll(ctx, math.MaxUint64, cqrs.ReadOptions{})
+	res, err := store.ReadAll(ctx, math.MaxUint64, cqrs.ReadOptions{})
 	if !errors.Is(err, cqrs.ErrInvalidRevision) {
 		t.Fatalf("ReadAll(after MaxUint64) = %d events, err %v; want ErrInvalidRevision", len(res.Events), err)
 	}
@@ -392,5 +391,5 @@ func TestAcceptance(t *testing.T) {
 
 func TestGlobalReaderAcceptance(t *testing.T) {
 	store := pgstore.NewEventStore(newPool(t))
-	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store.(cqrs.GlobalReader))
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }

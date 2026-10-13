@@ -96,8 +96,8 @@ func (s *stubStore) Head(context.Context) (uint64, error) {
 func (s *stubStore) Close() error { return nil }
 
 // TestTelemetryStore_ReadAll forwards ReadAll and Head to a wrapped
-// GlobalReader unchanged, passes its errors through, and reports
-// ErrGlobalReadUnsupported for a store that cannot read the global log.
+// GlobalReader unchanged, passes its errors through, and does not implement
+// GlobalReader itself for a store that cannot read the global log.
 func TestTelemetryStore_ReadAll(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubStore{}
@@ -106,7 +106,10 @@ func TestTelemetryStore_ReadAll(t *testing.T) {
 			StreamID: "agg-1", Event: stubEvent{}, Version: uint64(i), GlobalVersion: uint64(i),
 		})
 	}
-	reader := WithEventStoreTelemetry(stub).(eventsourcing.GlobalReader)
+	reader, ok := WithEventStoreTelemetry(stub).(eventsourcing.GlobalReader)
+	if !ok {
+		t.Fatal("WithEventStoreTelemetry(GlobalReader) does not implement eventsourcing.GlobalReader")
+	}
 
 	t.Run("forwards", func(t *testing.T) {
 		res, err := reader.ReadAll(ctx, 1, eventsourcing.ReadOptions{})
@@ -124,19 +127,19 @@ func TestTelemetryStore_ReadAll(t *testing.T) {
 
 	t.Run("error passes through", func(t *testing.T) {
 		boom := errors.New("read failed")
-		failing := WithEventStoreTelemetry(&stubStore{readErr: boom}).(eventsourcing.GlobalReader)
+		failing, ok := WithEventStoreTelemetry(&stubStore{readErr: boom}).(eventsourcing.GlobalReader)
+		if !ok {
+			t.Fatal("WithEventStoreTelemetry(GlobalReader) does not implement eventsourcing.GlobalReader")
+		}
 		if _, err := failing.ReadAll(ctx, 0, eventsourcing.ReadOptions{}); !errors.Is(err, boom) {
 			t.Fatalf("ReadAll() error = %v, want %v", err, boom)
 		}
 	})
 
 	t.Run("unsupported store", func(t *testing.T) {
-		plain := WithEventStoreTelemetry(&closeTrackingStore{}).(eventsourcing.GlobalReader)
-		if _, err := plain.ReadAll(ctx, 0, eventsourcing.ReadOptions{}); !errors.Is(err, ErrGlobalReadUnsupported) {
-			t.Fatalf("ReadAll() error = %v, want ErrGlobalReadUnsupported", err)
-		}
-		if _, err := plain.Head(ctx); !errors.Is(err, ErrGlobalReadUnsupported) {
-			t.Fatalf("Head() error = %v, want ErrGlobalReadUnsupported", err)
+		plain := WithEventStoreTelemetry(&closeTrackingStore{})
+		if _, ok := plain.(eventsourcing.GlobalReader); ok {
+			t.Errorf("WithEventStoreTelemetry(%T) implements eventsourcing.GlobalReader, want only eventsourcing.EventStore", &closeTrackingStore{})
 		}
 	})
 }
