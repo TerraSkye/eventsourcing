@@ -90,17 +90,6 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		}
 	}
 
-	// Capture the head at claim time, so events already in the log count
-	// as replayed (IsReplaying) and new ones do not. This only matters the
-	// first time; afterwards cp.ReplayUntil is persisted.
-	if cp.ReplayUntil == 0 && cp.Position == 0 {
-		head, err := r.reader.Head(ctx)
-		if err != nil {
-			return fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
-		}
-		cp.ReplayUntil = head
-	}
-
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -169,9 +158,11 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			cp = newCP
 		default:
 			// Nothing to persist; publish the phase so LoadStatuses sees it.
-			// Best effort, per the Store contract: a failure only delays
+			// A lost claim drops the segment; any other failure only delays
 			// what other instances see until the next commit.
-			_ = r.store.SaveStatus(ctx, l, status)
+			if err := r.store.SaveStatus(ctx, l, status); errors.Is(err, ErrClaimLost) {
+				return err
+			}
 			r.setStatus(seg, status)
 		}
 
@@ -200,16 +191,7 @@ func (r *Runner) rebuild(ctx context.Context, l Lease) (Checkpoint, error) {
 	if err := r.store.Reset(ctx, l, r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild: %w", r.p.Name, err)
 	}
-	cp, err := r.reclaim(ctx, l)
-	if err != nil {
-		return Checkpoint{}, err
-	}
-	head, err := r.reader.Head(ctx)
-	if err != nil {
-		return Checkpoint{}, fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
-	}
-	cp.ReplayUntil = head
-	return cp, nil
+	return r.reclaim(ctx, l)
 }
 
 // ownEvents returns the events that belong to seg, reusing the backing
@@ -264,7 +246,7 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 		switch {
 		case err == nil:
 			// Applied on its own; a flaky handler may succeed on retry.
-		case errors.As(err, &he) && r.shouldSkip(seg, env.GlobalVersion <= cp.ReplayUntil):
+		case errors.As(err, &he) && r.shouldSkip(batchStatus.Phase, env.GlobalVersion <= cp.ReplayUntil):
 			if err = r.skipEvent(ctx, seg, env, he.err, cp, status); err != nil {
 				return err
 			}
@@ -310,16 +292,16 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 }
 
 // shouldSkip reports whether a failing event is skipped under
-// [Projection.OnError].
-func (r *Runner) shouldSkip(seg int, replaying bool) bool {
+// [Projection.OnError]. phase is the phase of the read that returned the
+// event, not the one last published: after a restart or a stall, a read
+// that reaches the head of the log is Live even though the segment has not
+// reported Live since.
+func (r *Runner) shouldSkip(phase Phase, replaying bool) bool {
 	switch r.p.OnError {
 	case SkipAlways:
 		return true
 	case SkipWhenLive:
-		r.mu.Lock()
-		live := r.segs[seg].status.Phase == Live
-		r.mu.Unlock()
-		return live && !replaying
+		return phase == Live && !replaying
 	default:
 		return false
 	}

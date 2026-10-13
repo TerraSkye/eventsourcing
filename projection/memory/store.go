@@ -52,14 +52,17 @@ type memoryRow struct {
 }
 
 // Init implements [projection.Store].
-func (s *Store) Init(ctx context.Context, name string, segments int) error {
+func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.projections[name]
 	if !ok {
 		rows := make(map[int]*memoryRow, segments)
 		for i := range segments {
-			rows[i] = &memoryRow{status: projection.Status{Phase: projection.Starting, Segment: i}}
+			rows[i] = &memoryRow{
+				cp:     projection.Checkpoint{ReplayUntil: replayUntil},
+				status: projection.Status{Phase: projection.Starting, Segment: i},
+			}
 		}
 		s.projections[name] = &memoryProjection{segments: segments, rows: rows}
 		return nil
@@ -175,6 +178,7 @@ func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 	}
 	row.owner = ""
 	row.status.Owner = ""
+	row.status.Phase = projection.Standby
 	return nil
 }
 
@@ -184,7 +188,7 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 	defer s.mu.Unlock()
 	row := s.owned(l)
 	if row == nil {
-		return nil
+		return projection.ErrClaimLost
 	}
 	// Progress only moves with the checkpoint; SaveStatus publishes the
 	// rest.

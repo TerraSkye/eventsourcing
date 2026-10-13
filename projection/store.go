@@ -33,9 +33,9 @@ type Checkpoint struct {
 	Version int
 
 	// ReplayUntil is the position up to which events count as replayed; see
-	// [IsReplaying]. It is set when a segment first starts (to the head of
-	// the log at that moment) and on every rebuild (to the position the
-	// segment had reached before it).
+	// [IsReplaying]. It is set when [Store.Init] creates the segment (to the
+	// head of the log at that moment) and on every rebuild (to the position
+	// the segment had reached before it).
 	ReplayUntil uint64
 }
 
@@ -156,17 +156,19 @@ type Lease struct {
 //     LoadStatuses, stored next to the checkpoint)
 //
 // A segment has at most one owner at a time. The calls that take a [Lease]
-// are fenced: when l.Owner no longer holds the segment, they change nothing
-// and Commit and Reset return [ErrClaimLost].
+// are fenced: when l.Owner no longer holds the segment, they change nothing,
+// and Commit, Reset and SaveStatus return [ErrClaimLost].
 //
 // Implementations must be safe for concurrent use, and are checked against
 // this contract by [projectiontest.StoreAcceptanceTest].
 type Store interface {
 	// Init declares that the projection name has segments segments, creating
-	// them on first use. Every other call for name assumes Init has been
-	// called for it. Calling Init again with the same count is a no-op; with
-	// a different count it returns [ErrSegmentsChanged].
-	Init(ctx context.Context, name string, segments int) error
+	// them on first use with a zero checkpoint whose ReplayUntil is
+	// replayUntil. Every other call for name assumes Init has been called
+	// for it. Calling Init again with the same count changes nothing, not
+	// even ReplayUntil; with a different count it returns
+	// [ErrSegmentsChanged].
+	Init(ctx context.Context, name string, segments int, replayUntil uint64) error
 
 	// Claim takes the segment for l.Owner when it is unowned, already owned
 	// by l.Owner, or its last heartbeat is older than ttl (so a dead
@@ -191,15 +193,16 @@ type Store interface {
 
 	// Release gives the segment up at once instead of waiting for its
 	// claim's ttl to expire, so another instance can take over without
-	// delay. It does nothing when l.Owner does not hold the segment.
+	// delay, and sets its phase to [Standby] so no one reads it as live. It
+	// does nothing when l.Owner does not hold the segment.
 	Release(ctx context.Context, l Lease) error
 
 	// SaveStatus publishes status between commits, so other instances see
 	// phase changes (Standby to Live, for example) without waiting for the
 	// next Commit, and refreshes the heartbeat. It stores Phase, Head and
 	// LastError only: the Position and Version that LoadStatuses reports
-	// come from the checkpoint, and Owner from the claim. It does nothing
-	// when l.Owner does not hold the segment.
+	// come from the checkpoint, and Owner from the claim. When l.Owner does
+	// not hold the segment it changes nothing and returns [ErrClaimLost].
 	SaveStatus(ctx context.Context, l Lease, status Status) error
 
 	// LoadStatuses returns the status of every segment of the projection

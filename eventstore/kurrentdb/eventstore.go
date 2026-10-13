@@ -224,6 +224,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: result.NextExpectedVersion + 1,
+		GlobalVersion:       result.CommitPosition,
 	}, nil
 
 }

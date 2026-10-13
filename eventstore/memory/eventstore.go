@@ -67,7 +67,10 @@ func (m *MemoryStore) ReadAll(ctx context.Context, after uint64, opts eventsourc
 }
 
 func matches(env *eventsourcing.Envelope, types map[string]bool, prefixes []string) bool {
-	if len(types) > 0 && !types[env.Event.EventType()] && !anyIn(eventsourcing.EventNamesFor(env.Event), types) {
+	// The memory store keeps events as Go values; the name an event is
+	// stored under is its EventType, and aliases do not match, as on the
+	// other stores.
+	if len(types) > 0 && !types[env.Event.EventType()] {
 		return false
 	}
 	if len(prefixes) == 0 {
@@ -75,15 +78,6 @@ func matches(env *eventsourcing.Envelope, types map[string]bool, prefixes []stri
 	}
 	for _, p := range prefixes {
 		if strings.HasPrefix(env.StreamID, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func anyIn(names []string, set map[string]bool) bool {
-	for _, n := range names {
-		if set[n] {
 			return true
 		}
 	}
@@ -187,6 +181,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		StreamID:            streamId,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
+		GlobalVersion:       uint64(len(m.global)),
 	}, nil
 }
 
