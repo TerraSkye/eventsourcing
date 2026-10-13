@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 
 func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), testDSN)
+	pool, err := pgxpool.New(t.Context(), testDSN)
 	if err != nil {
 		t.Fatalf("connect pool: %v", err)
 	}
@@ -83,12 +83,14 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	store := postgres.NewStore(newPool(t))
 	name := "long-batch-" + uuid.NewString()
 	const ttl = 300 * time.Millisecond
+	a := projection.Lease{Name: name, Segment: 0, Owner: "a"}
+	b := projection.Lease{Name: name, Segment: 0, Owner: "b"}
 
 	if err := store.Init(ctx, name, 1); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if _, ok, err := store.Claim(ctx, name, 0, "a", ttl); err != nil || !ok {
-		t.Fatalf("Claim(a): ok=%v err=%v", ok, err)
+	if _, ok, err := store.Claim(ctx, a, ttl); err != nil || !ok {
+		t.Fatalf("Claim(a) = %v, %v; want true, nil", ok, err)
 	}
 
 	inBatch := make(chan struct{})
@@ -96,7 +98,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	go func() {
 		<-inBatch
 		time.Sleep(2 * ttl) // the claim has expired by the time this runs
-		_, ok, err := store.Claim(ctx, name, 0, "b", ttl)
+		_, ok, err := store.Claim(ctx, b, ttl)
 		if err != nil {
 			t.Errorf("Claim(b): %v", err)
 		}
@@ -105,7 +107,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 
 	cp := projection.Checkpoint{Position: 1}
 	st := projection.Status{Phase: projection.Live, Position: 1, Owner: "a"}
-	err := store.Commit(ctx, name, 0, "a", cp, st, func(context.Context) error {
+	err := store.Commit(ctx, a, cp, st, func(context.Context) error {
 		close(inBatch)
 		time.Sleep(4 * ttl)
 		return nil
@@ -117,7 +119,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	if <-claimed {
 		t.Fatal("Claim(b) was granted right after a long batch committed, want it refused")
 	}
-	if err := store.Commit(ctx, name, 0, "a", projection.Checkpoint{Position: 2}, projection.Status{Phase: projection.Live, Position: 2, Owner: "a"},
+	if err := store.Commit(ctx, a, projection.Checkpoint{Position: 2}, projection.Status{Phase: projection.Live, Position: 2, Owner: "a"},
 		func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("next Commit by the owner: %v", err)
 	}

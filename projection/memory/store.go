@@ -51,6 +51,7 @@ type memoryRow struct {
 	heartbeat time.Time
 }
 
+// Init implements [projection.Store].
 func (s *Store) Init(ctx context.Context, name string, segments int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,38 +70,55 @@ func (s *Store) Init(ctx context.Context, name string, segments int) error {
 	return nil
 }
 
-func (s *Store) Claim(ctx context.Context, name string, segment int, owner string, ttl time.Duration) (projection.Checkpoint, bool, error) {
+// row returns the row for l's segment, or nil if Init has not created it.
+// s.mu must be held.
+func (s *Store) row(l projection.Lease) *memoryRow {
+	p, ok := s.projections[l.Name]
+	if !ok {
+		return nil
+	}
+	return p.rows[l.Segment]
+}
+
+// owned returns the row for l's segment if l.Owner holds it, or nil.
+// s.mu must be held.
+func (s *Store) owned(l projection.Lease) *memoryRow {
+	row := s.row(l)
+	if row == nil || row.owner != l.Owner {
+		return nil
+	}
+	return row
+}
+
+// Claim implements [projection.Store].
+func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Checkpoint, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.projections[name]
-	if !ok {
-		return projection.Checkpoint{}, false, nil
-	}
-	row := p.rows[segment]
+	row := s.row(l)
 	if row == nil {
 		return projection.Checkpoint{}, false, nil
 	}
-	free := row.owner == "" || row.owner == owner || time.Since(row.heartbeat) > ttl
+	free := row.owner == "" || row.owner == l.Owner || time.Since(row.heartbeat) > ttl
 	if !free {
 		return projection.Checkpoint{}, false, nil
 	}
-	row.owner = owner
+	row.owner = l.Owner
 	row.heartbeat = time.Now()
-	row.status.Owner = owner
+	row.status.Owner = l.Owner
 	return row.cp, true, nil
 }
 
-func (s *Store) Commit(ctx context.Context, name string, segment int, owner string, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
-	// Pre-check ownership before fn, so a handler never writes against a
-	// lost claim. Re-check after fn, so a reclaim during fn still rolls
-	// back.
+// Commit implements [projection.Store]. It cannot roll back fn's writes;
+// see [Store].
+func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+	// Check ownership before fn, so a handler never writes against a lost
+	// claim, and again after fn, so a reclaim during fn is still reported.
 	s.mu.Lock()
-	p, ok := s.projections[name]
-	if !ok || p.rows[segment] == nil || p.rows[segment].owner != owner {
-		s.mu.Unlock()
+	held := s.owned(l) != nil
+	s.mu.Unlock()
+	if !held {
 		return projection.ErrClaimLost
 	}
-	s.mu.Unlock()
 
 	if err := fn(ctx); err != nil {
 		return err
@@ -108,12 +126,8 @@ func (s *Store) Commit(ctx context.Context, name string, segment int, owner stri
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok = s.projections[name]
-	if !ok {
-		return projection.ErrClaimLost
-	}
-	row := p.rows[segment]
-	if row == nil || row.owner != owner {
+	row := s.owned(l)
+	if row == nil {
 		return projection.ErrClaimLost
 	}
 	row.cp = cp
@@ -122,14 +136,16 @@ func (s *Store) Commit(ctx context.Context, name string, segment int, owner stri
 	return nil
 }
 
-func (s *Store) Reset(ctx context.Context, name string, segment int, owner string, newVersion int, wipe func(ctx context.Context) error) error {
+// Reset implements [projection.Store]. It cannot roll back wipe's writes;
+// see [Store].
+func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	s.mu.Lock()
-	p, ok := s.projections[name]
-	if !ok || p.rows[segment] == nil || p.rows[segment].owner != owner {
+	row := s.owned(l)
+	if row == nil {
 		s.mu.Unlock()
 		return projection.ErrClaimLost
 	}
-	oldPos := p.rows[segment].cp.Position
+	oldPos := row.cp.Position
 	s.mu.Unlock()
 
 	if err := wipe(ctx); err != nil {
@@ -138,12 +154,8 @@ func (s *Store) Reset(ctx context.Context, name string, segment int, owner strin
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok = s.projections[name]
-	if !ok {
-		return projection.ErrClaimLost
-	}
-	row := p.rows[segment]
-	if row == nil || row.owner != owner {
+	row = s.owned(l)
+	if row == nil {
 		return projection.ErrClaimLost
 	}
 	row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: oldPos}
@@ -153,15 +165,12 @@ func (s *Store) Reset(ctx context.Context, name string, segment int, owner strin
 	return nil
 }
 
-func (s *Store) Release(ctx context.Context, name string, segment int, owner string) error {
+// Release implements [projection.Store].
+func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.projections[name]
-	if !ok {
-		return nil
-	}
-	row := p.rows[segment]
-	if row == nil || row.owner != owner {
+	row := s.owned(l)
+	if row == nil {
 		return nil
 	}
 	row.owner = ""
@@ -169,26 +178,24 @@ func (s *Store) Release(ctx context.Context, name string, segment int, owner str
 	return nil
 }
 
-func (s *Store) SaveStatus(ctx context.Context, name string, segment int, owner string, st projection.Status) error {
+// SaveStatus implements [projection.Store].
+func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.projections[name]
-	if !ok || p.rows[segment] == nil {
-		return nil
-	}
-	row := p.rows[segment]
-	if row.owner != owner {
+	row := s.owned(l)
+	if row == nil {
 		return nil
 	}
 	// Progress only moves with the checkpoint; SaveStatus publishes the
 	// rest.
-	row.status.Phase = st.Phase
-	row.status.Head = st.Head
-	row.status.LastError = st.LastError
+	row.status.Phase = status.Phase
+	row.status.Head = status.Head
+	row.status.LastError = status.LastError
 	row.heartbeat = time.Now()
 	return nil
 }
 
+// LoadStatuses implements [projection.Store].
 func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,7 +204,7 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 		return nil, nil
 	}
 	out := make([]projection.Status, 0, p.segments)
-	for i := 0; i < p.segments; i++ {
+	for i := range p.segments {
 		row := p.rows[i]
 		if row == nil {
 			continue

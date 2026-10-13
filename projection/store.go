@@ -122,6 +122,21 @@ type Status struct {
 	Age time.Duration
 }
 
+// Lease identifies one segment of a projection and the instance that
+// claims it. Every [Store] call that acts on a claimed segment takes one.
+type Lease struct {
+	// Name is the projection's name; see [Projection.Name].
+	Name string
+
+	// Segment is the segment, in [0, segments). 0 for a single-segment
+	// projection.
+	Segment int
+
+	// Owner identifies the instance that claims the segment; see
+	// [Projection.Owner].
+	Owner string
+}
+
 // Store is everything a projection persists: segment claims, checkpoints,
 // and status. One Store serves every projection whose read models live in
 // its database, and must sit in that same database so that read-model
@@ -130,68 +145,65 @@ type Status struct {
 // The Store absorbs five separate concerns, so users wire up one thing per
 // database instead of five:
 //
-//   - checkpointing (via Commit and Load)
+//   - checkpointing (via Claim and Commit)
 //   - exclusive ownership between instances (via Claim and the fenced
 //     Commit; no separate lock service)
-//   - segmentation across instances (segment-keyed Claim; a single
+//   - segmentation across instances (a [Lease] names one segment; a single
 //     projection is just segments=1)
 //   - exactly-once writes to the read model (Commit opens the unit of work
 //     and refuses to commit if the claim has been taken over)
-//   - status publication for other instances to follow (SaveStatus /
+//   - status publication for other instances to follow (SaveStatus and
 //     LoadStatuses, stored next to the checkpoint)
 //
-// Implementations are checked against the contract by
-// [projectiontest.StoreAcceptanceTest].
+// A segment has at most one owner at a time. The calls that take a [Lease]
+// are fenced: when l.Owner no longer holds the segment, they change nothing
+// and Commit and Reset return [ErrClaimLost].
 //
-// # Contract
-//
-// Init declares the segments. Every other call for name assumes Init has
-// been called for it. Calling Init with the same segments is a no-op; with
-// a different count it returns [ErrSegmentsChanged].
-//
-// A segment has at most one owner at a time. Claim succeeds when the
-// segment is unowned, is already owned by the caller, or its last recorded
-// heartbeat is older than ttl (so a dead instance's claim is reclaimed).
-// On success it refreshes the heartbeat and returns the segment's current
-// Checkpoint.
-//
-// Commit opens one unit of work: it runs fn, and if fn returns nil it
-// stores cp and status and refreshes the owner's heartbeat, atomically.
-// If the owner no longer holds the segment (claim expired, Release was
-// called elsewhere, or a reclaim happened), the whole unit of work rolls
-// back and Commit returns [ErrClaimLost]. The ctx passed to fn carries the
-// unit of work; each implementation provides its own accessor, such as
-// postgres.Tx in projection/postgres.
-//
-// Reset wipes the read model via wipe, and in the same unit of work resets
-// the segment's checkpoint to Position=0, Version=newVersion and
-// ReplayUntil=currentPosition. It is fenced the same way as Commit.
-//
-// Release gives the segment up at once instead of waiting for its claim's
-// ttl to expire, so another instance can take over without delay.
-//
-// SaveStatus publishes status for a segment the caller still owns, so that
-// other instances see phase changes between batches (e.g. Standby -> Live)
-// without waiting for the next Commit. It stores Phase, Head and LastError
-// only; the Position and Version that LoadStatuses reports always come
-// from the stored checkpoint, and Owner from the claim. A call by anyone
-// other than the owner changes nothing. It is best-effort; a failure does
-// not stall the runner.
+// Implementations must be safe for concurrent use, and are checked against
+// this contract by [projectiontest.StoreAcceptanceTest].
 type Store interface {
+	// Init declares that the projection name has segments segments, creating
+	// them on first use. Every other call for name assumes Init has been
+	// called for it. Calling Init again with the same count is a no-op; with
+	// a different count it returns [ErrSegmentsChanged].
 	Init(ctx context.Context, name string, segments int) error
 
-	Claim(ctx context.Context, name string, segment int, owner string, ttl time.Duration) (Checkpoint, bool, error)
+	// Claim takes the segment for l.Owner when it is unowned, already owned
+	// by l.Owner, or its last heartbeat is older than ttl (so a dead
+	// instance's claim is reclaimed). On success it refreshes the heartbeat
+	// and returns the segment's checkpoint and true; when another instance
+	// holds the segment it returns false.
+	Claim(ctx context.Context, l Lease, ttl time.Duration) (Checkpoint, bool, error)
 
-	Commit(ctx context.Context, name string, segment int, owner string, cp Checkpoint, status Status,
-		fn func(ctx context.Context) error) error
+	// Commit runs fn as one unit of work and, if fn returns nil, stores cp
+	// and status and refreshes the heartbeat in that same unit of work. If
+	// fn fails, or l.Owner no longer holds the segment, everything fn wrote
+	// is rolled back. The ctx passed to fn carries the unit of work; each
+	// implementation provides its own accessor, such as postgres.Tx in
+	// projection/postgres.
+	Commit(ctx context.Context, l Lease, cp Checkpoint, status Status, fn func(ctx context.Context) error) error
 
-	Reset(ctx context.Context, name string, segment int, owner string, newVersion int,
-		wipe func(ctx context.Context) error) error
+	// Reset runs wipe to empty the read model and, in the same unit of
+	// work, moves the segment's checkpoint back to Position 0 with
+	// Version newVersion and ReplayUntil set to the position it had
+	// reached. It is fenced like Commit.
+	Reset(ctx context.Context, l Lease, newVersion int, wipe func(ctx context.Context) error) error
 
-	Release(ctx context.Context, name string, segment int, owner string) error
+	// Release gives the segment up at once instead of waiting for its
+	// claim's ttl to expire, so another instance can take over without
+	// delay. It does nothing when l.Owner does not hold the segment.
+	Release(ctx context.Context, l Lease) error
 
-	SaveStatus(ctx context.Context, name string, segment int, owner string, s Status) error
+	// SaveStatus publishes status between commits, so other instances see
+	// phase changes (Standby to Live, for example) without waiting for the
+	// next Commit, and refreshes the heartbeat. It stores Phase, Head and
+	// LastError only: the Position and Version that LoadStatuses reports
+	// come from the checkpoint, and Owner from the claim. It does nothing
+	// when l.Owner does not hold the segment.
+	SaveStatus(ctx context.Context, l Lease, status Status) error
 
+	// LoadStatuses returns the status of every segment of the projection
+	// name, ordered by segment, with Age set.
 	LoadStatuses(ctx context.Context, name string) ([]Status, error)
 }
 
@@ -200,8 +212,8 @@ type Store interface {
 // inspected and replayed. It is called inside the Commit that moves the
 // checkpoint past the event, so the record and the move commit together.
 type DeadLetterStore interface {
-	// SaveDeadLetter records that name/segment skipped the event at
+	// SaveDeadLetter records that the segment l skipped the event at
 	// position because its handler returned cause. ctx carries the Commit's
 	// unit of work.
-	SaveDeadLetter(ctx context.Context, name string, segment int, position uint64, eventType string, cause error) error
+	SaveDeadLetter(ctx context.Context, l Lease, position uint64, eventType string, cause error) error
 }

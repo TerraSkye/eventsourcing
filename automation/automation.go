@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
-
-	"github.com/terraskye/eventsourcing/projection"
 )
 
 // errNotImplemented marks the parts of this package that are still a
@@ -92,7 +90,7 @@ type Status struct {
 // with [Automation.Run].
 type Automation[T any] struct {
 	name    string
-	waitFor []projection.Dependency
+	waitFor []Dependency
 	claim   ClaimFunc[T]
 	work    WorkFunc[T]
 	cfg     config
@@ -104,7 +102,7 @@ type Automation[T any] struct {
 //
 // todoList is the projection claim reads from. The automation only claims
 // work while it is live; pass a [*projection.Runner] when the projection
-// runs in this program, or [projection.Remote] when it runs elsewhere.
+// runs in this program, or [Remote] when it runs elsewhere.
 //
 // claim leases pending items and work processes one of them. Without
 // options, the automation claims up to 10 items at a time, leases them for
@@ -114,7 +112,7 @@ type Automation[T any] struct {
 // name identifies the automation in logs, metrics and as the causation of
 // the commands it sends. New panics if name is empty or todoList, claim or
 // work is nil.
-func New[T any](name string, todoList projection.Dependency, claim ClaimFunc[T], work WorkFunc[T], opts ...Option) *Automation[T] {
+func New[T any](name string, todoList Dependency, claim ClaimFunc[T], work WorkFunc[T], opts ...Option) *Automation[T] {
 	switch {
 	case name == "":
 		panic("automation: New requires a name")
@@ -131,7 +129,7 @@ func New[T any](name string, todoList projection.Dependency, claim ClaimFunc[T],
 
 	a := &Automation[T]{
 		name:    name,
-		waitFor: append([]projection.Dependency{todoList}, cfg.waitFor...),
+		waitFor: append([]Dependency{todoList}, cfg.waitFor...),
 		claim:   claim,
 		work:    work,
 		cfg:     cfg,
@@ -153,7 +151,7 @@ func (a *Automation[T]) Name() string { return a.name }
 // waits for the interval or a nudge. A failing claim or work function is
 // recorded in [Status.LastError] and never stops Run.
 //
-// When a dependency implements [projection.Watcher], Run registers the
+// When a dependency implements [Watcher], Run registers the
 // automation's Nudge with it, so the automation wakes up when the todo list
 // changes.
 func (a *Automation[T]) Run(ctx context.Context) error {

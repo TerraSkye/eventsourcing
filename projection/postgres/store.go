@@ -118,7 +118,7 @@ func (s *Store) Init(ctx context.Context, name string, segments int) error {
 		`SELECT COUNT(*) FROM projection_segments WHERE name = $1`, name,
 	).Scan(&count)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: count segments: %w", err)
+		return fmt.Errorf("projection/postgres: init %q: count segments: %w", name, err)
 	}
 	if count == 0 {
 		return s.insertSegments(ctx, name, segments)
@@ -142,16 +142,14 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int) e
 	defer br.Close()
 	for i := 0; i < segments; i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("projection/postgres: init segment %d: %w", i, err)
+			return fmt.Errorf("projection/postgres: init %q segment %d: %w", name, i, err)
 		}
 	}
 	return nil
 }
 
-// Claim takes segment for owner if its row is unowned, already ours, or
-// its heartbeat is older than ttl. On success it refreshes the heartbeat
-// and returns the row's checkpoint. See [projection.Store].
-func (s *Store) Claim(ctx context.Context, name string, segment int, owner string, ttl time.Duration) (projection.Checkpoint, bool, error) {
+// Claim implements [projection.Store].
+func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Checkpoint, bool, error) {
 	var cp projection.Checkpoint
 	err := s.db.QueryRow(ctx, `
 		UPDATE projection_segments
@@ -159,128 +157,130 @@ func (s *Store) Claim(ctx context.Context, name string, segment int, owner strin
 		WHERE name = $1 AND segment = $2
 		  AND (owner IS NULL OR owner = $3 OR heartbeat < clock_timestamp() - make_interval(secs => $4))
 		RETURNING position, version, replay_until`,
-		name, segment, owner, ttl.Seconds(),
+		l.Name, l.Segment, l.Owner, ttl.Seconds(),
 	).Scan(&cp.Position, &cp.Version, &cp.ReplayUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return projection.Checkpoint{}, false, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return projection.Checkpoint{}, false, nil
-		}
-		return projection.Checkpoint{}, false, fmt.Errorf("projection/postgres: claim: %w", err)
+		return projection.Checkpoint{}, false, fmt.Errorf("projection/postgres: claim %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	return cp, true, nil
 }
 
-// Commit runs fn inside a transaction and, if fn returns nil and the owner
-// still holds the segment, stores cp and status atomically. If the claim
-// has been lost (another instance took over, or Release was called),
-// fn's writes are rolled back and [projection.ErrClaimLost] is returned.
-func (s *Store) Commit(ctx context.Context, name string, segment int, owner string, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
-	return s.runTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		// Pre-check and lock the row for the duration of the batch, so a
-		// concurrent reclaim waits for us to commit or roll back.
-		var currentOwner *string
-		err := tx.QueryRow(ctx,
-			`SELECT owner FROM projection_segments
-			 WHERE name = $1 AND segment = $2 FOR UPDATE`,
-			name, segment,
-		).Scan(&currentOwner)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return projection.ErrClaimLost
-			}
+// Commit implements [projection.Store]. It runs fn in a transaction that
+// first locks the segment's row, so a Claim by another instance waits for
+// the batch instead of taking the segment over halfway.
+func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+	return s.runTx(ctx, "commit", l, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := lockOwned(ctx, tx, l); err != nil {
 			return err
 		}
-		if currentOwner == nil || *currentOwner != owner {
-			return projection.ErrClaimLost
-		}
-
 		if err := fn(ctx); err != nil {
 			return err
 		}
-
 		var lastErr any
 		if status.LastError != "" {
 			lastErr = status.LastError
 		}
-		_, err = tx.Exec(ctx, `
+		_, err := tx.Exec(ctx, `
 			UPDATE projection_segments
 			SET position = $3, version = $4, replay_until = $5,
 			    phase = $6, head = $7, last_error = $8, heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $9`,
-			name, segment,
+			l.Name, l.Segment,
 			cp.Position, cp.Version, cp.ReplayUntil,
 			status.Phase.String(), status.Head, lastErr,
-			owner,
+			l.Owner,
 		)
-		return err
+		if err != nil {
+			return fmt.Errorf("projection/postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+		}
+		return nil
 	})
 }
 
-// Reset wipes read-model state via wipe and resets the segment's
-// checkpoint, in one transaction. See [projection.Store].
-func (s *Store) Reset(ctx context.Context, name string, segment int, owner string, newVersion int, wipe func(ctx context.Context) error) error {
-	return s.runTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		var currentOwner *string
-		var oldPos uint64
-		err := tx.QueryRow(ctx,
-			`SELECT owner, position FROM projection_segments
-			 WHERE name = $1 AND segment = $2 FOR UPDATE`,
-			name, segment,
-		).Scan(&currentOwner, &oldPos)
+// Reset implements [projection.Store], in one transaction that locks the
+// segment's row like Commit does.
+func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
+	return s.runTx(ctx, "reset", l, func(ctx context.Context, tx pgx.Tx) error {
+		oldPos, err := lockOwned(ctx, tx, l)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return projection.ErrClaimLost
-			}
 			return err
 		}
-		if currentOwner == nil || *currentOwner != owner {
-			return projection.ErrClaimLost
-		}
-
 		if err := wipe(ctx); err != nil {
 			return err
 		}
-
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
 			SET position = 0, version = $3, replay_until = $4,
 			    phase = 'starting', head = 0, last_error = NULL,
 			    heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $5`,
-			name, segment, newVersion, oldPos, owner,
+			l.Name, l.Segment, newVersion, oldPos, l.Owner,
 		)
-		return err
+		if err != nil {
+			return fmt.Errorf("projection/postgres: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+		}
+		return nil
 	})
 }
 
-// Release gives the segment up so another instance can take it at once.
-func (s *Store) Release(ctx context.Context, name string, segment int, owner string) error {
+// lockOwned locks l's segment row for the rest of tx and returns its
+// position, or returns [projection.ErrClaimLost] when l.Owner does not
+// hold the segment.
+func lockOwned(ctx context.Context, tx pgx.Tx, l projection.Lease) (uint64, error) {
+	var (
+		owner    *string
+		position uint64
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT owner, position FROM projection_segments
+		 WHERE name = $1 AND segment = $2 FOR UPDATE`,
+		l.Name, l.Segment,
+	).Scan(&owner, &position)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, projection.ErrClaimLost
+	}
+	if err != nil {
+		return 0, fmt.Errorf("projection/postgres: lock %q segment %d: %w", l.Name, l.Segment, err)
+	}
+	if owner == nil || *owner != l.Owner {
+		return 0, projection.ErrClaimLost
+	}
+	return position, nil
+}
+
+// Release implements [projection.Store].
+func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET owner = NULL
 		WHERE name = $1 AND segment = $2 AND owner = $3`,
-		name, segment, owner,
+		l.Name, l.Segment, l.Owner,
 	)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: release: %w", err)
+		return fmt.Errorf("projection/postgres: release %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	return nil
 }
 
-// SaveStatus publishes status for a segment the caller still owns. Used
-// between batches to update Phase without a Commit.
-func (s *Store) SaveStatus(ctx context.Context, name string, segment int, owner string, st projection.Status) error {
+// SaveStatus implements [projection.Store].
+func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
 	var lastErr any
-	if st.LastError != "" {
-		lastErr = st.LastError
+	if status.LastError != "" {
+		lastErr = status.LastError
 	}
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET phase = $3, head = $4, last_error = $5, heartbeat = clock_timestamp()
 		WHERE name = $1 AND segment = $2 AND owner = $6`,
-		name, segment, st.Phase.String(), st.Head, lastErr, owner,
+		l.Name, l.Segment, status.Phase.String(), status.Head, lastErr, l.Owner,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("projection/postgres: save status of %q segment %d: %w", l.Name, l.Segment, err)
+	}
+	return nil
 }
 
 // LoadStatuses returns the status of every segment of name.
@@ -294,7 +294,7 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 		name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("projection/postgres: load statuses: %w", err)
+		return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
 	}
 	defer rows.Close()
 
@@ -311,7 +311,7 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 			ageSeconds float64
 		)
 		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
 		}
 		st := projection.Status{
 			Phase:    parsePhase(phase),
@@ -329,37 +329,50 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 		}
 		out = append(out, st)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
+	}
+	return out, nil
 }
 
-// SaveDeadLetter records a skipped event. It is called inside the Commit
-// that moves the checkpoint past the event.
-func (s *Store) SaveDeadLetter(ctx context.Context, name string, segment int, position uint64, eventType string, cause error) error {
+// SaveDeadLetter implements [projection.DeadLetterStore]. It is called
+// inside the Commit that moves the checkpoint past the event.
+func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position uint64, eventType string, cause error) error {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	if !ok {
-		return fmt.Errorf("projection/postgres: SaveDeadLetter called outside a Store commit")
+		return errors.New("projection/postgres: SaveDeadLetter called outside a Store commit")
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
 		(projection, segment, global_version, event_type, error)
 		VALUES ($1, $2, $3, $4, $5)`,
-		name, segment, position, eventType, cause.Error(),
+		l.Name, l.Segment, position, eventType, cause.Error(),
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("projection/postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
+	}
+	return nil
 }
 
-// runTx runs fn in a new transaction. On error, fn's work is rolled back.
-func (s *Store) runTx(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx) error) error {
+// runTx runs fn in a new transaction, committing it if fn returns nil and
+// rolling it back otherwise. fn's own errors are returned unchanged, so
+// [projection.ErrClaimLost] and handler errors reach the runner as they
+// are; op names the call in errors from beginning or committing.
+func (s *Store) runTx(ctx context.Context, op string, l projection.Lease, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
+		return fmt.Errorf("projection/postgres: %s %q segment %d: begin: %w", op, l.Name, l.Segment, err)
+	}
+	// Rollback after Commit is a no-op, and a failed rollback leaves
+	// nothing to clean up: the transaction ends with the connection.
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(context.WithValue(ctx, txKey{}, tx), tx); err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	ctxWithTx := context.WithValue(ctx, txKey{}, tx)
-	if err := fn(ctxWithTx, tx); err != nil {
-		return err
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("projection/postgres: %s %q segment %d: commit: %w", op, l.Name, l.Segment, err)
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func parsePhase(s string) projection.Phase {

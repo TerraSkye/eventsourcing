@@ -4,26 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"strconv"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/terraskye/eventsourcing"
 )
 
-// Default values for [Projection]'s tuning fields.
-const (
-	DefaultBatchSize    = 500
-	DefaultPollInterval = time.Second
-	DefaultClaimTTL     = 15 * time.Second
-)
-
 var (
-	// ErrNotActive is returned by [Runner.Rebuild] when this instance does
-	// not currently hold the projection, so no other instance can either
-	// (it would do nothing from here).
+	// ErrNotActive is returned by [Runner.Rebuild] when this instance is not
+	// working the projection: Run has not started or has returned, or
+	// another instance holds the claim. A rebuild only reaches the runner
+	// in this process; bump [Projection.Version] to rebuild wherever the
+	// projection runs.
 	ErrNotActive = errors.New("projection: runner is not active on this instance")
 
 	// ErrNoReset is returned by [Runner.Rebuild] when the projection has no
@@ -35,203 +29,6 @@ var (
 	// run it under a new name.
 	ErrSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
 )
-
-// SegmentKey picks which segment an event belongs to in a segmented
-// projection; see [Projection.Segments]. It must return the same key for
-// every event that touches the same read-model rows, so that no two
-// segments ever write the same row.
-type SegmentKey func(env *eventsourcing.Envelope) string
-
-// ByStreamID is a [SegmentKey] that partitions on the envelope's StreamID,
-// for read models whose rows are keyed by stream.
-func ByStreamID(env *eventsourcing.Envelope) string { return env.StreamID }
-
-// SegmentOf maps key to a segment in [0, segments). It is stable across
-// processes and releases, so every instance routes an event to the same
-// segment.
-func SegmentOf(key string, segments int) int {
-	if segments <= 1 {
-		return 0
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return int(h.Sum32() % uint32(segments))
-}
-
-// ErrorPolicy decides what the runner does when a handler returns an error
-// for an event.
-type ErrorPolicy int
-
-const (
-	// StallOnError stops the segment at the failing event: the runner
-	// reports [Stalled], backs off and retries until the handler succeeds
-	// or the projection is rebuilt. Nothing is skipped silently. Default.
-	StallOnError ErrorPolicy = iota
-
-	// SkipWhenLive skips failing events while [Live], and stalls on them
-	// while catching up. Keeps a running projection available while a
-	// rebuild, which can be verified before going live, stays strict.
-	SkipWhenLive
-
-	// SkipAlways skips failing events in every phase.
-	SkipAlways
-)
-
-// String returns the policy's name.
-func (p ErrorPolicy) String() string {
-	switch p {
-	case StallOnError:
-		return "stall_on_error"
-	case SkipWhenLive:
-		return "skip_when_live"
-	case SkipAlways:
-		return "skip_always"
-	default:
-		return "unknown"
-	}
-}
-
-// Projection is a projection's definition and tuning. The zero value for
-// every optional field picks sensible defaults.
-//
-// A projection is usually defined next to the read model it writes, by a
-// constructor in the same package, and handed to [NewRunner] by main:
-//
-//	func NewProjection(list *TaskList) projection.Projection {
-//		return projection.Projection{
-//			Name:    "task-list",
-//			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-//			Events:  []string{"TaskCreated", "TaskCompleted"},
-//		}
-//	}
-//
-//	r := projection.NewRunner(tasklist.NewProjection(list), reader, store)
-//
-// A durable projection adds Version and Reset so it can be rebuilt:
-//
-//	projection.Projection{
-//		Name:    "task-list",
-//		Handler: eventsourcing.NewEventHandlerFunc(handle),
-//		Events:  []string{"TaskCreated", "TaskCompleted"},
-//		Version: 2,
-//		Reset:   reset,
-//	}
-//
-// A projection whose one instance cannot keep up is segmented:
-//
-//	projection.Projection{
-//		Name:       "order-summaries-v1",
-//		Handler:    eventsourcing.NewEventHandlerFunc(handle),
-//		Events:     []string{"OrderPlaced", "OrderShipped"},
-//		Segments:   64,
-//		SegmentKey: projection.ByStreamID,
-//	}
-//
-// Nothing else changes. A segmented projection is just the same loop
-// scoped to each segment the store lets this instance claim.
-//
-// Projection is a plain value, so main can still adjust deployment
-// settings, such as PollInterval or a logging wrapper around Handler,
-// before passing it to NewRunner.
-type Projection struct {
-	// Name identifies the projection. It keys the checkpoint and the
-	// claim, so it must be unique per read model and stable across
-	// deploys; renaming a projection makes it start from scratch.
-	Name string
-
-	// Handler handles every event the runner reads, in log order. Wrap a
-	// function that switches on the event type with
-	// [eventsourcing.NewEventHandlerFunc], or pass an
-	// [*eventsourcing.EventGroupProcessor].
-	Handler eventsourcing.EventHandler
-
-	// Events lists the registered names of the event types Handler
-	// handles; the runner reads only these. For an
-	// [*eventsourcing.EventGroupProcessor], pass its StreamFilter.
-	//
-	// Adding an event type is a change to how the read model is written:
-	// bump Version with it. Otherwise the runner carries on from its
-	// checkpoint, and every event of the new type stored before it is
-	// never applied.
-	Events []string
-
-	// Version is the version of the projection's code, stored with the
-	// checkpoint. When the runner starts a segment and finds a stored
-	// version different from this one, the segment is rebuilt before
-	// processing new events. Bump the version whenever the projection
-	// starts writing the read model differently, including when Events
-	// gains a type; see Reset.
-	//
-	// A rebuild empties the read model until the runner has caught up
-	// again. For a large log, build the new version under a new Name
-	// instead and switch queries over once it is live.
-	//
-	// Default 0: no automatic rebuilds (Rebuild can still be called).
-	// Setting a non-zero Version requires Reset.
-	Version int
-
-	// Reset wipes the read model so the projection can be rebuilt. It runs
-	// in the unit of work that moves the checkpoint back to zero, through
-	// the same context handlers use (e.g. postgres.Tx(ctx)):
-	//
-	//	func reset(ctx context.Context) error {
-	//		_, err := postgres.Tx(ctx).Exec(ctx, "TRUNCATE tasks")
-	//		return err
-	//	}
-	//
-	// Required for Version > 0 and for [Runner.Rebuild].
-	Reset func(ctx context.Context) error
-
-	// Segments is how many segments the projection is split into. 0 or 1
-	// means a single-segment projection that one instance runs at a time;
-	// a value above 1 segments it, with instances sharing the segments
-	// through the [Store]'s claim mechanism.
-	//
-	// Set this only when one instance cannot keep up. The segment count is
-	// fixed per name; changing it takes a new name.
-	//
-	// Every segment reads the filtered log on its own and drops the events
-	// of other segments, so N segments read the log N times. A read model
-	// that combines events of many streams into one row, such as a total
-	// or a count, cannot be segmented: no SegmentKey keeps that row within
-	// one segment.
-	Segments int
-
-	// SegmentKey picks which segment an event belongs to; required when
-	// Segments > 1. [ByStreamID] fits read models whose rows are per
-	// stream. Pick a key that keeps every read-model row within one
-	// segment, or two segments will race on the same row.
-	SegmentKey SegmentKey
-
-	// OnError is what the runner does when a handler fails on an event;
-	// see [ErrorPolicy]. Default [StallOnError].
-	OnError ErrorPolicy
-
-	// Owner identifies this instance to the store, so other instances see
-	// who holds a segment. Defaults to "hostname/pid".
-	Owner string
-
-	// BatchSize is the maximum number of events read and committed in one
-	// unit of work. Default [DefaultBatchSize].
-	BatchSize int
-
-	// PollInterval is how often the runner reads again when nothing woke it
-	// earlier. Also how often it tries to claim segments it does not own.
-	// Default [DefaultPollInterval].
-	PollInterval time.Duration
-
-	// ClaimTTL is how long a claim stays valid without a Commit or
-	// SaveStatus to refresh it. A crashed instance's segments become
-	// available again after this long. Default [DefaultClaimTTL].
-	//
-	// The heartbeat is refreshed when a batch commits, not while its
-	// handlers run. Keep ClaimTTL above the time the slowest batch takes,
-	// or lower BatchSize. The Postgres store locks the segment for the
-	// whole batch, so a slow batch delays a takeover rather than losing
-	// its work; the memory store does not, and another instance can take
-	// the segment over halfway through the batch.
-	ClaimTTL time.Duration
-}
 
 // Runner keeps one projection up to date: it claims the segments it can,
 // reads the global log past each segment's checkpoint, routes each event
@@ -249,22 +46,34 @@ type Runner struct {
 
 	nudge chan struct{}
 
-	mu       sync.Mutex
-	segs     map[int]*segmentState
-	watchers []func()
+	mu             sync.Mutex
+	segs           []*segmentState // indexed by segment
+	changed        chan struct{}   // closed and replaced on every status change, for WaitUntil
+	watchers       []func()
+	pendingRebuild *rebuildRequest // taken by segment 0 between batches
 
-	rebuilds     chan rebuildRequest
-	skippedCount int64 // atomic
+	skipped atomic.Int64
 }
 
 type segmentState struct {
-	status  Status
-	changed chan struct{} // closed and replaced on every status update, for WaitUntil
+	status Status
+
+	// active reports that this instance holds the segment's claim and is
+	// processing it.
+	active bool
 }
 
+// rebuildRequest is a pending [Runner.Rebuild]. The runner sets err and
+// closes done once the rebuild has run, so every caller waiting on the same
+// request sees the outcome.
 type rebuildRequest struct {
-	ctx  context.Context
-	done chan error
+	done chan struct{}
+	err  error
+}
+
+func (req *rebuildRequest) finish(err error) {
+	req.err = err
+	close(req.done)
 }
 
 // NewRunner creates a Runner for p against reader and store.
@@ -277,31 +86,27 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 	case p.Name == "":
 		panic("projection: Projection.Name is required")
 	case p.Handler == nil:
-		panic(fmt.Sprintf("projection %s: Handler is required", p.Name))
+		panic(fmt.Sprintf("projection %q: Handler is required", p.Name))
 	case len(p.Events) == 0:
-		panic(fmt.Sprintf("projection %s: Events is required", p.Name))
+		panic(fmt.Sprintf("projection %q: Events is required", p.Name))
 	case reader == nil:
-		panic(fmt.Sprintf("projection %s: reader is required", p.Name))
+		panic(fmt.Sprintf("projection %q: reader is required", p.Name))
 	case store == nil:
-		panic(fmt.Sprintf("projection %s: store is required", p.Name))
+		panic(fmt.Sprintf("projection %q: store is required", p.Name))
 	}
 	if p.Version != 0 && p.Reset == nil {
-		panic(fmt.Sprintf("projection %s: Version > 0 requires Reset", p.Name))
+		panic(fmt.Sprintf("projection %q: Version > 0 requires Reset", p.Name))
 	}
-	segments := p.Segments
-	if segments < 1 {
-		segments = 1
-	}
+	segments := max(p.Segments, 1)
 	if segments > 1 && p.SegmentKey == nil {
-		panic(fmt.Sprintf("projection %s: Segments > 1 requires SegmentKey", p.Name))
+		panic(fmt.Sprintf("projection %q: Segments > 1 requires SegmentKey", p.Name))
 	}
 	for _, name := range p.Events {
 		if _, err := eventsourcing.NewEventByName(name); err != nil {
-			panic(fmt.Sprintf("projection %s: event %q is not registered; register it with eventsourcing.RegisterEvent", p.Name, name))
+			panic(fmt.Sprintf("projection %q: event %q is not registered; register it with eventsourcing.RegisterEvent", p.Name, name))
 		}
 	}
 
-	// Fill defaults.
 	if p.BatchSize <= 0 {
 		p.BatchSize = DefaultBatchSize
 	}
@@ -321,21 +126,20 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 		store:    store,
 		segments: segments,
 		nudge:    make(chan struct{}, 1),
-		segs:     make(map[int]*segmentState, segments),
-		rebuilds: make(chan rebuildRequest),
+		segs:     make([]*segmentState, segments),
+		changed:  make(chan struct{}),
 	}
-	for i := 0; i < segments; i++ {
-		r.segs[i] = &segmentState{
-			status:  Status{Phase: Starting, Version: p.Version, Segment: i},
-			changed: make(chan struct{}),
-		}
+	for i := range r.segs {
+		r.segs[i] = &segmentState{status: Status{Phase: Starting, Version: p.Version, Segment: i}}
 	}
 	return r
 }
 
+// defaultOwner returns "hostname/pid", or "unknown/pid" when the hostname
+// cannot be read.
 func defaultOwner() string {
-	host, _ := os.Hostname()
-	if host == "" {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
 		host = "unknown"
 	}
 	return host + "/" + strconv.Itoa(os.Getpid())
@@ -344,237 +148,45 @@ func defaultOwner() string {
 // Name returns the projection's name.
 func (r *Runner) Name() string { return r.p.Name }
 
-// Run processes events until ctx is done, then returns ctx.Err().
+// Run processes events until ctx is done, then returns ctx.Err(). It
+// returns early only when [Store.Init] fails, with that error.
 //
-// Run never returns because of a failure. When a batch fails the runner
-// reports [Stalled], backs off and retries from its last committed
+// Failures while processing never make Run return. When a batch fails the
+// runner reports [Stalled], backs off and retries from its last committed
 // checkpoint, until the handler succeeds or the projection is rebuilt.
 //
-// On start, Run calls [Store.Init] with the configured segment count. For
-// each segment, Run competes for the claim: on success it loads the
-// checkpoint and processes events; on failure it reports [Standby] for
-// that segment and keeps trying. If the stored version differs from
-// [Projection.Version] on a segment, that segment is rebuilt first.
+// Each segment competes for its claim: on success Run loads the checkpoint
+// and processes events; otherwise it reports [Standby] for that segment and
+// keeps trying. If the stored version differs from [Projection.Version] on
+// a segment, that segment is rebuilt first.
 //
-// Call Run once per Runner.
+// Call Run once per Runner. On return it has released every claim it held.
 func (r *Runner) Run(ctx context.Context) error {
 	if err := r.store.Init(ctx, r.p.Name, r.segments); err != nil {
-		return fmt.Errorf("projection %s: init: %w", r.p.Name, err)
+		return fmt.Errorf("projection %q: init: %w", r.p.Name, err)
 	}
 
-	// Each segment runs its own loop. For an unsegmented projection
-	// (Segments <= 1) that is just one loop; for a segmented projection it
-	// is N loops competing for N claims, which spread across the instances
-	// of this program through the claim mechanism.
-	wg := sync.WaitGroup{}
-	// A rebuild request goes to the first segment of an unsegmented
-	// projection; for segmented ones Rebuild is refused.
-	for i := 0; i < r.segments; i++ {
-		wg.Add(1)
-		go func(seg int) {
-			defer wg.Done()
-			r.runSegment(ctx, seg)
-		}(i)
+	// One loop per segment. The loops compete for the claims with the
+	// loops of every other instance of this program.
+	var wg sync.WaitGroup
+	for seg := range r.segments {
+		wg.Go(func() { r.runSegment(ctx, seg) })
 	}
 	wg.Wait()
 	return ctx.Err()
 }
 
-// Status returns the projection's status as seen by this instance.
-//
-// For a segmented projection the returned status combines its segments:
-// Phase is the furthest-behind phase of any segment (Stalled, then
-// Starting/Standby, CatchingUp, Live); Position is the lowest; Head the
-// highest; LastError the first non-empty.
-func (r *Runner) Status() Status {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.combinedStatus()
-}
-
-func (r *Runner) combinedStatus() Status {
-	out := Status{Phase: Live, Version: r.p.Version}
-	first := true
-	for _, s := range r.segs {
-		if first {
-			out.Position = s.status.Position
-			out.Head = s.status.Head
-			first = false
-		} else {
-			if s.status.Position < out.Position {
-				out.Position = s.status.Position
-			}
-			if s.status.Head > out.Head {
-				out.Head = s.status.Head
-			}
-		}
-		if phaseRank(s.status.Phase) < phaseRank(out.Phase) {
-			out.Phase = s.status.Phase
-		}
-		if out.LastError == "" && s.status.LastError != "" {
-			out.LastError = s.status.LastError
-		}
-		if out.Owner == "" && s.status.Owner != "" {
-			out.Owner = s.status.Owner
-		}
-	}
-	return out
-}
-
-// phaseRank orders phases from worst to best, for combining segment
-// statuses: a projection is only Live when every segment is Live.
-func phaseRank(p Phase) int {
-	switch p {
-	case Stalled:
-		return 0
-	case Starting, Standby:
-		return 1
-	case CatchingUp:
-		return 2
-	case Live:
-		return 3
-	}
-	return 1
-}
-
-// Live reports whether the projection is live: caught up with the head of
-// the log on every segment, on whichever instance owns each segment.
-//
-// On segments this instance owns, Live answers from memory. On segments
-// another instance owns, it reads [Store.LoadStatuses], and treats any
-// segment it cannot read as not live.
-//
-// Live implements [Dependency].
-func (r *Runner) Live(ctx context.Context) (bool, error) {
-	if r.segments == 1 {
-		r.mu.Lock()
-		p := r.segs[0].status.Phase
-		owner := r.segs[0].status.Owner
-		r.mu.Unlock()
-		if owner == r.p.Owner {
-			return p == Live, nil
-		}
-		// Standby: read from store.
-	}
-	statuses, err := r.store.LoadStatuses(ctx, r.p.Name)
-	if err != nil {
-		return false, err
-	}
-	if len(statuses) < r.segments {
-		return false, nil
-	}
-	for _, s := range statuses {
-		if s.Phase != Live {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-// WaitUntil blocks until the projection has processed the log up to and
-// including position on every segment, or until ctx is done.
-//
-// position is an [eventsourcing.Envelope.GlobalVersion], typically from the
-// [eventsourcing.AppendResult] of the command whose effects the caller
-// wants to see.
-//
-// Events the projection does not handle count as processed. On segments
-// this instance owns, WaitUntil watches memory; on segments another
-// instance owns, it polls [Store.LoadStatuses] at [Projection.PollInterval].
-func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
-	for {
-		if ok, err := r.reached(ctx, position); err != nil {
-			return err
-		} else if ok {
-			return nil
-		}
-
-		// Wait for a change: either a local commit, or at latest the next
-		// poll if we are watching another instance.
-		r.mu.Lock()
-		localChans := make([]<-chan struct{}, 0, r.segments)
-		for _, s := range r.segs {
-			if s.status.Owner == r.p.Owner {
-				localChans = append(localChans, s.changed)
-			}
-		}
-		r.mu.Unlock()
-
-		if len(localChans) == r.segments {
-			// All segments are local; wait for any of them to change.
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-waitAny(localChans):
-			}
-			continue
-		}
-
-		// At least one segment is remote; poll.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(r.p.PollInterval):
-		}
-	}
-}
-
-func (r *Runner) reached(ctx context.Context, position uint64) (bool, error) {
-	// Local segments are consulted from memory.
-	r.mu.Lock()
-	allLocal := true
-	for _, s := range r.segs {
-		if s.status.Owner != r.p.Owner {
-			allLocal = false
-			continue
-		}
-		if s.status.Position < position {
-			r.mu.Unlock()
-			return false, nil
-		}
-	}
-	r.mu.Unlock()
-	if allLocal {
-		return true, nil
-	}
-	statuses, err := r.store.LoadStatuses(ctx, r.p.Name)
-	if err != nil {
-		return false, err
-	}
-	if len(statuses) < r.segments {
-		return false, nil
-	}
-	for _, s := range statuses {
-		if s.Position < position {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-// waitAny closes receives from any of the channels. Used in WaitUntil.
-func waitAny(chans []<-chan struct{}) <-chan struct{} {
-	if len(chans) == 1 {
-		return chans[0]
-	}
-	out := make(chan struct{})
-	var once sync.Once
-	for _, c := range chans {
-		go func(c <-chan struct{}) {
-			<-c
-			once.Do(func() { close(out) })
-		}(c)
-	}
-	return out
-}
-
 // Rebuild wipes the read model and processes the log again from the start.
+// The runner performs it between two batches, under the ctx passed to Run.
 //
-// Rebuild only reaches the runner in this process. It returns
-// [ErrNotActive] when this instance does not currently hold the segment,
-// [ErrNoReset] when the projection has no Reset, and [ErrSegmented] on a
-// segmented projection. To rebuild across instances or a segmented
-// projection, bump [Projection.Version].
+// ctx only bounds how long Rebuild waits: once requested, the rebuild runs
+// even if ctx ends first. Concurrent calls share one rebuild.
+//
+// Rebuild returns [ErrSegmented] on a segmented projection, [ErrNoReset]
+// when the projection has no Reset, and [ErrNotActive] when this instance
+// is not processing the projection, or stops before the rebuild ran. To
+// rebuild across instances or a segmented projection, bump
+// [Projection.Version].
 func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.segments > 1 {
 		return ErrSegmented
@@ -582,17 +194,50 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.p.Reset == nil {
 		return ErrNoReset
 	}
-	req := rebuildRequest{ctx: ctx, done: make(chan error, 1)}
+
+	r.mu.Lock()
+	if !r.segs[0].active {
+		r.mu.Unlock()
+		return ErrNotActive
+	}
+	req := r.pendingRebuild
+	if req == nil {
+		req = &rebuildRequest{done: make(chan struct{})}
+		r.pendingRebuild = req
+	}
+	r.mu.Unlock()
+	r.Nudge()
+
 	select {
-	case r.rebuilds <- req:
+	case <-req.done:
+		return req.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	select {
-	case err := <-req.done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+}
+
+// takeRebuild returns the pending rebuild request for seg, or nil, and
+// clears it.
+func (r *Runner) takeRebuild(seg int) *rebuildRequest {
+	if r.segments > 1 || seg != 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	req := r.pendingRebuild
+	r.pendingRebuild = nil
+	return req
+}
+
+// setActive records whether this instance is processing seg. When seg stops
+// being active, a pending rebuild fails with [ErrNotActive].
+func (r *Runner) setActive(seg int, active bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.segs[seg].active = active
+	if !active && seg == 0 && r.pendingRebuild != nil {
+		r.pendingRebuild.finish(ErrNotActive)
+		r.pendingRebuild = nil
 	}
 }
 
@@ -603,13 +248,13 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 func (r *Runner) Nudge() {
 	select {
 	case r.nudge <- struct{}{}:
-	default:
+	default: // a nudge is already pending
 	}
 }
 
 // Watch registers fn to be called after every committed batch that
-// contained events, and on every change of [Phase]. It is how an
-// automation waiting on this projection learns of new work without polling.
+// contained events, and on every change of [Phase]. It lets a component
+// that depends on this projection learn of new work without polling.
 //
 // fn runs on the runner's goroutine and must not block; typically it is
 // another component's Nudge method.
@@ -621,65 +266,21 @@ func (r *Runner) Watch(fn func()) {
 
 func (r *Runner) notifyWatchers() {
 	r.mu.Lock()
-	watchers := make([]func(), len(r.watchers))
-	copy(watchers, r.watchers)
+	watchers := append([]func(){}, r.watchers...)
 	r.mu.Unlock()
 	for _, fn := range watchers {
 		fn()
 	}
 }
 
-// Dependency reports whether a projection is live, wherever it runs.
-// Automations take Dependencies, so they can wait for the read model they
-// work from without knowing where it runs.
-//
-// [*Runner] implements it, and so does [Remote] for a projection run by
-// another program.
-type Dependency interface {
-	Name() string
-	Live(ctx context.Context) (bool, error)
+// Skipped returns the number of events skipped under a non-stalling
+// [Projection.OnError] since the Runner was created.
+func (r *Runner) Skipped() int64 { return r.skipped.Load() }
+
+// lease returns the [Lease] this runner uses for seg.
+func (r *Runner) lease(seg int) Lease {
+	return Lease{Name: r.p.Name, Segment: seg, Owner: r.p.Owner}
 }
-
-// Watcher is optionally implemented by a [Dependency] that can call back
-// when its projection changes.
-type Watcher interface {
-	Watch(fn func())
-}
-
-// Remote returns a [Dependency] for the projection called name, run by a
-// different program, judged by the status its runner publishes to store.
-//
-// Use it in an automation whose todo-list projection lives in another
-// service: the dependency pauses the automation until that projection has
-// caught up.
-func Remote(name string, store Store) Dependency {
-	return &remote{name: name, store: store}
-}
-
-type remote struct {
-	name  string
-	store Store
-}
-
-func (r *remote) Name() string { return r.name }
-
-func (r *remote) Live(ctx context.Context) (bool, error) {
-	statuses, err := r.store.LoadStatuses(ctx, r.name)
-	if err != nil || len(statuses) == 0 {
-		return false, err
-	}
-	for _, s := range statuses {
-		if s.Phase != Live {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-var (
-	_ Dependency = (*Runner)(nil)
-	_ Watcher    = (*Runner)(nil)
-)
 
 // readOptions builds the ReadOptions passed to the global reader on each
 // read.

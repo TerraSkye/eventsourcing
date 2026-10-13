@@ -99,10 +99,7 @@ store implements `DeadLetterStore`. Errors back off with
 
 - **Automations** (`automation/`): implement `Automation.Run` against the
   design in `automation/doc.go` (claim with `FOR UPDATE SKIP LOCKED`, wait
-  for `Dependency.Live`, nudge via `Watcher`).
-- **Store constructors** for Postgres and KurrentDB still return
-  `eventsourcing.EventStore`, so callers need
-  `store.(eventsourcing.GlobalReader)` to build a runner.
+  for `automation.Dependency`, nudge via `automation.Watcher`).
 - **Tutorial 4** still builds its cache on the event bus; it now points to
   the projection how-to. Rewriting it around the runner would be the next
   step for the user docs.
