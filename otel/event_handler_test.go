@@ -22,7 +22,7 @@ func TestWithEventTelemetry_WithOperationIgnored(t *testing.T) {
 
 	before := spanNameRecorder.len()
 
-	if err := handler.Handle(context.Background(), loadFromAllStubEvent{}); err != nil {
+	if err := handler.Handle(context.Background(), stubEvent{}); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 

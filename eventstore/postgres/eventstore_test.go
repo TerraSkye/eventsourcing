@@ -201,7 +201,23 @@ func TestLoadStream_NotFound(t *testing.T) {
 	}
 }
 
-func TestLoadFromAll_BasicOrdering(t *testing.T) {
+func readAll(t *testing.T, reader cqrs.GlobalReader, after uint64) []*cqrs.Envelope {
+	t.Helper()
+	var out []*cqrs.Envelope
+	for {
+		res, err := reader.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		if err != nil {
+			t.Fatalf("ReadAll(after %d): %v", after, err)
+		}
+		out = append(out, res.Events...)
+		after = res.Next
+		if res.AtEnd {
+			return out
+		}
+	}
+}
+
+func TestReadAll_BasicOrdering(t *testing.T) {
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
 	ctx := context.Background()
@@ -210,11 +226,7 @@ func TestLoadFromAll_BasicOrdering(t *testing.T) {
 	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
 	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-A", &OrderCreated{OrderID: "A"})}, cqrs.Any{})
 
-	iter, err := store.LoadFromAll(ctx, cqrs.Revision(0))
-	if err != nil {
-		t.Fatalf("LoadFromAll: %v", err)
-	}
-	events := collectAll(t, iter)
+	events := readAll(t, store, 0)
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
 	}
@@ -223,22 +235,32 @@ func TestLoadFromAll_BasicOrdering(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_IgnoresInFlightTransactions verifies that LoadFromAll never
-// returns events beyond a gap caused by an uncommitted transaction.
+// Save's append lock; see appendLockKey1 and appendLockKey2 in the store.
+const appendLockKey1, appendLockKey2 = 0x65766e74, 0x616c6c00
+
+// TestReadAll_AppendsBecomeVisibleInIDOrder pins the guarantee ReadAll's
+// gap-freedom rests on: an append that has taken ids but not committed holds
+// back every later append, so no id can become visible before a lower one.
+//
+// Before, appends ran in parallel and ReadAll filtered on the oldest
+// in-flight transaction (xmin). That missed events: a multi-event append A
+// inserting ids 50 and 52 around another append B's id 51 commits first;
+// B's transaction ID is higher than A's, so once A commits, xmin moves past
+// A, ReadAll returns 50 and 52, the reader checkpoints 52, and 51 is never
+// read when B commits.
 //
 // Scenario:
-//   - TX1 (raw): inserts stream-A event (gets id=1), stays open
-//   - TX2 (store.Save): inserts stream-B event (gets id=2), commits
-//   - LoadFromAll must return nothing — id=2 is visible but id=1 is not yet
-//     committed, so returning id=2 would skip id=1 permanently
-//   - TX1 commits → LoadFromAll now returns both events in order
-func TestLoadFromAll_IgnoresInFlightTransactions(t *testing.T) {
+//   - TX1 (raw, following Save's protocol): takes the append lock and
+//     inserts stream-A's event (id 1), stays open
+//   - store.Save to stream-B starts and must wait for the append lock
+//   - ReadAll returns nothing: id 1 is not committed, and nothing else may
+//     be visible yet
+//   - TX1 commits; the Save then gets id 2 and commits; ReadAll returns 1, 2
+func TestReadAll_AppendsBecomeVisibleInIDOrder(t *testing.T) {
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
 	ctx := context.Background()
 
-	// Acquire a dedicated connection for the in-flight transaction so the pool
-	// cannot reuse it for subsequent queries.
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("acquire conn: %v", err)
@@ -249,101 +271,79 @@ func TestLoadFromAll_IgnoresInFlightTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
-
-	// Insert a raw event inside the open transaction (stream-A, id will be 1).
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)", appendLockKey1, appendLockKey2); err != nil {
+		t.Fatalf("take append lock: %v", err)
+	}
 	payload, _ := json.Marshal(&OrderCreated{OrderID: "A"})
-	_, err = tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		uuid.New(), "stream-A", 1, "OrderCreated", payload, []byte("{}"), time.Now(),
-	)
-	if err != nil {
-		tx.Rollback(ctx) //nolint:errcheck
+	); err != nil {
 		t.Fatalf("raw insert: %v", err)
 	}
 
-	// Commit a second event via the store (stream-B, id will be 2).
-	_, err = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
-	if err != nil {
-		tx.Rollback(ctx) //nolint:errcheck
-		t.Fatalf("store.Save: %v", err)
+	saved := make(chan error, 1)
+	go func() {
+		_, err := store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
+		saved <- err
+	}()
+
+	select {
+	case err := <-saved:
+		t.Fatalf("Save completed (err = %v) while another append held the append lock; appends can commit out of id order", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if events := readAll(t, store, 0); len(events) != 0 {
+		t.Errorf("ReadAll returned %d events while id 1 is uncommitted, want 0", len(events))
 	}
 
-	// LoadFromAll must return zero events: id=2 is committed but id=1 is still
-	// in-flight, so advancing past id=1 would cause a permanent skip.
-	iter, err := store.LoadFromAll(ctx, cqrs.Revision(0))
-	if err != nil {
-		tx.Rollback(ctx) //nolint:errcheck
-		t.Fatalf("LoadFromAll (gap open): %v", err)
-	}
-	events := collectAll(t, iter)
-	if len(events) != 0 {
-		t.Errorf("expected 0 events while TX1 is in-flight, got %d", len(events))
-	}
-
-	// Commit the in-flight transaction.
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit tx: %v", err)
 	}
+	if err := <-saved; err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
-	// Now both events must be visible and correctly ordered.
-	iter, err = store.LoadFromAll(ctx, cqrs.Revision(0))
-	if err != nil {
-		t.Fatalf("LoadFromAll (gap closed): %v", err)
-	}
-	events = collectAll(t, iter)
+	events := readAll(t, store, 0)
 	if len(events) != 2 {
-		t.Fatalf("expected 2 events after TX1 commits, got %d", len(events))
+		t.Fatalf("expected 2 events after both commit, got %d", len(events))
 	}
-	if events[0].StreamID != "stream-A" {
-		t.Errorf("expected stream-A first, got %s", events[0].StreamID)
-	}
-	if events[1].StreamID != "stream-B" {
-		t.Errorf("expected stream-B second, got %s", events[1].StreamID)
+	if events[0].StreamID != "stream-A" || events[0].GlobalVersion != 1 ||
+		events[1].StreamID != "stream-B" || events[1].GlobalVersion != 2 {
+		t.Errorf("got %s@%d, %s@%d; want stream-A@1, stream-B@2",
+			events[0].StreamID, events[0].GlobalVersion, events[1].StreamID, events[1].GlobalVersion)
 	}
 }
 
-// TestLoadFromAll_HugeRevisionIsRefusedNotReplayed covers what an
-// unrepresentable Revision does to LoadFromAll.
-//
-// Revision is a uint64 and ToRawInt64 returns int64, so any Revision >= 1<<63
-// used to sign-flip negative. Here that turned LoadFromAll's `id > $1` into
-// `id > -1`, which matches every row, so a caller resuming from what it
-// believed was a huge, already-consumed position got the whole store
-// replayed instead.
-//
-// ToRawInt64 now panics rather than returning a value that means something
-// else, so the replay cannot happen.
-func TestLoadFromAll_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
-
+// TestReadAll_HugePositionIsRefusedNotReplayed: a position above the
+// largest bigint cannot be bound as one; casting it would sign-flip to a
+// negative id and replay the whole store, so ReadAll refuses it.
+func TestReadAll_HugePositionIsRefusedNotReplayed(t *testing.T) {
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
 	ctx := context.Background()
 
-	_, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []cqrs.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.NoStream{})
-	if err != nil {
+	}, cqrs.NoStream{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	defer assertRevisionOverflowPanic(t, "LoadFromAll(Revision(MaxUint64))")
-
-	// The call should panic. If it doesn't, close the iterator so its open
-	// rows don't hold the pool connection that pool.Close in cleanup waits
-	// on, which would hang the run instead of failing it.
-	iter, _ := store.LoadFromAll(ctx, cqrs.Revision(math.MaxUint64))
-	if iter != nil {
-		iter.Close() //nolint:errcheck
+	res, err := store.ReadAll(ctx, math.MaxUint64, cqrs.ReadOptions{})
+	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+		t.Fatalf("ReadAll(after MaxUint64) = %d events, err %v; want ErrInvalidRevision", len(res.Events), err)
 	}
 }
 
-// TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed is the LoadStreamFrom
-// counterpart of TestLoadFromAll_HugeRevisionIsRefusedNotReplayed: the
-// sign-flipped revision turned `stream_position > $2` into
-// `stream_position > -1` and replayed the entire stream.
+// TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed covers what an
+// unrepresentable Revision does to LoadStreamFrom.
+//
+// Revision is a uint64 and ToRawInt64 returns int64, so any Revision >= 1<<63
+// used to sign-flip negative. Here that turned `stream_position > $2` into
+// `stream_position > -1` and replayed the entire stream. ToRawInt64 now
+// panics rather than returning a value that means something else.
 func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
 	pool := newPool(t)
@@ -387,4 +387,9 @@ func assertRevisionOverflowPanic(t *testing.T, call string) {
 
 func TestAcceptance(t *testing.T) {
 	eventsourcingtest.AcceptanceTest(t, pgstore.NewEventStore(newPool(t)))
+}
+
+func TestGlobalReaderAcceptance(t *testing.T) {
+	store := pgstore.NewEventStore(newPool(t))
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }

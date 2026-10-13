@@ -25,7 +25,7 @@ import (
 // at once.
 func TestSave_ConcurrentCallsSharingMetadataMapRace(t *testing.T) {
 	shared := map[string]any{"tenant": "t1"}
-	stub := &loadFromAllStub{}
+	stub := &stubStore{}
 	store := WithEventStoreTelemetry(stub)
 
 	var wg sync.WaitGroup
@@ -37,7 +37,7 @@ func TestSave_ConcurrentCallsSharingMetadataMapRace(t *testing.T) {
 			events := []eventsourcing.Envelope{
 				{
 					StreamID: "agg-1",
-					Event:    loadFromAllStubEvent{},
+					Event:    stubEvent{},
 					Version:  uint64(n),
 					Metadata: shared,
 				},
@@ -48,92 +48,100 @@ func TestSave_ConcurrentCallsSharingMetadataMapRace(t *testing.T) {
 	wg.Wait()
 }
 
-type loadFromAllStubEvent struct{}
+type stubEvent struct{}
 
-func (loadFromAllStubEvent) AggregateID() string { return "agg-1" }
-func (loadFromAllStubEvent) EventType() string   { return "stub.event" }
+func (stubEvent) AggregateID() string { return "agg-1" }
+func (stubEvent) EventType() string   { return "stub.event" }
 
-// loadFromAllStub is a minimal EventStore whose LoadFromAll returns a plain
-// slice iterator. A slice iterator signals exhaustion with io.EOF, which
-// Iterator.Next translates into "Next() == false, Err() == nil".
-type loadFromAllStub struct {
-	events []*eventsourcing.Envelope
+// stubStore is a minimal EventStore and GlobalReader over a fixed slice of
+// events.
+type stubStore struct {
+	events  []*eventsourcing.Envelope
+	readErr error
 }
 
-func (s *loadFromAllStub) Save(context.Context, []eventsourcing.Envelope, eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
+func (s *stubStore) Save(context.Context, []eventsourcing.Envelope, eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	return eventsourcing.AppendResult{}, nil
 }
 
-func (s *loadFromAllStub) LoadStream(ctx context.Context, _ string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (s *stubStore) LoadStream(ctx context.Context, _ string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	return eventsourcing.NewSliceIterator(ctx, s.events), nil
 }
 
-func (s *loadFromAllStub) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (s *stubStore) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	return eventsourcing.NewSliceIterator(ctx, s.events), nil
 }
 
-func (s *loadFromAllStub) LoadFromAll(ctx context.Context, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	return eventsourcing.NewSliceIterator(ctx, s.events), nil
-}
-
-func (s *loadFromAllStub) Close() error { return nil }
-
-// TestTelemetryStore_LoadFromAll_TerminatesAtEndOfStream is a regression
-// test for GitHub issue #51: LoadFromAll's clean-completion branch only
-// returned io.EOF when the inner iterator's Err() itself was io.EOF, but
-// Iterator.Next always clears Err() back to nil on a clean end of stream —
-// so the guard never fired and the branch fell through to return (nil,
-// nil). Iterator.Next treats a nil error as "here is a valid item", so the
-// wrapped iterator reported true forever and handed out nil *Envelope
-// values instead of terminating.
-func TestTelemetryStore_LoadFromAll_TerminatesAtEndOfStream(t *testing.T) {
-	const guard = 100 // bounded so a non-terminating iterator fails instead of hanging
-
-	tests := []struct {
-		name  string
-		count int
-	}{
-		{name: "empty stream", count: 0},
-		{name: "single event", count: 1},
-		{name: "several events", count: 3},
+func (s *stubStore) ReadAll(_ context.Context, after uint64, _ eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+	if s.readErr != nil {
+		return eventsourcing.ReadResult{}, s.readErr
 	}
+	res := eventsourcing.ReadResult{Next: after, AtEnd: true}
+	for _, e := range s.events {
+		if e.GlobalVersion > after {
+			res.Events = append(res.Events, e)
+			res.Next = e.GlobalVersion
+		}
+	}
+	return res, nil
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stub := &loadFromAllStub{}
-			for i := 0; i < tt.count; i++ {
-				stub.events = append(stub.events, &eventsourcing.Envelope{
-					StreamID: "agg-1",
-					Event:    loadFromAllStubEvent{},
-					Version:  uint64(i),
-				})
-			}
+func (s *stubStore) Head(context.Context) (uint64, error) {
+	if len(s.events) == 0 {
+		return 0, nil
+	}
+	return s.events[len(s.events)-1].GlobalVersion, nil
+}
 
-			store := WithEventStoreTelemetry(stub)
+func (s *stubStore) Close() error { return nil }
 
-			iter, err := store.LoadFromAll(context.Background(), eventsourcing.Any{})
-			if err != nil {
-				t.Fatalf("LoadFromAll() error = %v", err)
-			}
-
-			var got int
-			for iter.Next() {
-				if iter.Value() == nil {
-					t.Fatalf("iterator yielded a nil *Envelope at index %d", got)
-				}
-				got++
-				if got > guard {
-					t.Fatalf("iterator did not terminate: yielded more than %d values for a %d-event store", guard, tt.count)
-				}
-			}
-			if err := iter.Err(); err != nil {
-				t.Fatalf("Err() = %v, want nil", err)
-			}
-			if got != tt.count {
-				t.Errorf("yielded %d events, want %d", got, tt.count)
-			}
+// TestTelemetryStore_ReadAll forwards ReadAll and Head to a wrapped
+// GlobalReader unchanged, passes its errors through, and does not implement
+// GlobalReader itself for a store that cannot read the global log.
+func TestTelemetryStore_ReadAll(t *testing.T) {
+	ctx := context.Background()
+	stub := &stubStore{}
+	for i := 1; i <= 3; i++ {
+		stub.events = append(stub.events, &eventsourcing.Envelope{
+			StreamID: "agg-1", Event: stubEvent{}, Version: uint64(i), GlobalVersion: uint64(i),
 		})
 	}
+	reader, ok := WithEventStoreTelemetry(stub).(eventsourcing.GlobalReader)
+	if !ok {
+		t.Fatal("WithEventStoreTelemetry(GlobalReader) does not implement eventsourcing.GlobalReader")
+	}
+
+	t.Run("forwards", func(t *testing.T) {
+		res, err := reader.ReadAll(ctx, 1, eventsourcing.ReadOptions{})
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		if len(res.Events) != 2 || res.Next != 3 || !res.AtEnd {
+			t.Fatalf("ReadAll(after 1) = %d events, Next %d, AtEnd %v; want 2, 3, true", len(res.Events), res.Next, res.AtEnd)
+		}
+		head, err := reader.Head(ctx)
+		if err != nil || head != 3 {
+			t.Fatalf("Head() = %d, %v; want 3, nil", head, err)
+		}
+	})
+
+	t.Run("error passes through", func(t *testing.T) {
+		boom := errors.New("read failed")
+		failing, ok := WithEventStoreTelemetry(&stubStore{readErr: boom}).(eventsourcing.GlobalReader)
+		if !ok {
+			t.Fatal("WithEventStoreTelemetry(GlobalReader) does not implement eventsourcing.GlobalReader")
+		}
+		if _, err := failing.ReadAll(ctx, 0, eventsourcing.ReadOptions{}); !errors.Is(err, boom) {
+			t.Fatalf("ReadAll() error = %v, want %v", err, boom)
+		}
+	})
+
+	t.Run("unsupported store", func(t *testing.T) {
+		plain := WithEventStoreTelemetry(&closeTrackingStore{})
+		if _, ok := plain.(eventsourcing.GlobalReader); ok {
+			t.Errorf("WithEventStoreTelemetry(%T) implements eventsourcing.GlobalReader, want only eventsourcing.EventStore", &closeTrackingStore{})
+		}
+	})
 }
 
 // TestWithEventStoreTelemetry_WithOperationIgnoredForSaveSpan verifies
@@ -144,13 +152,13 @@ func TestTelemetryStore_LoadFromAll_TerminatesAtEndOfStream(t *testing.T) {
 func TestWithEventStoreTelemetry_WithOperationIgnoredForSaveSpan(t *testing.T) {
 	const wantSpanName = "custom-save-operation"
 
-	stub := &loadFromAllStub{}
+	stub := &stubStore{}
 	store := WithEventStoreTelemetry(stub, WithOperation(wantSpanName))
 
 	before := spanNameRecorder.len()
 
 	_, err := store.Save(context.Background(), []eventsourcing.Envelope{
-		{StreamID: "agg-1", Event: loadFromAllStubEvent{}, Version: 1},
+		{StreamID: "agg-1", Event: stubEvent{}, Version: 1},
 	}, eventsourcing.NoStream{})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -208,10 +216,6 @@ func (s *closeTrackingStore) LoadStreamFrom(ctx context.Context, _ string, _ eve
 	return s.iter(ctx)
 }
 
-func (s *closeTrackingStore) LoadFromAll(ctx context.Context, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	return s.iter(ctx)
-}
-
 func (s *closeTrackingStore) Close() error { return nil }
 
 // TestTelemetryStore_ClosesUnderlyingIterator pins the ownership half of the
@@ -230,9 +234,6 @@ func TestTelemetryStore_ClosesUnderlyingIterator(t *testing.T) {
 		},
 		"LoadStreamFrom": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 			return s.LoadStreamFrom(ctx, "agg-1", eventsourcing.Any{})
-		},
-		"LoadFromAll": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-			return s.LoadFromAll(ctx, eventsourcing.Any{})
 		},
 	}
 
@@ -311,7 +312,7 @@ func envelopes(n int) []*eventsourcing.Envelope {
 	for i := range out {
 		out[i] = &eventsourcing.Envelope{
 			StreamID: "agg-1",
-			Event:    loadFromAllStubEvent{},
+			Event:    stubEvent{},
 			Version:  uint64(i),
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"maps"
+	"math"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -15,7 +16,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var _ eventsourcing.EventStore = (*TelemetryStore)(nil)
+var (
+	_ eventsourcing.EventStore   = TelemetryStore{}
+	_ eventsourcing.EventStore   = telemetryGlobalStore{}
+	_ eventsourcing.GlobalReader = telemetryGlobalStore{}
+)
 
 // TelemetryStore wraps an [eventsourcing.EventStore], instrumenting every
 // save and load operation with OpenTelemetry tracing and metrics and
@@ -252,57 +257,47 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 		}), nil
 }
 
-// LoadFromAll loads all events across streams from version onward from the
-// underlying [eventsourcing.EventStore]. It behaves like
-// [TelemetryStore.LoadStream], tagging the span with the requested version
-// instead of a stream ID, since the events may belong to any stream.
-func (t TelemetryStore) LoadFromAll(ctx context.Context, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	src, err := t.next.LoadFromAll(ctx, version)
-	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
-		return src, err
-	}
+// telemetryGlobalStore is a [TelemetryStore] around a store that also
+// implements [eventsourcing.GlobalReader]. [WithEventStoreTelemetry] returns
+// one in that case, so the wrapper reads the global log exactly when the
+// wrapped store can.
+type telemetryGlobalStore struct {
+	TelemetryStore
+	reader eventsourcing.GlobalReader
+}
 
-	var (
-		startedAt time.Time
-		span      trace.Span
-		spanCtx   = ctx
+// ReadAll reads a page of the global log from the wrapped store inside a
+// client span tagged with the after position and, once done, the number of
+// events returned. It records [EventStoreDuration] and [EventsLoaded], and
+// [EventStoreErrors] on failure.
+func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+	startedAt := time.Now()
+	ctx, span := tracer.Start(ctx, "read_all eventstore",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(t.baseAttrs(),
+			AttrOperation.String("read_all"),
+			AttrStreamVersion.Int64(int64(min(after, math.MaxInt64))),
+		)...),
 	)
+	defer span.End()
 
-	return eventsourcing.Wrap(src,
-		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
-			if span == nil {
-				startedAt = time.Now()
-				spanAttrs := append(t.baseAttrs(),
-					AttrOperation.String("load"),
-					AttrStreamVersion.Int64(version.ToRawInt64()),
-				)
-				spanCtx, span = tracer.Start(ctx, "load eventstore",
-					trace.WithSpanKind(trace.SpanKindClient),
-					trace.WithAttributes(spanAttrs...),
-				)
-			}
+	res, err := t.reader.ReadAll(ctx, after, opts)
+	if err != nil {
+		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("read_all")))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return res, err
+	}
+	span.SetAttributes(AttrEventCount.Int64(int64(len(res.Events))))
+	EventsLoaded.Add(ctx, int64(len(res.Events)))
+	EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("read_all")))
+	return res, nil
+}
 
-			if !src.Next() {
-				return nil, io.EOF
-			}
-
-			EventsLoaded.Add(spanCtx, 1)
-			return src.Value(), nil
-		},
-		func(err error) {
-			if span == nil {
-				return
-			}
-			if err != nil {
-				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			} else {
-				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
-			}
-			span.End()
-		}), nil
+// Head returns the head of the global log from the wrapped store. It is not
+// traced: it is a cheap call made often to measure lag.
+func (t telemetryGlobalStore) Head(ctx context.Context) (uint64, error) {
+	return t.reader.Head(ctx)
 }
 
 // Close closes the underlying [eventsourcing.EventStore]. It delegates
@@ -315,12 +310,20 @@ func (t TelemetryStore) Close() error {
 // every save and load with OpenTelemetry tracing and metrics as described on
 // [TelemetryStore]. Options such as [WithAttributes] and [WithOperation]
 // customize the spans produced.
+//
+// If next also implements [eventsourcing.GlobalReader], so does the returned
+// store, and its ReadAll is traced as well; otherwise the returned store is
+// only an [eventsourcing.EventStore].
 func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) eventsourcing.EventStore {
 	cfg := &config{}
 	for _, o := range options {
 		o.apply(cfg)
 	}
-	return TelemetryStore{next: next, cfg: cfg}
+	store := TelemetryStore{next: next, cfg: cfg}
+	if reader, ok := next.(eventsourcing.GlobalReader); ok {
+		return telemetryGlobalStore{TelemetryStore: store, reader: reader}
+	}
+	return store
 }
 
 // EventStoreTelemetry returns an [eventsourcing.EventStoreMiddleware] that
