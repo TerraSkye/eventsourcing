@@ -266,32 +266,43 @@ type telemetryGlobalStore struct {
 	reader eventsourcing.GlobalReader
 }
 
-// ReadAll reads a page of the global log from the wrapped store inside a
-// client span tagged with the after position and, once done, the number of
-// events returned. It records [EventStoreDuration] and [EventsLoaded], and
-// [EventStoreErrors] on failure.
+// ReadAll reads a page of the global log from the wrapped store and
+// records [EventStoreDuration] and [EventsLoaded], and [EventStoreErrors]
+// on failure.
+//
+// A read that returns events or fails is recorded as a client span, tagged
+// with the after position and the number of events returned. A read that
+// returns no events is not: a projection at the head of the log polls on
+// every interval, and a span per poll would drown the reads that matter.
+// The span is created once the read is done, so spans the wrapped store
+// starts itself are not its children.
 func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	startedAt := time.Now()
-	ctx, span := tracer.Start(ctx, "read_all eventstore",
+	res, err := t.reader.ReadAll(ctx, after, opts)
+	EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("read_all")))
+	if err == nil {
+		EventsLoaded.Add(ctx, int64(len(res.Events)))
+		if len(res.Events) == 0 {
+			return res, nil
+		}
+	}
+
+	_, span := tracer.Start(ctx, "read_all eventstore",
+		trace.WithTimestamp(startedAt),
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(append(t.baseAttrs(),
 			AttrOperation.String("read_all"),
 			AttrStreamVersion.Int64(int64(min(after, math.MaxInt64))),
+			AttrEventCount.Int64(int64(len(res.Events))),
 		)...),
 	)
 	defer span.End()
-
-	res, err := t.reader.ReadAll(ctx, after, opts)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("read_all")))
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		return res, err
 	}
-	span.SetAttributes(AttrEventCount.Int64(int64(len(res.Events))))
-	EventsLoaded.Add(ctx, int64(len(res.Events)))
-	EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("read_all")))
-	return res, nil
+	return res, err
 }
 
 // Head returns the head of the global log from the wrapped store. It is not
