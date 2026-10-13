@@ -44,8 +44,8 @@ type acceptance struct {
 // store may already hold events, and may be shared with other tests: every
 // subtest writes to streams of its own, named with a fresh UUID, and reads
 // back only those streams. Stores that can read the global log are also
-// checked with [GlobalReaderAcceptanceTest]. The suite never calls Close; that is left to the caller, who
-// owns store.
+// checked with [GlobalReaderAcceptanceTest]. The suite never calls Close;
+// that is left to the caller, who owns store.
 //
 // Envelopes are saved with Version already set, 1 for the first event of a
 // stream and counting up, the way [eventsourcing.NewCommandHandler] fills

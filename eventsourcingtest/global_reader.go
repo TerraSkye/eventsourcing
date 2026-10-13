@@ -226,10 +226,10 @@ func (g *globalAcceptance) atEnd(t *testing.T) {
 	// Other tests may share the store and append in between; only an
 	// empty page has to be at the end.
 	if len(res.Events) == 0 && !res.AtEnd {
-		t.Errorf("ReadAll at the head returned no events and AtEnd = false")
+		t.Errorf("ReadAll(after %d) at the head = no events, AtEnd false, want AtEnd true", next)
 	}
 	if len(res.Events) == 0 && res.Next != next {
-		t.Errorf("ReadAll at the head returned Next = %d, want %d (unchanged when nothing was scanned)", res.Next, next)
+		t.Errorf("ReadAll(after %d) at the head = Next %d, want %d (unchanged when nothing was scanned)", next, res.Next, next)
 	}
 }
 
@@ -244,7 +244,7 @@ func (g *globalAcceptance) head(t *testing.T) {
 		t.Fatalf("ReadAll returned %d of this test's events, want 2", len(got))
 	}
 	if h < got[1].GlobalVersion {
-		t.Errorf("Head = %d after saving an event at %d, want at least that", h, got[1].GlobalVersion)
+		t.Errorf("Head() = %d after saving an event at %d, want at least %d", h, got[1].GlobalVersion, got[1].GlobalVersion)
 	}
 	if next < h {
 		t.Errorf("reading to the end stopped at Next = %d, below Head %d: Head must not exceed what ReadAll returns", next, h)
@@ -268,6 +268,8 @@ func (g *globalAcceptance) concurrentSaves(t *testing.T) {
 
 	var wg sync.WaitGroup
 	done := make(chan struct{})
+	// Wait for the writers on every return path, so none outlives the test.
+	defer func() { <-done }()
 	errs := make(chan error, writers)
 	for w := range writers {
 		wg.Add(1)
@@ -293,20 +295,25 @@ func (g *globalAcceptance) concurrentSaves(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		if time.Now().After(deadline) {
-			t.Fatalf("reader did not finish within 2 minutes; saw %d of %d events", count, want)
+			t.Errorf("reader did not finish within 2 minutes; saw %d of %d events", count, want)
+			return
 		}
 		res, err := g.reader.ReadAll(t.Context(), after, eventsourcing.ReadOptions{Limit: 7})
 		if err != nil {
 			t.Fatalf("ReadAll(after %d): %v", after, err)
 		}
-		g.checkPage(t, after, res)
+		if err := checkPage(after, res); err != nil {
+			t.Error(err)
+			return
+		}
 		for _, env := range res.Events {
 			if !slices.Contains(ids, env.StreamID) {
 				continue
 			}
 			if expected := seen[env.StreamID] + 1; env.Version != expected {
-				t.Fatalf("stream %s: saw version %d after %d; an event was skipped or repeated (GlobalVersion %d)",
-					env.StreamID, env.Version, seen[env.StreamID], env.GlobalVersion)
+				t.Errorf("stream %q: saw version %d after %d, want %d; an event was skipped or repeated (GlobalVersion %d)",
+					env.StreamID, env.Version, seen[env.StreamID], expected, env.GlobalVersion)
+				return
 			}
 			seen[env.StreamID] = env.Version
 			count++
@@ -375,7 +382,9 @@ func (g *globalAcceptance) readToEnd(t *testing.T, after uint64, opts eventsourc
 
 // readToEndNext pages through the log from after until AtEnd, checking
 // every page against the contract, and returns the events of ids (all
-// events when ids is empty) and the final Next.
+// events when ids is empty) and the final Next. A page that breaks the
+// contract is reported with t.Error and ends the read early, returning what
+// was read so far.
 func (g *globalAcceptance) readToEndNext(t *testing.T, after uint64, opts eventsourcing.ReadOptions, ids ...string) ([]*eventsourcing.Envelope, uint64) {
 	t.Helper()
 	var out []*eventsourcing.Envelope
@@ -384,9 +393,12 @@ func (g *globalAcceptance) readToEndNext(t *testing.T, after uint64, opts events
 		if err != nil {
 			t.Fatalf("ReadAll(after %d, %+v): %v", after, opts, err)
 		}
-		g.checkPage(t, after, res)
+		if err := checkPage(after, res); err != nil {
+			t.Error(err)
+			return out, after
+		}
 		if opts.Limit > 0 && len(res.Events) > opts.Limit {
-			t.Fatalf("ReadAll(Limit %d) returned %d events", opts.Limit, len(res.Events))
+			t.Errorf("ReadAll(after %d, Limit %d) returned %d events, want at most %d", after, opts.Limit, len(res.Events), opts.Limit)
 		}
 		for _, env := range res.Events {
 			if len(opts.EventTypes) > 0 && !slices.Contains(opts.EventTypes, env.Event.EventType()) {
@@ -408,30 +420,31 @@ func (g *globalAcceptance) readToEndNext(t *testing.T, after uint64, opts events
 			return out, after
 		}
 	}
-	t.Fatalf("ReadAll did not reach AtEnd")
-	return nil, 0
+	t.Errorf("ReadAll did not reach AtEnd")
+	return out, after
 }
 
-// checkPage checks one ReadAll result against the contract.
-func (g *globalAcceptance) checkPage(t *testing.T, after uint64, res eventsourcing.ReadResult) {
-	t.Helper()
+// checkPage checks one ReadAll(after) result against the contract and
+// returns an error describing the first violation, or nil.
+func checkPage(after uint64, res eventsourcing.ReadResult) error {
 	prev := after
 	for _, env := range res.Events {
 		if env.GlobalVersion <= prev {
-			t.Fatalf("ReadAll(after %d) returned GlobalVersion %d after %d: not strictly ascending, or not exclusive of after",
+			return fmt.Errorf("ReadAll(after %d) returned GlobalVersion %d after %d, want strictly ascending and exclusive of after",
 				after, env.GlobalVersion, prev)
 		}
 		prev = env.GlobalVersion
 	}
 	if len(res.Events) > 0 && res.Next < prev {
-		t.Fatalf("ReadAll(after %d) returned Next = %d, below its last event's GlobalVersion %d", after, res.Next, prev)
+		return fmt.Errorf("ReadAll(after %d).Next = %d, want at least its last event's GlobalVersion %d", after, res.Next, prev)
 	}
 	if res.Next < after {
-		t.Fatalf("ReadAll(after %d) returned Next = %d, before after", after, res.Next)
+		return fmt.Errorf("ReadAll(after %d).Next = %d, want at least %d", after, res.Next, after)
 	}
 	if !res.AtEnd && res.Next <= after {
-		t.Fatalf("ReadAll(after %d) returned AtEnd = false without progress (Next = %d)", after, res.Next)
+		return fmt.Errorf("ReadAll(after %d) = AtEnd false, Next %d, want Next > %d when not at the end", after, res.Next, after)
 	}
+	return nil
 }
 
 func otherEnvelopes(id string, from uint64, count int) []eventsourcing.Envelope {
