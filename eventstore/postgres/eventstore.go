@@ -140,6 +140,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 	nextPosition := currentVersion + 1
 
+	var lastID int64 // id of the last event inserted: its GlobalVersion
 	for i, e := range events {
 		payload, err := json.Marshal(e.Event)
 		if err != nil {
@@ -168,11 +169,12 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			eventID = uuid.New()
 		}
 
-		_, err = tx.Exec(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			RETURNING id`,
 			eventID, streamID, pos, e.Event.EventType(), payload, metadataJSON, occurredAt,
-		)
+		).Scan(&lastID)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -198,6 +200,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: finalVersion,
+		GlobalVersion:       uint64(lastID),
 	}, nil
 }
 
