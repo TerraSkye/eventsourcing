@@ -119,7 +119,7 @@ Reads the global log — every event across all streams — in strictly ascendin
 
 Stores guarantee that no event becomes visible behind a position already returned, so a reader that checkpoints `Next` never misses an event. `eventsourcingtest.GlobalReaderAcceptanceTest` checks an implementation against the full contract.
 
-A `GlobalReader` may also implement `Notifier` (the memory store does), whose `Notify(ctx)` channel signals new appends so a reader at the head can wake without polling.
+`ReadAll` does not block at the head of the log; readers poll. The [projection runner](../how-to/cached-projection.md) is built on `GlobalReader` and handles polling and checkpointing for you.
 
 ---
 

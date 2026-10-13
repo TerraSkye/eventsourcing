@@ -90,8 +90,6 @@ type Status struct {
 // Automation processes the items of a todo list: it claims pending items,
 // runs the work for each, and repeats. Create one with [New] and start it
 // with [Automation.Run].
-//
-// Automation implements [projection.Nudger].
 type Automation[T any] struct {
 	name    string
 	waitFor []projection.Dependency
@@ -176,5 +174,3 @@ func (a *Automation[T]) Nudge() {
 func (a *Automation[T]) Status() Status {
 	return *a.statusV.Load()
 }
-
-var _ projection.Nudger = (*Automation[struct{}])(nil)

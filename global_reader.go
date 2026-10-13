@@ -95,8 +95,8 @@ type GlobalReader interface {
 	// ReadAll returns the next page of the global log after position after.
 	//
 	// It does not block waiting for new events: at the head of the log it
-	// returns an empty page with AtEnd set. Use a [Notifier], or poll, to
-	// learn about new events.
+	// returns an empty page with AtEnd set; callers poll to learn about new
+	// events.
 	ReadAll(ctx context.Context, after uint64, opts ReadOptions) (ReadResult, error)
 
 	// Head returns the GlobalVersion of the newest event a ReadAll call
@@ -107,22 +107,4 @@ type GlobalReader interface {
 	// cheap; implementations may return a slightly stale value, but never
 	// one beyond what ReadAll would return.
 	Head(ctx context.Context) (uint64, error)
-}
-
-// Notifier is optionally implemented by a [GlobalReader] that can signal
-// new appends, so a reader at the head of the log can wake up as soon as
-// something is written instead of waiting for its next poll.
-//
-// Notifications are a latency optimization only. A reader must still poll
-// occasionally, and must not rely on a notification for every append.
-type Notifier interface {
-	// Notify returns a channel that receives a value whenever events have
-	// been appended, until ctx is done, at which point the channel is
-	// closed.
-	//
-	// Notifications are coalesced: several appends in quick succession may
-	// produce a single value. Sending never blocks the writer, so a slow
-	// receiver misses intermediate notifications but never the fact that
-	// something changed since it last received.
-	Notify(ctx context.Context) (<-chan struct{}, error)
 }

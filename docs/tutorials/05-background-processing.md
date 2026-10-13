@@ -149,13 +149,26 @@ func (p *Processor) EventHandlers() *eventsourcing.EventGroupProcessor {
 
 ## Step 3: Wire it up
 
+The processor reacts to new events as they are stored, so it subscribes to an event bus. The memory event store publishes every saved event on its `Events()` channel; forward that channel to the bus:
+
 ```go
-// In main.go, after creating the bus:
+// In main.go, after creating the store:
+bus := membus.NewEventBus(100) // github.com/terraskye/eventsourcing/eventbus/memory
+defer bus.Close()
+
+go func() {
+    for env := range store.Events() {
+        bus.Dispatch(env)
+    }
+}()
+
 archiveHandler := archivetask.NewHandler(store)
 archiveProcessor := archivetasks.NewProcessor(archiveHandler, 5*time.Second) // 5s for testing
 
 bus.Subscribe(context.Background(), "archive-processor", archiveProcessor.EventHandlers())
 ```
+
+Unlike the projection in Part 4, a bus subscriber keeps no checkpoint: it only sees events stored while it is subscribed. That is what a processor wants here, since it should not re-archive old tasks on every start.
 
 ## Step 4: Test it
 
@@ -181,7 +194,7 @@ Across all five parts you have:
 
 - Built commands with `NewCommandHandler`, `evolve`, and `decide`
 - Built live and cached read models with queries
-- Used the event bus to keep projections up to date
+- Kept a projection up to date with the projection runner
 - Written a processor that issues commands in response to events
 
 These are the building blocks of every event-sourced system. From here:

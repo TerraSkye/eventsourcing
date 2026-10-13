@@ -1,18 +1,21 @@
-# Part 4: Real-time Projections
+# Part 4: Projections
 
-Replace the live read model with a **cached projection** that stays up to date via the event bus.
+Replace the live read model with a **projection**: a read model that is built once from the event log and kept up to date as new events are stored.
 
 **Time**: ~25 minutes
 **Prerequisite**: [Part 3](./03-business-rules.md) complete.
 
-## Why cache projections?
+## Why projections?
 
-The live read model in Part 2 replays all events on every query. For a small system this is fine, but it becomes slow as events accumulate.
+The live read model in Part 2 replays every event on every query. For a small system this is fine, but it gets slower as events accumulate.
 
-A cached projection:
-1. Builds the read model once from existing events.
-2. Keeps it updated in real time as new events arrive via the event bus.
-3. Serves queries directly from memory — O(1) lookup.
+A projection:
+
+1. Processes each event once and keeps the result, so queries are a lookup.
+2. Remembers how far it got in the log (its **checkpoint**), so it catches up on events stored while it was not running.
+3. Can be rebuilt from scratch when you change how it builds the read model.
+
+The `projection` package does the reading, checkpointing and retrying for you. You write the projection: the code that turns events into the read model.
 
 ## Architecture
 
@@ -20,95 +23,118 @@ A cached projection:
 Command
   │
   ▼
-EventStore ──saves──► Envelope
-  │                       │
-  │                       ▼
-  │                   EventBus ──publishes──► Projector.OnTaskCreated()
-  │                                                │
-  └─────────────────────────────────────────► cache updated
+EventStore ──appends──► global log: 1 2 3 4 5 6 ...
+                                          │
+                       projection.Runner ─┤ reads the events after its checkpoint
+                                          ▼
+                              projection handler ──► task list updated
+                                          │
+                                          └─► checkpoint moves forward
 ```
 
-The memory event store has an internal `Events()` channel. You feed this into the event bus, which dispatches to subscribers.
+The runner reads the global log through `ReadAll`, the same call the live read model used in Part 2. When it reaches the end of the log, it checks again every second.
 
-## Step 1: Build the projector
+## Step 1: Register the events
+
+The runner only reads the event types you list, and checks at startup that each name is registered. Register the events once, in the `events` package:
 
 ```go
-// slices/tasklist/projector.go
+// events/register.go
+package events
+
+import "github.com/terraskye/eventsourcing"
+
+func init() {
+    eventsourcing.RegisterEvent(&TaskCreated{})
+    eventsourcing.RegisterEvent(&TaskCompleted{})
+}
+```
+
+Each event is registered under its `EventType()`: `"TaskCreated"` and `"TaskCompleted"`.
+
+## Step 2: Define the read model
+
+The read model is the data the query serves. Here it lives in memory, so it is a small type that the projection writes and the query reads:
+
+```go
+// slices/tasklist/model.go
 package tasklist
 
-import (
-    "context"
-    "sync"
+import "sync"
 
-    "github.com/terraskye/eventsourcing"
-    "task-management/events"
-)
-
-// Task is the cached read model entry.
+// Task is one entry in the read model.
 type Task struct {
     ID        string `json:"id"`
     Title     string `json:"title"`
     Completed bool   `json:"completed"`
 }
 
-// TaskList is the cached read model served by queries.
+// TaskList is the read model: written by the projection, read by the query.
 type TaskList struct {
-    Tasks []Task
-}
-
-// Projector maintains the cached TaskList.
-type Projector struct {
     mu    sync.RWMutex
     tasks map[string]*Task
 }
 
-func NewProjector() *Projector {
-    return &Projector{tasks: make(map[string]*Task)}
-}
-
-// All returns a snapshot of the current task list.
-func (p *Projector) All() []Task {
-    p.mu.RLock()
-    defer p.mu.RUnlock()
-
-    result := make([]Task, 0, len(p.tasks))
-    for _, t := range p.tasks {
-        result = append(result, *t)
-    }
-    return result
-}
-
-// OnTaskCreated is called by the event bus when a TaskCreated event arrives.
-func (p *Projector) OnTaskCreated(_ context.Context, e *events.TaskCreated) error {
-    p.mu.Lock()
-    defer p.mu.Unlock()
-    p.tasks[e.TaskID.String()] = &Task{
-        ID:    e.TaskID.String(),
-        Title: e.Title,
-    }
-    return nil
-}
-
-// OnTaskCompleted is called by the event bus when a TaskCompleted event arrives.
-func (p *Projector) OnTaskCompleted(_ context.Context, e *events.TaskCompleted) error {
-    p.mu.Lock()
-    defer p.mu.Unlock()
-    if t, ok := p.tasks[e.TaskID.String()]; ok {
-        t.Completed = true
-    }
-    return nil
-}
-
-// EventHandlers returns the typed handlers to register on the event bus.
-func (p *Projector) EventHandlers() *eventsourcing.EventGroupProcessor {
-    return eventsourcing.NewEventGroupProcessor(
-        eventsourcing.OnEvent(p.OnTaskCreated),
-        eventsourcing.OnEvent(p.OnTaskCompleted),
-    )
+func NewTaskList() *TaskList {
+    return &TaskList{tasks: make(map[string]*Task)}
 }
 ```
 
-## Step 2: Write the query handler
+The projection writes from the runner's goroutine while HTTP requests read, so the map is guarded by a `sync.RWMutex`.
+
+## Step 3: Write the projection
+
+The projection describes how events turn into the read model: a name, a handler, and the event types the handler needs.
+
+```go
+// slices/tasklist/projection.go
+package tasklist
+
+import (
+    "context"
+
+    "github.com/terraskye/eventsourcing"
+    "github.com/terraskye/eventsourcing/projection"
+    "task-management/events"
+)
+
+// NewProjection returns the projection that keeps list up to date.
+func NewProjection(list *TaskList) projection.Projection {
+    return projection.Projection{
+        Name:    "task-list",
+        Handler: eventsourcing.NewEventHandlerFunc(list.handle),
+        Events:  []string{"TaskCreated", "TaskCompleted"},
+    }
+}
+
+// handle applies one event to the task list. The runner calls it for every
+// event in Events, in the order they were stored.
+func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+
+    switch e := event.(type) {
+    case *events.TaskCreated:
+        l.tasks[e.TaskID.String()] = &Task{
+            ID:    e.TaskID.String(),
+            Title: e.Title,
+        }
+    case *events.TaskCompleted:
+        if t, ok := l.tasks[e.TaskID.String()]; ok {
+            t.Completed = true
+        }
+    }
+    return nil
+}
+```
+
+- `Name` identifies the projection's checkpoint, so it must be unique and stay the same between releases.
+- `Handler` is called for every event the runner reads. `NewEventHandlerFunc` turns a function into an `eventsourcing.EventHandler`.
+- `Events` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
+
+## Step 4: Write the query handler
+
+The query reads the read model directly. It never needs the projection.
 
 ```go
 // slices/tasklist/query.go
@@ -121,19 +147,26 @@ type ListTasks struct{}
 func (q ListTasks) ID() []byte { return []byte("task-list") }
 
 type QueryHandler struct {
-    projector *Projector
+    list *TaskList
 }
 
-func NewQueryHandler(p *Projector) *QueryHandler {
-    return &QueryHandler{projector: p}
+func NewQueryHandler(list *TaskList) *QueryHandler {
+    return &QueryHandler{list: list}
 }
 
 func (h *QueryHandler) HandleQuery(_ context.Context, _ ListTasks) ([]Task, error) {
-    return h.projector.All(), nil
+    h.list.mu.RLock()
+    defer h.list.mu.RUnlock()
+
+    result := make([]Task, 0, len(h.list.tasks))
+    for _, t := range h.list.tasks {
+        result = append(result, *t)
+    }
+    return result, nil
 }
 ```
 
-## Step 3: Wire the event bus
+## Step 5: Run the projection
 
 ```go
 // main.go
@@ -144,38 +177,35 @@ import (
     "log"
 
     "github.com/gin-gonic/gin"
-    membus  "github.com/terraskye/eventsourcing/eventbus/memory"
     memstore "github.com/terraskye/eventsourcing/eventstore/memory"
+    "github.com/terraskye/eventsourcing/projection"
+    projmem "github.com/terraskye/eventsourcing/projection/memory"
 
-    "task-management/slices/createtask"
     "task-management/slices/completetask"
+    "task-management/slices/createtask"
     "task-management/slices/tasklist"
 )
 
 func main() {
+    ctx := context.Background()
+
     store := memstore.NewMemoryStore(100)
     defer store.Close()
 
-    bus := membus.NewEventBus(100)
-    defer bus.Close()
+    // The read model, and the runner that keeps it up to date.
+    list := tasklist.NewTaskList()
+    taskList := projection.NewRunner(tasklist.NewProjection(list), store, projmem.NewStore())
 
-    // Create the projector and register it on the bus.
-    projector := tasklist.NewProjector()
-    if err := bus.Subscribe(context.Background(), "task-list-projector", projector.EventHandlers()); err != nil {
-        log.Fatal(err)
-    }
-
-    // Forward events from the store to the bus.
     go func() {
-        for env := range store.Events() {
-            bus.Dispatch(env)
+        if err := taskList.Run(ctx); err != nil && ctx.Err() == nil {
+            log.Fatal(err)
         }
     }()
 
     // Handlers
     createTaskHTTP := createtask.NewHTTPHandler(createtask.NewHandler(store))
     completeTaskHTTP := completetask.NewHTTPHandler(completetask.NewHandler(store))
-    listTasksHTTP := newTaskListHTTP(tasklist.NewQueryHandler(projector))
+    listTasksHTTP := newTaskListHTTP(tasklist.NewQueryHandler(list))
 
     r := gin.Default()
     tasks := r.Group("/api/v1/tasks")
@@ -187,7 +217,21 @@ func main() {
 }
 ```
 
-## Step 4: Test it
+`projection.NewRunner` takes three things:
+
+- The **projection** from Step 3.
+- The **event store** to read from. The memory store implements `eventsourcing.GlobalReader`.
+- A **projection store** to keep the checkpoint in. `projmem.NewStore()` keeps it in memory, which fits a read model that also lives in memory: both start empty on every run, and the runner rebuilds the task list from the start of the log.
+
+`main.go` decides how the projection runs; the slice decides what it does. Because `Projection` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
+
+```go
+p := tasklist.NewProjection(list)
+p.Handler = logging.WithEventLogging(logger, p.Handler)
+taskList := projection.NewRunner(p, store, projmem.NewStore())
+```
+
+## Step 6: Test it
 
 ```bash
 # Create tasks
@@ -199,25 +243,42 @@ curl -s -X POST http://localhost:8080/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{"title": "Write tests"}' | jq .
 
-# List — both tasks appear immediately
+# List: both tasks appear within a second
 curl -s http://localhost:8080/api/v1/tasks | jq .
 
 # Complete one task (use the task_id from above)
 curl -X POST "http://localhost:8080/api/v1/tasks/<task_id>/complete"
 
-# List again — completed field is true
+# List again: completed is true
 curl -s http://localhost:8080/api/v1/tasks | jq .
 ```
 
-## How `EventGroupProcessor` routes events
+## Eventual consistency
 
-`NewEventGroupProcessor` builds a map of event type → handler. When an event arrives via `Handle`, it looks up the correct typed handler by type name and calls it. Unrecognised event types return `SkippedEventError` (not an error — it's expected).
+A projection is **eventually consistent**: a command returns as soon as its events are stored, and the runner picks them up shortly after. In this tutorial that is within a second, the runner's default poll interval.
 
-`StreamFilter()` returns the list of event type names the processor handles, which can be used to subscribe only to relevant events in networked event buses.
+When a caller must see its own write, wait for the projection to reach the command's position. Every command returns an `AppendResult` whose `GlobalVersion` is the position of its last event:
 
-## Notes on concurrency
+```go
+res, err := createTask(ctx, cmd)
+if err != nil {
+    return err
+}
+// Blocks until the task list has processed the new event.
+if err := taskList.WaitUntil(ctx, res.GlobalVersion); err != nil {
+    return err
+}
+```
 
-The in-memory event bus dispatches events asynchronously in a goroutine per subscriber. The projector uses `sync.RWMutex` to protect the cache. For production use, consider [KurrentDB's event bus](../reference/implementations/kurrentdb-eventbus.md), which provides durable subscriptions.
+`taskList.Live(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
+
+## Going further
+
+- **A durable read model.** Keep the task list in Postgres with `projection/postgres`: the handler's writes and the checkpoint commit in one transaction, so a restart resumes where it left off instead of starting over.
+- **Rebuilds.** Give the projection a `Version` and a `Reset`; bumping the version rebuilds the read model from the start of the log.
+- **Several instances.** Run the same projection in every instance of the service; one processes the events and the others stand by to take over.
+
+[Build a projection](../how-to/cached-projection.md) covers each of these.
 
 ---
 

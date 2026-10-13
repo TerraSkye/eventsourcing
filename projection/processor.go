@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -35,7 +36,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		_ = r.store.Release(relCtx, r.p.Name, seg, r.p.Owner)
 	}()
 
-	backoff := newBackoff()
+	retry := newRetryBackOff()
 
 	for {
 		if ctx.Err() != nil {
@@ -44,7 +45,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		cp, ok, err := r.store.Claim(ctx, r.p.Name, seg, r.p.Owner, r.p.ClaimTTL)
 		if err != nil {
 			r.setPhase(seg, Stalled, err.Error())
-			if !sleepCtx(ctx, backoff.next()) {
+			if !sleepCtx(ctx, retry.NextBackOff()) {
 				return
 			}
 			continue
@@ -56,7 +57,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			}
 			continue
 		}
-		backoff.reset()
+		retry.Reset()
 
 		// Held the claim. Run until it is lost (reclaim, ctx.Done, or a
 		// non-recoverable error).
@@ -70,7 +71,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			}
 			// Other errors: record and back off, keep the claim if we can.
 			r.setPhase(seg, Stalled, err.Error())
-			if !sleepCtx(ctx, backoff.next()) {
+			if !sleepCtx(ctx, retry.NextBackOff()) {
 				return
 			}
 			continue
@@ -114,8 +115,6 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		}
 		cp.ReplayUntil = head
 	}
-
-	notify := r.notifyChannel(ctx)
 
 	for {
 		if ctx.Err() != nil {
@@ -214,7 +213,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 
 		if res.AtEnd {
 			// At the head — wait for a nudge, a notification, or a poll.
-			if !r.waitLive(ctx, notify) {
+			if !r.waitLive(ctx) {
 				return ctx.Err()
 			}
 		}
@@ -227,7 +226,7 @@ func (r *Runner) applyBatch(ctx context.Context, seg int, events []*eventsourcin
 	err := r.commit(ctx, seg, cp, status, func(ctx context.Context) error {
 		for _, env := range events {
 			ctx := withEnvelope(ctx, env, replayUntil)
-			if err := r.p.Handlers.Handle(ctx, env.Event); err != nil {
+			if err := r.p.Handler.Handle(ctx, env.Event); err != nil {
 				if isSkipped(err) {
 					continue
 				}
@@ -268,7 +267,7 @@ func (r *Runner) handleFailedBatch(ctx context.Context, seg int, events []*event
 		var handlerErr *handlerError
 		err := r.commit(ctx, seg, singleCP, singleStatus, func(ctx context.Context) error {
 			ctx = withEnvelope(ctx, env, replayUntil)
-			if err := r.p.Handlers.Handle(ctx, env.Event); err != nil {
+			if err := r.p.Handler.Handle(ctx, env.Event); err != nil {
 				if isSkipped(err) {
 					return nil
 				}
@@ -310,10 +309,6 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 			if err := dls.SaveDeadLetter(ctx, r.p.Name, seg, env.GlobalVersion, eventType, cause); err != nil {
 				return err
 			}
-		} else {
-			r.p.Logger.Error("projection: skipping failing event",
-				"projection", r.p.Name, "segment", seg,
-				"position", env.GlobalVersion, "event_type", eventType, "err", cause)
 		}
 		atomic.AddInt64(&r.skippedCount, 1)
 		return nil
@@ -364,7 +359,7 @@ func (r *Runner) commit(ctx context.Context, seg int, cp Checkpoint, status Stat
 // waitLive blocks at the head of the log until a nudge, a store
 // notification, or the poll interval elapses. Returns false if ctx was
 // cancelled.
-func (r *Runner) waitLive(ctx context.Context, notify <-chan struct{}) bool {
+func (r *Runner) waitLive(ctx context.Context) bool {
 	// A segmented reader waits on the same signals as an unsegmented one;
 	// a nudge to any segment is a nudge to the shared Runner.
 	timer := time.NewTimer(r.p.PollInterval)
@@ -374,24 +369,8 @@ func (r *Runner) waitLive(ctx context.Context, notify <-chan struct{}) bool {
 		return false
 	case <-r.nudge:
 	case <-timer.C:
-	case <-notify:
 	}
 	return true
-}
-
-// notifyChannel returns a channel that receives whenever the reader signals
-// new appends. If the reader doesn't implement Notifier, the channel never
-// receives.
-func (r *Runner) notifyChannel(ctx context.Context) <-chan struct{} {
-	if n, ok := r.reader.(eventsourcing.Notifier); ok {
-		ch, err := n.Notify(ctx)
-		if err == nil {
-			return ch
-		}
-	}
-	// A nil channel never selects; a closed channel always does. We want
-	// never — a blocked select arm.
-	return nil
 }
 
 func (r *Runner) setStatus(seg int, s Status) {
@@ -461,25 +440,15 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// backoff implements a simple capped exponential delay used while a segment
-// is stalled on repeated errors. Correctness never depends on its values:
+// newRetryBackOff returns the capped exponential delay used while a segment
+// is stalled on repeated errors. It never gives up: a stalled segment keeps
+// retrying until ctx is done. Correctness never depends on its values:
 // correctness comes from Commit's unit-of-work atomicity.
-type backoff struct {
-	cur time.Duration
+func newRetryBackOff() *backoff.ExponentialBackOff {
+	return backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(500*time.Millisecond),
+		backoff.WithMultiplier(2),
+		backoff.WithMaxInterval(30*time.Second),
+		backoff.WithMaxElapsedTime(0),
+	)
 }
-
-func newBackoff() *backoff { return &backoff{} }
-
-func (b *backoff) next() time.Duration {
-	if b.cur == 0 {
-		b.cur = 500 * time.Millisecond
-	} else {
-		b.cur *= 2
-		if b.cur > 30*time.Second {
-			b.cur = 30 * time.Second
-		}
-	}
-	return b.cur
-}
-
-func (b *backoff) reset() { b.cur = 0 }

@@ -22,51 +22,79 @@
 //
 // That's the whole surface:
 //
-//	r := projection.NewRunner(projection.Projection{
-//		Name:     "task-list",
-//		Handlers: projector.EventHandlers(),
-//	}, eventStore, projection.NewMemoryStore())
+//	list := tasklist.NewTaskList()
+//	r := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewStore())
 //
 //	go r.Run(ctx)
 //
-// For an in-memory read model, [NewMemoryStore] is enough; the whole
-// projection is replayed on every start, which is right for a read model
-// that is empty after a restart anyway. For a durable read model, use the
-// Store that belongs to your database — for example
+// For an in-memory read model, projection/memory.NewStore is enough; the
+// whole projection is replayed on every start, which is right for a read
+// model that is empty after a restart anyway. For a durable read model,
+// use the Store that belongs to your database — for example
 // projection/postgres.NewStore — so the handlers' writes and the
 // checkpoint move land in the same transaction.
 //
-// # Writing a projector
+// # Writing a projection
 //
-// A projector is an ordinary struct with one method per event type it
-// handles, grouped with [eventsourcing.NewEventGroupProcessor]:
+// A slice that owns a read model has three parts: the read model itself,
+// the projection that writes it, and the query that reads it. The
+// projection is a constructor that returns a [Projection]: one handler
+// that switches on the event type, and the registered names of the types
+// it handles. The query reads the read model directly; it never needs the
+// projection.
 //
-//	type Projector struct {
+// An in-memory read model is a type that both sides share:
+//
+//	// TaskList is the read model: written by the projection, read by the
+//	// query.
+//	type TaskList struct {
 //		mu    sync.RWMutex
 //		tasks map[string]*Task
 //	}
 //
-//	func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) error {
-//		p.mu.Lock()
-//		defer p.mu.Unlock()
-//		p.tasks[e.TaskID.String()] = &Task{ID: e.TaskID.String(), Title: e.Title}
+//	func NewProjection(list *TaskList) projection.Projection {
+//		return projection.Projection{
+//			Name:    "task-list",
+//			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
+//			Events:  []string{"TaskCreated"},
+//		}
+//	}
+//
+//	func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error {
+//		l.mu.Lock()
+//		defer l.mu.Unlock()
+//		switch e := event.(type) {
+//		case *events.TaskCreated:
+//			l.tasks[e.TaskID.String()] = &Task{ID: e.TaskID.String(), Title: e.Title}
+//		}
 //		return nil
 //	}
 //
-//	func (p *Projector) EventHandlers() *eventsourcing.EventGroupProcessor {
-//		return eventsourcing.NewEventGroupProcessor(
-//			eventsourcing.OnEvent(p.OnTaskCreated),
-//		)
+// A handler that prefers one method per event type can group them with
+// [eventsourcing.NewEventGroupProcessor], pass the group as Handler, and
+// pass the group's StreamFilter as Events.
+//
+// A read model in Postgres is its tables, so the projection keeps no state
+// at all. Handlers write through the batch's transaction, and the query
+// reads the tables with its own connection:
+//
+//	func NewProjection() projection.Projection {
+//		return projection.Projection{
+//			Name:    "task-list",
+//			Handler: eventsourcing.NewEventHandlerFunc(handle),
+//			Events:  []string{"TaskCreated"},
+//		}
 //	}
 //
-// With a Postgres store, handlers reach the batch's transaction through
-// its own accessor:
-//
-//	func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) error {
-//		_, err := postgres.Tx(ctx).Exec(ctx,
-//			`INSERT INTO tasks (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-//			e.TaskID, e.Title)
-//		return err
+//	func handle(ctx context.Context, event eventsourcing.Event) error {
+//		switch e := event.(type) {
+//		case *events.TaskCreated:
+//			_, err := postgres.Tx(ctx).Exec(ctx,
+//				`INSERT INTO tasks (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+//				e.TaskID, e.Title)
+//			return err
+//		}
+//		return nil
 //	}
 //
 // # Catching up and live
@@ -94,10 +122,19 @@
 //
 // There are two ways to trigger a rebuild:
 //
-//   - Bump [Projection.Version] when you change how the projector writes
+//   - Bump [Projection.Version] when you change how the projection writes
 //     its read model. On start, a runner whose stored version differs from
 //     its configured one rebuilds automatically.
 //   - Call [Runner.Rebuild] on the active instance.
+//
+// Adding an event type to [Projection.Events] counts as a change: without
+// a Version bump, events of the new type stored before the change are
+// never applied.
+//
+// A rebuild in place empties the read model until the runner has caught
+// up. When that takes too long, build the new version under a new
+// [Projection.Name], writing to new tables, and switch the queries over
+// once it is [Live].
 //
 // # Failures
 //
@@ -108,17 +145,26 @@
 // events instead, recording them through [DeadLetterStore] when the Store
 // supports it.
 //
+// Exactly-once covers only what a handler writes through the Store's unit
+// of work, such as postgres.Tx(ctx). Anything else a handler does, such as
+// sending an email, calling a webhook or pushing to browsers, happens at
+// least once: a retried batch does it again, and [IsReplaying] does not
+// prevent that, since a retry is not a replay. Side effects that must not
+// repeat belong in an automation, not in a projection.
+//
+// The runner does not log. To log handler failures, wrap the Handler, for
+// example with logging.WithEventLogging; [Runner.Status] reports why a
+// segment is stalled.
+//
 // A handler that returns [eventsourcing.SkippedEventError] has declined
 // the event; that is not a failure, and the checkpoint moves past it.
 //
 // # Waking up
 //
 // At the head of the log, a runner waits until one of the following
-// happens, then reads again: the store signals an append (if it
-// implements [eventsourcing.Notifier]), something calls [Runner.Nudge]
-// (for example [NudgeOnSave] after a command saved events), or the poll
-// interval elapses. Nudges and notifications only reduce latency;
-// correctness never depends on them, because the poll always runs.
+// happens, then reads again: something calls [Runner.Nudge], or the poll
+// interval elapses. Nudges only reduce latency; correctness never depends
+// on them, because the poll always runs.
 //
 // # Several instances
 //
@@ -137,4 +183,10 @@
 // projection, each with its own checkpoint and status. Handlers are the
 // same as for an unsegmented projection, as long as no two segments write
 // the same read-model row.
+//
+// Segmenting has two costs. Each segment reads the log on its own, so a
+// projection with N segments reads it N times. And a read model that
+// combines events from many streams into one row, such as a total or a
+// count, cannot be segmented at all, since no key keeps that row in one
+// segment.
 package projection

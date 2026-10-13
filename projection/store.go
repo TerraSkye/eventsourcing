@@ -7,11 +7,11 @@ import (
 )
 
 var (
-	// ErrClaimLost is returned by [Store.Commit], [Store.Reset] and
-	// [Store.UpdateStatus] when the owner no longer holds the segment: its
-	// claim expired and another instance took over. Any writes the call made
-	// in its unit of work are rolled back; the runner stops working on the
-	// segment and lets the new owner continue.
+	// ErrClaimLost is returned by [Store.Commit] and [Store.Reset] when the
+	// owner no longer holds the segment: its claim expired and another
+	// instance took over. Any writes the call made in its unit of work are
+	// rolled back; the runner stops working on the segment and lets the new
+	// owner continue.
 	ErrClaimLost = errors.New("projection: claim lost")
 
 	// ErrSegmentsChanged is returned by [Store.Init] when the projection
@@ -22,13 +22,13 @@ var (
 )
 
 // Checkpoint records how far a segment of a projection has processed the
-// log, and which projector version wrote the read model.
+// log, and which projection version wrote the read model.
 type Checkpoint struct {
 	// Position is the GlobalVersion up to which the segment has processed
 	// the log. Zero means nothing has been processed yet.
 	Position uint64
 
-	// Version is the projector version that wrote the read model; see
+	// Version is the projection version that wrote the read model; see
 	// [Projection.Version].
 	Version int
 
@@ -101,7 +101,7 @@ type Status struct {
 	// is how far the segment lags behind.
 	Head uint64
 
-	// Version is the projector version the read model was built with.
+	// Version is the projection version the read model was built with.
 	Version int
 
 	// LastError is the error that stalled the segment, or "" when it is not
@@ -141,7 +141,7 @@ type Status struct {
 //     LoadStatuses, stored next to the checkpoint)
 //
 // Implementations are checked against the contract by
-// [eventsourcingtest.StoreAcceptanceTest].
+// [projectiontest.StoreAcceptanceTest].
 //
 // # Contract
 //
@@ -172,8 +172,11 @@ type Status struct {
 //
 // SaveStatus publishes status for a segment the caller still owns, so that
 // other instances see phase changes between batches (e.g. Standby -> Live)
-// without waiting for the next Commit. It is best-effort; a failure is
-// logged but does not stall the runner.
+// without waiting for the next Commit. It stores Phase, Head and LastError
+// only; the Position and Version that LoadStatuses reports always come
+// from the stored checkpoint, and Owner from the claim. A call by anyone
+// other than the owner changes nothing. It is best-effort; a failure does
+// not stall the runner.
 type Store interface {
 	Init(ctx context.Context, name string, segments int) error
 
