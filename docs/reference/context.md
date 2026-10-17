@@ -17,7 +17,7 @@ func StreamIDFromContext(ctx context.Context) string
 func AggregateIDFromContext(ctx context.Context) string
 func EventIDFromContext(ctx context.Context) uuid.UUID
 func VersionFromContext(ctx context.Context) uint64
-func GlobalVersionFromContext(ctx context.Context) uint64
+func GlobalPositionFromContext(ctx context.Context) uint64
 func OccurredAtFromContext(ctx context.Context) time.Time
 func MetadataFromContext(ctx context.Context) map[string]any
 ```

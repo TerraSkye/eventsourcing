@@ -13,7 +13,7 @@ A task management system with:
 
 ## Prerequisites
 
-- Go 1.21+ installed
+- Go 1.24+ installed (1.25+ to use the Postgres or KurrentDB packages)
 - Basic understanding of Go structs and interfaces
 - Familiarity with HTTP APIs
 - No event sourcing knowledge required
@@ -25,8 +25,8 @@ A task management system with:
 | [1](./01-first-command.md) | Your first command | Commands, events, event store | 30 min |
 | [2](./02-first-query.md) | Your first query | Queries, live read models | 15 min |
 | [3](./03-business-rules.md) | Business rules | State, the decide/evolve pattern | 20 min |
-| [4](./04-projections.md) | Real-time projections | Event bus, cached projections | 25 min |
-| [5](./05-background-processing.md) | Background processing | Processors, sagas | 15 min |
+| [4](./04-projections.md) | Projections | Projection runner, checkpoints | 25 min |
+| [5](./05-background-processing.md) | Background processing | Automations, todo lists | 20 min |
 
 **Total time**: ~1.5 hours hands-on
 
@@ -64,7 +64,7 @@ Create the project:
 mkdir task-management && cd task-management
 go mod init task-management
 go get github.com/terraskye/eventsourcing
-go get github.com/terraskye/eventsourcing/eventstore/memory
+go get github.com/terraskye/eventsourcing/memory
 go get github.com/gin-gonic/gin
 go get github.com/google/uuid
 ```

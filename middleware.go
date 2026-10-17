@@ -39,7 +39,7 @@ type CommandHandlerMiddleware func(next CommandHandler[Command]) CommandHandler[
 //
 //	bus.Use(
 //	    logging.CommandLogging(logger),
-//	    otel.CommandTelemetry(),
+//	    telemetry.CommandTelemetry(),
 //	)
 func (b *CommandBus) Use(middlewares ...CommandHandlerMiddleware) {
 	b.mu.Lock()
@@ -90,7 +90,7 @@ type QueryHandlerMiddleware func(next QueryGateway[Query, any]) QueryGateway[Que
 //
 //	bus.Use(
 //	    logging.QueryLogging(logger),
-//	    otel.QueryTelemetry(),
+//	    telemetry.QueryTelemetry(),
 //	)
 func (q *QueryBus) Use(middlewares ...QueryHandlerMiddleware) {
 	q.mu.Lock()
@@ -116,6 +116,10 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 	return queryHandlerFunc[T, R](func(ctx context.Context, qry T) (R, error) {
 		result, err := anyNext(ctx, qry)
 		if err != nil {
+
+			if v, ok := result.(R); ok {
+				return v, err
+			}
 			var zero R
 			return zero, err
 		}

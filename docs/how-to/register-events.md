@@ -1,6 +1,6 @@
 # How to register events for serialization
 
-Register event types so the event store can deserialize them by name when reading from a persistent backend (KurrentDB, file store).
+Register event types so the event store can deserialize them by name when reading from a persistent backend (SQLite, Postgres, KurrentDB, file store).
 
 ## Why registration is needed
 

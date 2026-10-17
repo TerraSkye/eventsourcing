@@ -1,0 +1,9 @@
+go 1.25.0
+
+use (
+	.
+	./kurrentdb
+	./postgres
+	./sqlite
+	./telemetry
+)

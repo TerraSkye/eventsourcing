@@ -36,7 +36,7 @@ bus := eventsourcing.NewCommandBus(100, 4)
 func Register[C Command](b *CommandBus, handler CommandHandler[C])
 ```
 
-Registers a typed handler. **Panics** if a handler is already registered for the same command type.
+Registers a typed handler under `C`'s `CommandType()`, read off the zero value of `C`. **Panics** if a handler is already registered for the same command type.
 
 The middleware chain is applied here, at registration time — so call [`Use()`](../how-to/use-middleware.md) before `Register`. `Register` is safe to call on a bus that is already dispatching, though wiring every handler during startup is the expected pattern.
 

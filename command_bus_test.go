@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,11 +21,15 @@ type testCmd struct {
 
 func (c testCmd) AggregateID() string { return c.ID }
 
+func (c testCmd) CommandType() string { return "testCmd" }
+
 type testCmd2 struct {
 	ID string
 }
 
 func (c testCmd2) AggregateID() string { return c.ID }
+
+func (c testCmd2) CommandType() string { return "testCmd2" }
 
 // ---- Tests ----
 
@@ -159,8 +165,8 @@ func TestRegister_DuplicateHandlerPanics(t *testing.T) {
 
 // TestRegister_HandlerTypeMismatchReturnsError covers Register's generated
 // wrapper's own type assertion (cmd.(C)) failing. In normal use this can't
-// happen — the worker only ever looks a handler up by the same %T string
-// Register derived it from — so this calls the wrapper directly (fetched via
+// happen — the worker only ever looks a handler up by the same
+// [Command.CommandType] string Register derived it from — so this calls the wrapper directly (fetched via
 // handlerFor, bypassing the worker's cmdName-matching) with a command of a
 // different concrete type to exercise the defensive check itself.
 func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
@@ -170,7 +176,7 @@ func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
 		return AppendResult{Successful: true}, nil
 	})
 
-	cmdName := fmt.Sprintf("%T", testCmd{})
+	cmdName := testCmd{}.CommandType()
 	h, ok := bus.handlerFor(cmdName)
 	if !ok {
 		t.Fatalf("expected a handler registered for %s", cmdName)
@@ -259,6 +265,8 @@ type stopProbeCmd struct{ ID string }
 
 func (c stopProbeCmd) AggregateID() string { return c.ID }
 
+func (c stopProbeCmd) CommandType() string { return "stopProbeCmd" }
+
 // TestCommandBus_StopDoesNotPanicPendingDispatch asserts that a Dispatch parked
 // on the queue send when Stop runs is either processed or fails with
 // ErrCommandBusClosed. It must never panic the sender, which is what closing the
@@ -329,21 +337,31 @@ type raceCmdA struct{ ID string }
 
 func (c raceCmdA) AggregateID() string { return c.ID }
 
+func (c raceCmdA) CommandType() string { return "raceCmdA" }
+
 type raceCmdB struct{ ID string }
 
 func (c raceCmdB) AggregateID() string { return c.ID }
+
+func (c raceCmdB) CommandType() string { return "raceCmdB" }
 
 type raceCmdC struct{ ID string }
 
 func (c raceCmdC) AggregateID() string { return c.ID }
 
+func (c raceCmdC) CommandType() string { return "raceCmdC" }
+
 type raceCmdD struct{ ID string }
 
 func (c raceCmdD) AggregateID() string { return c.ID }
 
+func (c raceCmdD) CommandType() string { return "raceCmdD" }
+
 type raceCmdE struct{ ID string }
 
 func (c raceCmdE) AggregateID() string { return c.ID }
+
+func (c raceCmdE) CommandType() string { return "raceCmdE" }
 
 // TestCommandBus_RegisterWhileDispatching asserts the concurrency contract the
 // CommandBus godoc promises: the type carries "synchronization mechanisms for
@@ -407,6 +425,8 @@ type benchCmd struct{ ID string }
 
 func (c benchCmd) AggregateID() string { return c.ID }
 
+func (c benchCmd) CommandType() string { return "benchCmd" }
+
 // benchmarkDispatch measures end-to-end Dispatch throughput. Dispatch is
 // synchronous, so this covers the whole round trip: the stopCh check and wg.Add
 // under b.mu, the queue send, worker pickup, the handler, and the response
@@ -447,3 +467,147 @@ func BenchmarkCommandBusDispatchShards32(b *testing.B) { benchmarkDispatch(b, 32
 // BenchmarkCommandBusDispatchContended oversubscribes GOMAXPROCS 32x so every
 // dispatcher contends for the b.mu that orders wg.Add against Stop's wg.Wait.
 func BenchmarkCommandBusDispatchContended(b *testing.B) { benchmarkDispatch(b, 16, 32) }
+
+type bufferedRaceCmd struct{ ID string }
+
+func (c bufferedRaceCmd) AggregateID() string { return c.ID }
+
+func (c bufferedRaceCmd) CommandType() string { return "bufferedRaceCmd" }
+
+// TestCommandBus_BufferedStopRaceHangsDispatch probes a race between Dispatch
+// and Stop on a *buffered* shard queue (bufferSize > 0, the configuration the
+// NewCommandBus doc example itself uses).
+//
+// Dispatch's enqueue step is a select between sending on the shard channel
+// and stopCh. Once Stop closes stopCh, the worker can observe the (still
+// empty) queue and exit for good -- but a Dispatch goroutine that already
+// passed its *earlier* stopCh check (and so already counted itself in b.wg)
+// can still reach the enqueue select afterward. With a buffered channel, the
+// send there succeeds even with zero readers, so Go's select can pick the
+// send case instead of the also-ready stopCh case. The command is then
+// buffered forever in an abandoned channel: no worker will ever read it, so
+// a Dispatch called with a context that has no deadline (context.Background,
+// extremely common) blocks forever on <-responseCh, and Stop's wg.Wait()
+// blocks forever right alongside it, since that Dispatch call's wg.Done
+// (deferred) never runs.
+//
+// This test hammers that window across many independent buses/goroutines and
+// fails if Stop (or the racing Dispatch) is ever still blocked after a
+// generous deadline -- something that should be impossible per the Stop doc
+// comment ("Dispatch racing Stop either completes normally or fails with an
+// error wrapping ErrCommandBusClosed").
+func TestCommandBus_BufferedStopRaceHangsDispatch(t *testing.T) {
+	const trials = 2000
+
+	for i := range trials {
+		bus := NewCommandBus(1, 1) // buffered shard queue, matches doc example shape
+		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		var dispatchDone int32
+		go func() {
+			_, _ = bus.Dispatch(context.Background(), bufferedRaceCmd{ID: fmt.Sprintf("agg-%d", i)})
+			atomic.StoreInt32(&dispatchDone, 1)
+		}()
+
+		stopDone := make(chan struct{})
+		go func() {
+			bus.Stop()
+			close(stopDone)
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("trial %d: bus.Stop() hung -- a Dispatch is stuck holding wg after its command was "+
+				"enqueued into a shard channel whose worker already exited (dispatchDone=%d)",
+				i, atomic.LoadInt32(&dispatchDone))
+		}
+
+		if atomic.LoadInt32(&dispatchDone) == 0 {
+			// Stop() returned (so wg reached zero) yet the dispatch goroutine
+			// hasn't flipped its flag -- give it a brief grace period for the
+			// scheduler, then fail if it's still not done.
+			deadline := time.After(1500 * time.Millisecond)
+			for atomic.LoadInt32(&dispatchDone) == 0 {
+				select {
+				case <-deadline:
+					t.Fatalf("trial %d: bus.Stop() returned but the concurrent Dispatch never returned", i)
+				default:
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}
+	}
+}
+
+// TestCommandBus_BufferedStopRaceParallel is the same probe run with many
+// concurrent goroutines per trial to widen the scheduling window further.
+func TestCommandBus_BufferedStopRaceParallel(t *testing.T) {
+	const trials = 50
+	const dispatchersPerTrial = 20
+
+	for i := 0; i < trials; i++ {
+		bus := NewCommandBus(dispatchersPerTrial, 1)
+		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
+			return AppendResult{Successful: true}, nil
+		})
+
+		var wg sync.WaitGroup
+		for d := 0; d < dispatchersPerTrial; d++ {
+			wg.Add(1)
+			go func(d int) {
+				defer wg.Done()
+				_, _ = bus.Dispatch(context.Background(), bufferedRaceCmd{ID: fmt.Sprintf("agg-%d-%d", i, d)})
+			}(d)
+		}
+
+		stopDone := make(chan struct{})
+		go func() {
+			bus.Stop()
+			close(stopDone)
+		}()
+
+		select {
+		case <-stopDone:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("trial %d: bus.Stop() hung with %d concurrent dispatchers racing it", i, dispatchersPerTrial)
+		}
+
+		waitDone := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("trial %d: a Dispatch call never returned after Stop completed", i)
+		}
+	}
+}
+
+// selectShard converted the 32-bit FNV hash to int before taking the modulus.
+// Where int is 32 bits wide, a hash of 1<<31 or more became negative, so did
+// the shard index, and Dispatch panicked indexing b.queues. The negative
+// case only occurs on 32-bit platforms; run with GOARCH=386 to exercise it.
+func TestCommandBus_SelectShardInRangeForHighHashes(t *testing.T) {
+	bus := NewCommandBus(1, 3)
+	defer bus.Stop()
+
+	checked := 0
+	for i := 0; checked < 100; i++ {
+		id := "aggregate-" + strconv.Itoa(i)
+		h := fnv.New32a()
+		h.Write([]byte(id))
+		if h.Sum32() < 1<<31 {
+			continue
+		}
+		checked++
+
+		if shard := bus.selectShard(id); shard < 0 || shard >= bus.shardCount {
+			t.Fatalf("selectShard(%q) = %d, want a shard in [0, %d)", id, shard, bus.shardCount)
+		}
+	}
+}

@@ -59,6 +59,7 @@ type CompleteTask struct {
 }
 
 func (c CompleteTask) AggregateID() string { return c.TaskID.String() }
+func (c CompleteTask) CommandType() string { return "CompleteTask" }
 
 // taskState tracks everything needed to enforce completion rules.
 type taskState struct {
@@ -212,4 +213,4 @@ func TestCompleteTask_AlreadyCompleted(t *testing.T) {
 
 ---
 
-Next: [Part 4: Real-time Projections](./04-projections.md) — use the event bus to keep a cached read model up to date.
+Next: [Part 4: Projections](./04-projections.md) — keep a read model up to date with the projection runner.

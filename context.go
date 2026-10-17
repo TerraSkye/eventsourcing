@@ -10,18 +10,18 @@ import (
 type ctxKey string
 
 const (
-	streamIDKey      ctxKey = "streamID"
-	aggregateIDKey   ctxKey = "aggregateID"
-	eventIDKey       ctxKey = "eventID"
-	versionKey       ctxKey = "version"
-	globalVersionKey ctxKey = "global_version"
-	occurredAtKey    ctxKey = "occurredAt"
-	metadataKey      ctxKey = "metadata"
-	causationIDKey   ctxKey = "causationID"
+	streamIDKey       ctxKey = "streamID"
+	aggregateIDKey    ctxKey = "aggregateID"
+	eventIDKey        ctxKey = "eventID"
+	versionKey        ctxKey = "version"
+	globalPositionKey ctxKey = "global_position"
+	occurredAtKey     ctxKey = "occurredAt"
+	metadataKey       ctxKey = "metadata"
+	causationIDKey    ctxKey = "causationID"
 )
 
 // WithEnvelope returns a copy of ctx carrying env's stream ID, aggregate ID,
-// event ID, version, global version, occurred-at time, and metadata,
+// event ID, version, global position, occurred-at time, and metadata,
 // retrievable via the *FromContext functions below. It does not carry a
 // causation ID; use [WithCausation] for that. The aggregate ID is "" if
 // env.Event is nil.
@@ -35,7 +35,7 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = context.WithValue(ctx, aggregateIDKey, aggregateID)
 	ctx = context.WithValue(ctx, eventIDKey, env.EventID)
 	ctx = context.WithValue(ctx, versionKey, env.Version)
-	ctx = context.WithValue(ctx, globalVersionKey, env.GlobalVersion)
+	ctx = context.WithValue(ctx, globalPositionKey, env.GlobalPosition)
 	ctx = context.WithValue(ctx, occurredAtKey, env.OccurredAt)
 	ctx = context.WithValue(ctx, metadataKey, env.Metadata)
 	return ctx
@@ -85,10 +85,10 @@ func VersionFromContext(ctx context.Context) uint64 {
 	return 0
 }
 
-// GlobalVersionFromContext returns the global version set by
+// GlobalPositionFromContext returns the global position set by
 // [WithEnvelope], or 0 if ctx carries none.
-func GlobalVersionFromContext(ctx context.Context) uint64 {
-	if v := ctx.Value(globalVersionKey); v != nil {
+func GlobalPositionFromContext(ctx context.Context) uint64 {
+	if v := ctx.Value(globalPositionKey); v != nil {
 		if ver, ok := v.(uint64); ok {
 			return ver
 		}

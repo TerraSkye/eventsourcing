@@ -14,7 +14,7 @@ bus := eventsourcing.NewCommandBus(100, 4)
 
 bus.Use(
     logging.CommandLogging(logger),
-    otel.CommandTelemetry(),
+    telemetry.CommandTelemetry(),
 )
 
 eventsourcing.Register(bus, placeOrderHandler)
@@ -27,7 +27,7 @@ Calling `Use()` multiple times appends to the chain, but only affects handlers r
 bus.Use(logging.CommandLogging(logger))
 eventsourcing.Register(bus, placeOrderHandler)  // logging only
 
-bus.Use(otel.CommandTelemetry())
+bus.Use(telemetry.CommandTelemetry())
 eventsourcing.Register(bus, confirmOrderHandler) // logging + telemetry
 ```
 
@@ -66,7 +66,7 @@ func (a *AuditMiddleware) Middleware(
     next eventsourcing.CommandHandler[eventsourcing.Command],
 ) eventsourcing.CommandHandler[eventsourcing.Command] {
     return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-        a.logger.Info("audit", "topic", a.topic, "command", fmt.Sprintf("%T", cmd))
+        a.logger.Info("audit", "topic", a.topic, "command", cmd.CommandType())
         return next(ctx, cmd)
     }
 }
@@ -90,7 +90,7 @@ bus := eventsourcing.NewQueryBus()
 
 bus.Use(
     logging.QueryLogging(logger),
-    otel.QueryTelemetry(),
+    telemetry.QueryTelemetry(),
 )
 
 eventsourcing.RegisterQueryHandler[GetOrder, *Order](bus, getOrderHandler)
@@ -125,7 +125,7 @@ bus := memory.NewEventBus(100)
 
 bus.Use(
     logging.EventLogging(logger),
-    otel.EventBusTelemetry(),
+    telemetry.EventBusTelemetry(),
 )
 
 bus.Subscribe(ctx, "order-projector", orderProjector)
@@ -152,13 +152,13 @@ var myMiddleware eventsourcing.EventHandlerMiddleware = func(next eventsourcing.
 `EventStore` is an interface. An `EventStoreMiddleware` is applied by wrapping the store directly — call it and reassign:
 
 ```go
-store = otel.EventStoreTelemetry()(store)
+store = telemetry.EventStoreTelemetry()(store)
 ```
 
 To compose several, wrap outward from the innermost:
 
 ```go
-store = otel.EventStoreTelemetry()(store)
+store = telemetry.EventStoreTelemetry()(store)
 store = myAuditMiddleware(store)  // outermost, runs first
 ```
 
@@ -177,9 +177,9 @@ var metered eventsourcing.EventStoreMiddleware = func(next eventsourcing.EventSt
 | Factory | Type returned | Apply with |
 |---|---|---|
 | `logging.CommandLogging(logger)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
-| `otel.CommandTelemetry(...)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
+| `telemetry.CommandTelemetry(...)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
 | `logging.QueryLogging(logger)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
-| `otel.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
+| `telemetry.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
 | `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
-| `otel.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
-| `otel.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `store = mw(store)` |
+| `telemetry.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
+| `telemetry.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `store = mw(store)` |

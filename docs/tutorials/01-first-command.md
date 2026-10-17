@@ -81,6 +81,7 @@ type CreateTask struct {
 }
 
 func (c CreateTask) AggregateID() string { return c.TaskID.String() }
+func (c CreateTask) CommandType() string { return "CreateTask" }
 
 // taskState is the minimal state needed to enforce business rules.
 type taskState struct {
@@ -197,13 +198,13 @@ import (
     "log"
 
     "github.com/gin-gonic/gin"
-    "github.com/terraskye/eventsourcing/eventstore/memory"
+    "github.com/terraskye/eventsourcing/memory"
 
     "task-management/slices/createtask"
 )
 
 func main() {
-    store := memory.NewMemoryStore(100)
+    store := memory.NewEventStore(100)
     defer store.Close()
 
     createTaskHandler := createtask.NewHandler(store)

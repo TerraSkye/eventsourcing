@@ -5,13 +5,13 @@ An in-memory implementation of `EventStore`. Suitable for testing and prototypin
 ## Package
 
 ```
-github.com/terraskye/eventsourcing/eventstore/memory
+github.com/terraskye/eventsourcing/memory
 ```
 
 ## Constructor
 
 ```go
-func NewMemoryStore(buffer int64) *MemoryStore
+func NewEventStore(buffer int64) *EventStore
 ```
 
 | Parameter | Description |
@@ -19,14 +19,14 @@ func NewMemoryStore(buffer int64) *MemoryStore
 | `buffer` | Size of the internal `Events()` channel buffer. |
 
 ```go
-store := memory.NewMemoryStore(100)
+store := memory.NewEventStore(100)
 defer store.Close()
 ```
 
 ## Events channel
 
 ```go
-func (m *MemoryStore) Events() <-chan *eventsourcing.Envelope
+func (m *EventStore) Events() <-chan *eventsourcing.Envelope
 ```
 
 Returns a channel that receives every saved event. Use this to feed events into the event bus:
@@ -42,7 +42,7 @@ go func() {
 ## Behaviour
 
 - All events are stored in a `map[string][]*Envelope` (per stream) and a global `[]*Envelope` slice.
-- `LoadFromAll` uses the global slice; `version` is treated as a slice offset.
+- `ReadAll` and `Head` (`GlobalReader`) read the global slice; `GlobalPosition` is the event's index in it plus one.
 - `LoadStream` requires the stream to exist (`StreamExists` semantics).
 - `LoadStreamFrom` with `Any{}` or `Revision` starts from the given offset.
 - Thread-safe via `sync.RWMutex`.
@@ -52,4 +52,3 @@ go func() {
 
 - No durability — data lost on process exit.
 - No event registration required (events are not serialized).
-- `LoadFromAll` positions are ordinal offsets, not global sequence numbers.

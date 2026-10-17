@@ -13,6 +13,21 @@ import (
 // Load* method. The [Iterator] values Load* methods return are lazy and
 // should be consumed promptly; implementations make no guarantee about
 // their reusability or thread-safety once iteration ends.
+//
+// A Load* iterator is bound to the ctx it was created with, and may hold
+// resources — a database cursor, an open read stream — until iteration
+// ends. Reading it to the end or failing releases them; a caller that may
+// stop early must call [Iterator.Close], which is safe to defer:
+//
+//	it, err := store.LoadStream(ctx, id)
+//	if err != nil {
+//		return err
+//	}
+//	defer it.Close()
+//	for it.Next() {
+//		state = evolve(state, it.Value())
+//	}
+//	return it.Err()
 type EventStore interface {
 	// Save appends events to the stream identified by their common StreamID,
 	// which must be the same across every element of events. revision states
@@ -32,13 +47,6 @@ type EventStore interface {
 	// [Revision]; [Any] starts from the beginning of the stream.
 	LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error)
 
-	// LoadFromAll returns an iterator over events across every stream,
-	// starting at version. Whether version and the iteration order it
-	// produces are globally consistent, or only consistent within each
-	// stream, is implementation-specific; consult the implementation before
-	// relying on cross-stream ordering.
-	LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error)
-
 	// Close releases any resources held by the EventStore, such as network
 	// connections or file handles. Implementations should make Close
 	// idempotent. The EventStore must not be used after Close is called.
@@ -54,4 +62,9 @@ type AppendResult struct {
 	// NextExpectedVersion is the version the stream's next [Revision] should
 	// use.
 	NextExpectedVersion uint64
+	// GlobalPosition is the [Envelope.GlobalPosition] of the last event
+	// appended, or 0 if nothing was appended or the store does not report
+	// it. Pass it to projection.Runner.WaitUntil to wait until a
+	// projection reflects this append.
+	GlobalPosition uint64
 }

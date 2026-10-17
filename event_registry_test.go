@@ -255,8 +255,7 @@ func TestRegisterEventReturnsNewInstance(t *testing.T) {
 	})
 
 	// This reproduces the exact decode path used by every persistent event
-	// store, e.g. eventstore/file/filestorage.go:231-239 and
-	// eventstore/postgres/eventstore.go:268.
+	// store, such as the file and postgres event stores.
 	t.Run("decoding two stored events yields independent values", func(t *testing.T) {
 		resetRegistry(t)
 

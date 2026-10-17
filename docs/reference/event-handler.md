@@ -6,7 +6,7 @@
 func OnEvent[T Event](fn func(ctx context.Context, ev T) error) EventHandler
 ```
 
-Creates a strongly-typed `EventHandler` for a specific event type `T`. When dispatched an event of the wrong type, it returns `*ErrSkippedEvent` (not treated as an error by the bus).
+Creates a strongly-typed `EventHandler` for a specific event type `T`. When dispatched an event of the wrong type, it returns `*SkippedEventError` (not treated as an error by the bus).
 
 ```go
 handler := eventsourcing.OnEvent(func(ctx context.Context, ev *events.TaskCreated) error {
@@ -52,7 +52,7 @@ processor := eventsourcing.NewEventGroupProcessor(
 func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error
 ```
 
-Routes the event to the matching handler. Returns `*ErrSkippedEvent` if no handler is registered for this event type.
+Routes the event to the matching handler. Returns `*SkippedEventError` if no handler is registered for this event type.
 
 ```go
 func (p *EventGroupProcessor) StreamFilter() []string

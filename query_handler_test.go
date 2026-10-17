@@ -95,3 +95,45 @@ func TestNewQueryHandlerFunc(t *testing.T) {
 		})
 	}
 }
+
+func TestWrapQueryHandler_DiscardsResultOnErrorWhenMiddlewarePresent(t *testing.T) {
+
+	wantErr := errors.New("partial failure")
+
+	handler := func(ctx context.Context, q GetTaskQuery) (*TaskResult, error) {
+		// A handler that intentionally returns a non-zero result alongside
+		// an error, e.g. "here's what I found before the failure".
+		return &TaskResult{Title: "partial-data"}, wantErr
+	}
+
+	t.Run("no middleware: result is preserved alongside the error", func(t *testing.T) {
+		bus := NewQueryBus()
+		RegisterQueryHandler(bus, NewQueryHandlerFunc(handler))
+		gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+
+		result, err := gateway(context.Background(), GetTaskQuery{TaskID: "1"})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
+		}
+		if result == nil || result.Title != "partial-data" {
+			t.Fatalf("result = %#v, want partial data preserved alongside the error", result)
+		}
+	})
+
+	t.Run("with middleware: result is silently zeroed on error", func(t *testing.T) {
+		bus := NewQueryBus()
+		bus.Use(func(next QueryGateway[Query, any]) QueryGateway[Query, any] {
+			return next // a no-op passthrough middleware, e.g. logging/telemetry
+		})
+		RegisterQueryHandler(bus, NewQueryHandlerFunc(handler))
+		gateway := NewQueryGateway[GetTaskQuery, *TaskResult](bus)
+
+		result, err := gateway(context.Background(), GetTaskQuery{TaskID: "1"})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("error = %v, want %v", err, wantErr)
+		}
+		if result == nil || result.Title != "partial-data" {
+			t.Errorf("result = %#v, want partial data preserved alongside the error, same as the no-middleware case", result)
+		}
+	})
+}

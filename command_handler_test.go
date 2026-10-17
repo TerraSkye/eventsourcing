@@ -23,10 +23,11 @@ type testEvent struct {
 
 func (e testEvent) AggregateID() string { return e.agg }
 func (e testEvent) EventType() string   { return e.typ }
+func (e testEvent) CommandType() string { return "testEvent" }
 
 // testIterator wraps the Iterator[*Envelope] constructor helpers.
-func newSliceEnvelopeIterator(envs []*Envelope) *Iterator[*Envelope] {
-	return NewSliceIterator(envs)
+func newSliceEnvelopeIterator(ctx context.Context, envs []*Envelope) *Iterator[*Envelope] {
+	return NewSliceIterator(ctx, envs)
 }
 
 type testStore struct {
@@ -49,9 +50,6 @@ func (s *testStore) LoadStream(ctx context.Context, id string) (*Iterator[*Envel
 func (s *testStore) LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error) {
 	s.loadCalled++
 	return s.loadFn(ctx, id, version)
-}
-func (s *testStore) LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error) {
-	return nil, nil
 }
 func (s *testStore) Close() error { return nil }
 
@@ -92,8 +90,10 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 
 	// produce an iterator that returns an error on Next
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		it := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
+		it := NewIteratorFunc(ctx, func(ctx context.Context) (*Envelope, error) {
 			return nil, errors.New("iterator fail")
+		}, func() error {
+			return nil
 		})
 		return it, nil
 	}
@@ -114,7 +114,7 @@ func TestNewCommandHandler_IteratorErr(t *testing.T) {
 func TestNewCommandHandler_DecideError_BusinessRuleViolation(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(t.Context(), nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns an error")
@@ -135,9 +135,9 @@ func TestNewCommandHandler_DecideError_BusinessRuleViolation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected decide's error to be returned")
 	}
-	var violation *ErrBusinessRuleViolation
+	var violation *BusinessRuleViolationError
 	if !errors.As(err, &violation) {
-		t.Fatalf("expected error to wrap *ErrBusinessRuleViolation, got: %v", err)
+		t.Fatalf("expected error to wrap *BusinessRuleViolationError, got: %v", err)
 	}
 	if !errors.Is(err, decideErr) {
 		t.Fatalf("expected error chain to contain decide's original error, got: %v", err)
@@ -148,7 +148,7 @@ func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		// no prior events
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(t.Context(), nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		t.Fatalf("Save should not be called when decide returns no events")
@@ -194,7 +194,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 		OccurredAt: time.Now(),
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
+		return newSliceEnvelopeIterator(ctx, []*Envelope{prior}), nil
 	}
 
 	// Check payload saved
@@ -257,7 +257,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{Successful: false}, fmt.Errorf("disk full")
@@ -286,7 +286,7 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 	store := &testStore{}
 	// no prior events
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 
 	callCount := 0
@@ -335,7 +335,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 		OccurredAt: time.Now(),
 	}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator([]*Envelope{prior}), nil
+		return newSliceEnvelopeIterator(ctx, []*Envelope{prior}), nil
 	}
 
 	var seenRevision StreamState
@@ -386,11 +386,11 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 	// event that competing writer landed.
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		if store.loadCalled == 1 {
-			return newSliceEnvelopeIterator([]*Envelope{
+			return newSliceEnvelopeIterator(ctx, []*Envelope{
 				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
 			}), nil
 		}
-		return newSliceEnvelopeIterator([]*Envelope{
+		return newSliceEnvelopeIterator(ctx, []*Envelope{
 			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
 		}), nil
 	}
@@ -440,7 +440,7 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 func TestNewCommandHandler_ExplicitRevision_ConflictNotRetried(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(0), ActualRevision: Revision(1)}
@@ -517,11 +517,11 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		if store.loadCalled == 1 {
-			return newSliceEnvelopeIterator([]*Envelope{
+			return newSliceEnvelopeIterator(ctx, []*Envelope{
 				{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "old"}, Version: 1, OccurredAt: time.Now()},
 			}), nil
 		}
-		return newSliceEnvelopeIterator([]*Envelope{
+		return newSliceEnvelopeIterator(ctx, []*Envelope{
 			{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "foreign"}, Version: 2, OccurredAt: time.Now()},
 		}), nil
 	}
@@ -564,7 +564,7 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 	store := &testStore{}
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-		return newSliceEnvelopeIterator(nil), nil
+		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		// verify metadata merged and overwritten by later extractor
@@ -602,13 +602,13 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 // for GitHub issue #24: when decide produces multiple events, every envelope
 // in the batch used to get the same *map[string]any* instance for Metadata,
 // so mutating one envelope's metadata after the fact (e.g. a per-event
-// causation_id, as otel.TelemetryStore.Save adds) silently mutated every
+// causation_id, as telemetry.TelemetryStore.Save adds) silently mutated every
 // other envelope's metadata too.
 func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
 	var savedEnvelopes []Envelope
 	store := &testStore{
 		loadFn: func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
-			return newSliceEnvelopeIterator(nil), nil
+			return newSliceEnvelopeIterator(ctx, nil), nil
 		},
 		saveFn: func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 			savedEnvelopes = envelopes
@@ -664,7 +664,7 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 	callCount := 0
 	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
 		callCount = 0 // reset for each load call
-		iter := NewIteratorFunc(func(ctx context.Context) (*Envelope, error) {
+		iter := NewIteratorFunc(ctx, func(ctx context.Context) (*Envelope, error) {
 			callCount++
 			if callCount == 1 {
 				// First event succeeds
@@ -678,6 +678,8 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 			// Second event fails - simulating an unregistered event error
 			// This is the error that would come from NewEventByName in KurrentDB
 			return nil, fmt.Errorf("cannot create event %q: %w", "UnknownEvent", ErrEventNotRegistered)
+		}, func() error {
+			return nil
 		})
 		return iter, nil
 	}
@@ -716,5 +718,368 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 	}
 	if !strings.Contains(errStr, "iter failed") {
 		t.Fatalf("expected error message to contain 'iter failed', got: %v", errStr)
+	}
+}
+
+// TestNewCommandHandler_PinnedRevisionSkipsStateFolding documents a bug: see
+// .bug/command-handler-pinned-revision-skips-state-folding.md.
+//
+// WithStreamState(Revision(N)) for N > 0 is documented as "the stream must
+// be at exactly that version" — a save precondition the caller explicitly
+// asserted. But NewCommandHandler also uses that same Revision(N) value as
+// the *load* starting point (LoadStreamFrom(id, Revision(N))), and every
+// real EventStore implementation's LoadStreamFrom treats Revision(N) as
+// "N events already consumed, resume strictly after N". So when the
+// assertion is accurate (the stream really is at version N), the load
+// returns zero events, evolve is never called for the N pre-existing
+// events, and decide is invoked against initialState() instead of the
+// aggregate's real, current state.
+func TestNewCommandHandler_PinnedRevisionFoldsFullState(t *testing.T) {
+
+	store := &testStore{}
+
+	// Simulate a real backend: the stream already has 3 events. Every real
+	// EventStore implementation in this repo (memory, file, postgres)
+	// returns only events with Version > N from LoadStreamFrom(id,
+	// Revision(N)) — this loadFn mirrors that exclusive convention exactly.
+	allEvents := []*Envelope{
+		{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "e"}, Version: 1},
+		{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "e"}, Version: 2},
+		{EventID: uuid.New(), StreamID: "s", Event: testEvent{agg: "s", typ: "e"}, Version: 3},
+	}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		// Revision(N) resumes strictly after N; anything else, Any{}
+		// included, reads from the beginning -- the same split every real
+		// implementation makes.
+		var after uint64
+		if rev, ok := from.(Revision); ok {
+			after = uint64(rev)
+		}
+		var out []*Envelope
+		for _, e := range allEvents {
+			if e.Version > after {
+				out = append(out, e)
+			}
+		}
+		return newSliceEnvelopeIterator(ctx, out), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+	}
+
+	var sawState int
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s + 1 }, // each evolved event increments state by 1
+		func(s int, cmd testEvent) ([]Event, error) {
+			sawState = s
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithStreamState(Revision(3)), // caller asserts the stream already has exactly 3 events
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if sawState != 3 {
+		t.Fatalf("expected decide to see state folded from the 3 prior events (state=3), got state=%d", sawState)
+	}
+}
+
+// TestNewCommandHandler_NilRetryStrategyPanicsInsteadOfNoRetry verifies
+// handlerOptions.RetryStrategy's doc comment promise ("If nil, no retries
+// are performed") holds: WithRetryStrategy(nil) behaves like a no-retry
+// strategy instead of leaving RetryStrategy nil, which would otherwise
+// panic on the very first command dispatch (backoff.RetryWithData calls
+// methods on a nil backoff.BackOff before ever checking for nil).
+func TestNewCommandHandler_NilRetryStrategyPanicsInsteadOfNoRetry(t *testing.T) {
+
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		t.Fatalf("Save should not be called when decide returns no events")
+		return AppendResult{}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) { return nil, nil },
+		WithRetryStrategy(nil),
+	)
+
+	// Per handlerOptions.RetryStrategy's doc comment, this should behave as
+	// "no retries performed" and return a normal successful result. Instead
+	// it panics inside backoff.RetryWithData.
+	_, err := handler(context.Background(), testEvent{agg: "a", typ: "t"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestNewCommandHandler_DecideError_ReportsCurrentVersionNotZero verifies
+// that the decide-error (business rule violation) branch reports
+// AppendResult.NextExpectedVersion as lastVersion, the version already
+// present in the stream -- consistent with every other "nothing was saved"
+// outcome of NewCommandHandler, such as a load error, an iterator error, or
+// the zero-events success case (see TestNewCommandHandler_NoEvents_NoSave
+// above) -- rather than the type's zero value regardless of how many events
+// were already loaded from the stream.
+func TestNewCommandHandler_DecideError_ReportsCurrentVersionNotZero(t *testing.T) {
+	store := &testStore{}
+
+	// Simulate a stream that already has 3 prior events.
+	prior := []*Envelope{
+		{EventID: uuid.New(), StreamID: "agg-1", Event: testEvent{agg: "agg-1", typ: "old"}, Version: 1, OccurredAt: time.Now()},
+		{EventID: uuid.New(), StreamID: "agg-1", Event: testEvent{agg: "agg-1", typ: "old"}, Version: 2, OccurredAt: time.Now()},
+		{EventID: uuid.New(), StreamID: "agg-1", Event: testEvent{agg: "agg-1", typ: "old"}, Version: 3, OccurredAt: time.Now()},
+	}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(ctx, prior), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		t.Fatalf("Save should not be called when decide returns an error")
+		return AppendResult{}, nil
+	}
+
+	decideErr := errors.New("insufficient funds")
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s + 1 },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return nil, decideErr
+		},
+	)
+
+	res, err := handler(context.Background(), testEvent{agg: "agg-1", typ: "t"})
+	if err == nil {
+		t.Fatalf("expected decide's error to be returned")
+	}
+	var violation *BusinessRuleViolationError
+	if !errors.As(err, &violation) {
+		t.Fatalf("expected error to wrap *BusinessRuleViolationError, got: %v", err)
+	}
+
+	// The stream is unchanged at version 3 -- exactly the same situation as
+	// TestNewCommandHandler_NoEvents_NoSave's "nothing saved" case, which
+	// correctly reports the loaded version. This should too.
+	if res.NextExpectedVersion != 3 {
+		t.Fatalf("expected NextExpectedVersion to report the stream's current version 3 (nothing was saved), got %d", res.NextExpectedVersion)
+	}
+}
+
+// TestNewCommandHandler_ConflictReportsActualRevisionNotGuess verifies that
+// on a save conflict, NewCommandHandler's returned AppendResult.
+// NextExpectedVersion reflects the stream's actual current version — which
+// the store reports via the conflict's ActualRevision field — rather than
+// guessing lastVersion+1 (the version the handler merely *attempted* to
+// save at, which only happens to be correct when exactly one competing
+// event landed between load and save).
+func TestNewCommandHandler_ConflictReportsActualRevisionNotGuess(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		// The handler loads an empty stream (lastVersion stays 0).
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		// By the time Save runs, five foreign events have already landed —
+		// the store reports the stream's true current version as 5.
+		return AppendResult{}, &StreamRevisionConflictError{
+			Stream: "s", ExpectedRevision: Revision(0), ActualRevision: Revision(5),
+		}
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		WithStreamState(Revision(0)), // pinned: conflict is returned immediately, not retried
+	)
+
+	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c", val: time.Now().String()})
+	if err == nil {
+		t.Fatalf("expected a conflict error")
+	}
+	var conflict *StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("expected error to wrap *StreamRevisionConflictError, got: %v", err)
+	}
+
+	if res.NextExpectedVersion != 5 {
+		t.Fatalf("expected NextExpectedVersion to reflect the conflict's actual current revision (5), got %d", res.NextExpectedVersion)
+	}
+}
+
+// TestNewCommandHandler_AutoConvergeConflictErrorLosesDiagnosticContext
+// documents a bug: on the autoConverge (default Any{}) conflict branch,
+// NewCommandHandler returns the bare *StreamRevisionConflictError from
+// Save, unwrapped by any fmt.Errorf context — unlike every other error
+// path in this same function (load error, iterator error, decide error,
+// generic save error, and even the pinned-Revision/NoStream conflict
+// branch), which all wrap the underlying error with
+// "handle command %T for aggregate %q (streamID %q): ...: %w". Once
+// backoff.RetryWithData's BackOff is exhausted (or, as here, the default
+// zero-retry &backoff.StopBackOff{} is used), that raw error is exactly
+// what NewCommandHandler's caller receives, silently losing the command
+// type, aggregate ID, and stream ID that would otherwise be available for
+// diagnosing the conflict.
+func TestNewCommandHandler_AutoConvergeConflictErrorLosesDiagnosticContext(t *testing.T) {
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		return AppendResult{}, &StreamRevisionConflictError{
+			Stream: "s", ExpectedRevision: Revision(0), ActualRevision: Revision(1),
+		}
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
+		},
+		// default WithStreamState(Any{}) -> autoConverge; default
+		// RetryStrategy is &backoff.StopBackOff{}, i.e. zero retries, so
+		// the conflict is returned on the very first attempt.
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "agg-123", typ: "SomeCommand", val: time.Now().String()})
+	if err == nil {
+		t.Fatalf("expected a conflict error")
+	}
+
+	if !strings.Contains(err.Error(), "agg-123") {
+		t.Fatalf("expected error to retain the aggregate ID for diagnosis, got: %v", err)
+	}
+}
+
+// TestNewCommandHandler_AutoConvergeDefaultDoesNotPinEmptyStreamRevision
+// documents a bug: see .bug/command-handler-autoconverge-empty-stream-skips-concurrency-check.md.
+//
+// With the default WithStreamState(Any{}) configuration (autoConverge),
+// NewCommandHandler's own doc comment says a save "saves against the
+// revision it just loaded" so that a conflicting concurrent writer is
+// caught and the cycle retried. But when the loaded stream is empty (a
+// brand-new aggregate), the local `revision` variable is never advanced
+// past the caller's original Any{} value, so Save ends up being called
+// with Any{} -- which every EventStore implementation in this repo treats
+// as "skip the concurrency check entirely". Two commands racing to create
+// the same new aggregate therefore both succeed instead of one being
+// caught as a conflict and retried/rejected.
+func TestNewCommandHandler_AutoConvergeDefaultDoesNotPinEmptyStreamRevision(t *testing.T) {
+
+	store := &testStore{}
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		// Always looks like a brand-new, empty stream -- exactly what a real
+		// EventStore's LoadStreamFrom returns for an aggregate that has
+		// never been saved to before.
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+
+	var seenRevision StreamState
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		seenRevision = revision
+		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "created"}}, nil
+		},
+		// No WithStreamState option: the default is Any{}, the common case.
+	)
+
+	_, err := handler(context.Background(), testEvent{agg: "acc-1", typ: "create"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := seenRevision.(Any); ok {
+		t.Fatalf("Save was called with Any{} for a brand-new (0-event) stream -- "+
+			"this performs NO concurrency check at all, so a second concurrent "+
+			"creation command racing this one would also succeed instead of "+
+			"being caught as a conflict and retried/rejected; expected "+
+			"Revision(0), got %#v", seenRevision)
+	}
+
+	// Revision(0) specifically, not NoStream{}: a store reports a violated
+	// Revision as a StreamRevisionConflictError, which the autoConverge path
+	// retries, where a violated NoStream is ErrStreamExists, which is
+	// permanent.
+	if got, ok := seenRevision.(Revision); !ok || got != 0 {
+		t.Fatalf("Save revision = %#v, want Revision(0)", seenRevision)
+	}
+}
+
+// TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate is the
+// end of the same story: with the empty stream's revision pinned, a second
+// command that still loads the stream as empty -- what both racers see when
+// they load before either saves -- must lose to the first rather than
+// appending a duplicate creation event.
+func TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate(t *testing.T) {
+	store := &testStore{}
+
+	// Every load looks empty, which is what makes the race deterministic:
+	// both commands decide against a brand-new aggregate.
+	store.loadFn = func(ctx context.Context, stream string, from StreamState) (*Iterator[*Envelope], error) {
+		return newSliceEnvelopeIterator(ctx, nil), nil
+	}
+
+	// A minimal stand-in for a real store's Revision check, matching
+	// memory.EventStore: a mismatch is a StreamRevisionConflictError.
+	var storedVersion uint64
+	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
+		if rev, ok := revision.(Revision); ok && uint64(rev) != storedVersion {
+			return AppendResult{}, &StreamRevisionConflictError{
+				Stream:           envelopes[0].StreamID,
+				ExpectedRevision: rev,
+				ActualRevision:   Revision(storedVersion),
+			}
+		}
+		storedVersion += uint64(len(envelopes))
+		return AppendResult{Successful: true, NextExpectedVersion: storedVersion}, nil
+	}
+
+	handler := NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) {
+			return []Event{testEvent{agg: cmd.AggregateID(), typ: "created"}}, nil
+		},
+	)
+
+	if _, err := handler(context.Background(), testEvent{agg: "acc-1", typ: "create"}); err != nil {
+		t.Fatalf("first create: unexpected error: %v", err)
+	}
+
+	_, err := handler(context.Background(), testEvent{agg: "acc-1", typ: "create"})
+	if err == nil {
+		t.Fatal("second create succeeded: both commands appended a creation event to the same new stream")
+	}
+
+	var conflict *StreamRevisionConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("second create: expected a *StreamRevisionConflictError, got: %v", err)
+	}
+
+	if storedVersion != 1 {
+		t.Fatalf("stream holds %d events, want 1", storedVersion)
 	}
 }
