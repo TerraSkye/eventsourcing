@@ -47,6 +47,13 @@ release may break the API; every break is listed under **Breaking**.
   | `projection/memory.NewStore` | `memory.NewProjectionStore` |
   | `eventstore/file.NewFileStore` | `file.NewEventStore` |
   | `eventbus/file.NewFileEventBus` | `file.NewEventBus` |
+  | `eventstore/postgres.NewEventStore` | `postgres.NewEventStore` |
+  | `eventbus/postgres.NewEventBus` | `postgres.NewEventBus` |
+  | `projection/postgres.NewStore` | `postgres.NewProjectionStore` |
+
+  `postgres.Schema` (also shipped as `postgres/schema.sql`) creates every
+  table the package uses, replacing `eventstore/postgres/schema.sql` and
+  `eventbus/postgres/schema.sql`.
 
 ### Added
 

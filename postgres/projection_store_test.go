@@ -4,74 +4,17 @@ package postgres_test
 
 import (
 	"context"
-	"log"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/terraskye/eventsourcing/postgres"
 	"github.com/terraskye/eventsourcing/projection"
-	"github.com/terraskye/eventsourcing/projection/postgres"
 	"github.com/terraskye/eventsourcing/projection/projectiontest"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-var testDSN string
-
-func TestMain(m *testing.M) {
-	ctx := context.Background()
-	pgc, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("testdb"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-	)
-	if err != nil {
-		log.Fatalf("start postgres container: %v", err)
-	}
-
-	testDSN, err = pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		log.Fatalf("get connection string: %v", err)
-	}
-
-	pool, err := pgxpool.New(ctx, testDSN)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
-	// pgxpool.New is lazy; ping with retries to wait for the container to be
-	// fully accepting connections.
-	for i := range 20 {
-		if err = pool.Ping(ctx); err == nil {
-			break
-		}
-		if i == 19 {
-			log.Fatalf("ping postgres: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if _, err = pool.Exec(ctx, postgres.Schema); err != nil {
-		log.Fatalf("apply schema: %v", err)
-	}
-	pool.Close()
-
-	code := m.Run()
-	_ = pgc.Terminate(ctx)
-	os.Exit(code)
-}
-
-func newPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	pool, err := pgxpool.New(t.Context(), testDSN)
-	if err != nil {
-		t.Fatalf("connect pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
 func TestStoreAcceptance(t *testing.T) {
-	projectiontest.StoreAcceptanceTest(t, postgres.NewStore(newPool(t)))
+	projectiontest.StoreAcceptanceTest(t, postgres.NewProjectionStore(newPool(t)))
 }
 
 // TestCommit_BatchLongerThanTTLKeepsClaim checks that a Claim made while a
@@ -80,7 +23,7 @@ func TestStoreAcceptance(t *testing.T) {
 // not the start of its transaction.
 func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	ctx := t.Context()
-	store := postgres.NewStore(newPool(t))
+	store := postgres.NewProjectionStore(newPool(t))
 	name := "long-batch-" + uuid.NewString()
 	const ttl = 300 * time.Millisecond
 	a := projection.Lease{Name: name, Segment: 0, Owner: "a"}

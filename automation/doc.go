@@ -54,7 +54,7 @@
 //
 //	ordersToShip := shipping.NewOrdersToShip(pool)
 //	todoList := projection.NewRunner(shipping.NewProjection(),
-//		eventStore, postgres.NewStore(pool))
+//		eventStore, postgres.NewProjectionStore(pool))
 //
 //	ship := automation.New("ship-orders", todoList,
 //		ordersToShip.Claim,

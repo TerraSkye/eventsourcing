@@ -20,7 +20,7 @@ A runner needs three things:
 
 1. A `projection.Definition`: the projection's name, its handler, and the event types it handles.
 2. An `eventsourcing.GlobalReader` to read the log from. The memory, file, Postgres and KurrentDB event stores all implement it.
-3. A `projection.Store` that holds checkpoints, claims and status. Use `memory` for in-memory read models and tests, and `projection/postgres` for read models in Postgres.
+3. A `projection.Store` that holds checkpoints, claims and status. Use `memory` for in-memory read models and tests, and `postgres` for read models in Postgres.
 
 ## Step 1: Define the projection
 
@@ -107,12 +107,12 @@ With `memory.NewProjectionStore()` the checkpoint lives in memory too, so the pr
 
 ## Store the read model in Postgres
 
-For a durable read model, use `projection/postgres`. It runs every batch in one transaction: the handler's writes and the checkpoint move commit together, so each event is applied exactly once.
+For a durable read model, use `postgres.NewProjectionStore`. It runs every batch in one transaction: the handler's writes and the checkpoint move commit together, so each event is applied exactly once.
 
 Create the tables once, with your migrations or at startup:
 
 ```go
-_, err := pool.Exec(ctx, postgres.Schema) // projection/postgres
+_, err := pool.Exec(ctx, postgres.Schema)
 ```
 
 Here the read model is the `tasks` table, so the projection keeps no state. The handler writes through the batch's transaction with `postgres.Tx(ctx)`, and the query reads the table with its own connection:
@@ -147,7 +147,7 @@ func NewQueryHandler(pool *pgxpool.Pool) *QueryHandler // SELECT ... FROM tasks
 ```
 
 ```go
-runner := projection.NewRunner(tasklist.NewProjection(), eventStore, postgres.NewStore(pool))
+runner := projection.NewRunner(tasklist.NewProjection(), eventStore, postgres.NewProjectionStore(pool))
 queries := tasklist.NewQueryHandler(pool)
 ```
 

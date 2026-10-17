@@ -1,25 +1,3 @@
-// Package postgres is the Postgres [projection.Store].
-//
-// It persists everything a projection needs — checkpoints, segment claims,
-// per-segment status, and (optionally) skipped-event records — in two
-// tables, and runs each Commit inside a single Postgres transaction, so
-// the read model's writes and the checkpoint move land together.
-//
-// Handlers reach the batch's transaction with [Tx]:
-//
-//	func handle(ctx context.Context, event eventsourcing.Event) error {
-//		switch e := event.(type) {
-//		case *events.TaskCreated:
-//			_, err := postgres.Tx(ctx).Exec(ctx,
-//				`INSERT INTO tasks (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-//				e.TaskID, e.Title)
-//			return err
-//		}
-//		return nil
-//	}
-//
-// The read model's tables and the tables [Schema] creates must live in the
-// same database, since they are written in one transaction.
 package postgres
 
 import (
@@ -33,48 +11,6 @@ import (
 	"github.com/terraskye/eventsourcing/projection"
 )
 
-// Schema creates the tables [Store] uses. It is idempotent; run it with
-// your migrations, or once at startup.
-//
-// projection_segments holds one row per segment of each projection: its
-// checkpoint, the owner currently claiming it with the claim's epoch and
-// heartbeat, the
-// projection version and replay boundary, and the status columns other
-// instances read with LoadStatuses. A single-segment projection uses
-// segment 0.
-//
-// projection_dead_letters holds events skipped under
-// [projection.Definition.OnError] on a non-stalling policy.
-const Schema = `
-CREATE TABLE IF NOT EXISTS projection_segments (
-    name          TEXT        NOT NULL,
-    segment       INT         NOT NULL,
-    position      BIGINT      NOT NULL DEFAULT 0,
-    version       INT         NOT NULL DEFAULT 0,
-    replay_until  BIGINT      NOT NULL DEFAULT 0,
-    phase         TEXT        NOT NULL DEFAULT 'starting',
-    head          BIGINT      NOT NULL DEFAULT 0,
-    last_error    TEXT,
-    owner         TEXT,
-    epoch         BIGINT      NOT NULL DEFAULT 0,
-    heartbeat     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (name, segment)
-);
-
-CREATE TABLE IF NOT EXISTS projection_dead_letters (
-    id             BIGSERIAL   PRIMARY KEY,
-    projection     TEXT        NOT NULL,
-    segment        INT         NOT NULL,
-    global_position BIGINT      NOT NULL,
-    event_type     TEXT        NOT NULL,
-    error          TEXT        NOT NULL,
-    skipped_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_projection_dead_letters_projection
-    ON projection_dead_letters (projection, global_position);
-`
-
 type txKey struct{}
 
 // Tx returns the transaction a [projection.Runner] opened for the batch
@@ -82,17 +18,17 @@ type txKey struct{}
 // model through it, so their writes commit together with the checkpoint.
 //
 // Tx panics if ctx carries no transaction, which means it was called
-// outside a projection that uses [Store]: a wiring mistake, not a
+// outside a projection that uses [ProjectionStore]: a wiring mistake, not a
 // condition to handle at run time.
 func Tx(ctx context.Context) pgx.Tx {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	if !ok {
-		panic("projection/postgres: Tx called outside a Store commit; wiring mistake")
+		panic("postgres: Tx called outside a ProjectionStore commit; wiring mistake")
 	}
 	return tx
 }
 
-// Store is the Postgres [projection.Store]. Create it with [NewStore].
+// ProjectionStore is the Postgres [projection.Store]. Create it with [NewProjectionStore].
 //
 // Commit and Reset lock the segment's row for the whole unit of work, so
 // a Claim by another instance waits for the batch to finish instead of
@@ -100,27 +36,27 @@ func Tx(ctx context.Context) pgx.Tx {
 // time of the write, rather than now(), the start of the transaction, so a
 // batch that ran longer than the claim's ttl still leaves a fresh
 // heartbeat behind and the waiting Claim is refused.
-type Store struct {
+type ProjectionStore struct {
 	db *pgxpool.Pool
 }
 
-// NewStore returns a Store that uses db. All operations open their own
+// NewProjectionStore returns a ProjectionStore that uses db. All operations open their own
 // transactions against db except for a Commit's unit of work, which is the
 // single transaction the handlers see through [Tx].
-func NewStore(db *pgxpool.Pool) *Store {
-	return &Store{db: db}
+func NewProjectionStore(db *pgxpool.Pool) *ProjectionStore {
+	return &ProjectionStore{db: db}
 }
 
 // Declare implements [projection.Store]: it creates the segment rows for name
 // on first use, and verifies the count has not changed since.
-func (s *Store) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (s *ProjectionStore) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	// Count existing rows; if none, insert; if some, verify the count.
 	var count int
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM projection_segments WHERE name = $1`, name,
 	).Scan(&count)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: declare %q: count segments: %w", name, err)
+		return fmt.Errorf("postgres: declare %q: count segments: %w", name, err)
 	}
 	if count == 0 {
 		return s.insertSegments(ctx, name, segments, replayUntil)
@@ -131,7 +67,7 @@ func (s *Store) Declare(ctx context.Context, name string, segments int, replayUn
 	return nil
 }
 
-func (s *Store) insertSegments(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (s *ProjectionStore) insertSegments(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	batch := &pgx.Batch{}
 	for i := 0; i < segments; i++ {
 		batch.Queue(
@@ -144,7 +80,7 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int, r
 	defer br.Close()
 	for i := 0; i < segments; i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("projection/postgres: declare %q segment %d: %w", name, i, err)
+			return fmt.Errorf("postgres: declare %q segment %d: %w", name, i, err)
 		}
 	}
 	return nil
@@ -155,7 +91,7 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int, r
 // A refresh of the current claim keeps its epoch; a takeover raises it.
 // On the right-hand side of SET, owner and epoch are the row's values
 // before the update.
-func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	var cp projection.Checkpoint
 	err := s.db.QueryRow(ctx, `
 		UPDATE projection_segments
@@ -172,7 +108,7 @@ func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
 	if err != nil {
-		return projection.Lease{}, projection.Checkpoint{}, false, fmt.Errorf("projection/postgres: claim %q segment %d: %w", l.Name, l.Segment, err)
+		return projection.Lease{}, projection.Checkpoint{}, false, fmt.Errorf("postgres: claim %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	return l, cp, true, nil
 }
@@ -180,7 +116,7 @@ func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration
 // Commit implements [projection.Store]. It runs fn in a transaction that
 // first locks the segment's row, so a Claim by another instance waits for
 // the batch instead of taking the segment over halfway.
-func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
 	return s.runTx(ctx, "commit", l, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := lockOwned(ctx, tx, l); err != nil {
 			return err
@@ -203,7 +139,7 @@ func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Ch
 			l.Owner, l.Epoch,
 		)
 		if err != nil {
-			return fmt.Errorf("projection/postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+			return fmt.Errorf("postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
 		}
 		return nil
 	})
@@ -211,7 +147,7 @@ func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Ch
 
 // Reset implements [projection.Store], in one transaction that locks the
 // segment's row like Commit does.
-func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
+func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	return s.runTx(ctx, "reset", l, func(ctx context.Context, tx pgx.Tx) error {
 		oldPos, err := lockOwned(ctx, tx, l)
 		if err != nil {
@@ -229,7 +165,7 @@ func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, w
 			l.Name, l.Segment, newVersion, oldPos, l.Owner, l.Epoch,
 		)
 		if err != nil {
-			return fmt.Errorf("projection/postgres: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+			return fmt.Errorf("postgres: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
 		}
 		return nil
 	})
@@ -253,7 +189,7 @@ func lockOwned(ctx context.Context, tx pgx.Tx, l projection.Lease) (uint64, erro
 		return 0, projection.ErrClaimLost
 	}
 	if err != nil {
-		return 0, fmt.Errorf("projection/postgres: lock %q segment %d: %w", l.Name, l.Segment, err)
+		return 0, fmt.Errorf("postgres: lock %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	if owner == nil || *owner != l.Owner || epoch != l.Epoch {
 		return 0, projection.ErrClaimLost
@@ -262,7 +198,7 @@ func lockOwned(ctx context.Context, tx pgx.Tx, l projection.Lease) (uint64, erro
 }
 
 // Release implements [projection.Store].
-func (s *Store) Release(ctx context.Context, l projection.Lease) error {
+func (s *ProjectionStore) Release(ctx context.Context, l projection.Lease) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET owner = NULL, phase = 'standby'
@@ -270,13 +206,13 @@ func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 		l.Name, l.Segment, l.Owner, l.Epoch,
 	)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: release %q segment %d: %w", l.Name, l.Segment, err)
+		return fmt.Errorf("postgres: release %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	return nil
 }
 
 // SaveStatus implements [projection.Store].
-func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
+func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
 	var lastErr any
 	if status.LastError != "" {
 		lastErr = status.LastError
@@ -288,7 +224,7 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 		l.Name, l.Segment, status.Phase.String(), status.Head, lastErr, l.Owner, l.Epoch,
 	)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: save status of %q segment %d: %w", l.Name, l.Segment, err)
+		return fmt.Errorf("postgres: save status of %q segment %d: %w", l.Name, l.Segment, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return projection.ErrClaimLost
@@ -297,7 +233,7 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 }
 
 // LoadStatuses returns the status of every segment of name.
-func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
+func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT segment, phase, position, version, head, last_error, owner,
 		       EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat))
@@ -307,7 +243,7 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 		name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
+		return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 	}
 	defer rows.Close()
 
@@ -324,7 +260,7 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 			ageSeconds float64
 		)
 		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds); err != nil {
-			return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
+			return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 		}
 		st := projection.Status{
 			Phase:    parsePhase(phase),
@@ -343,17 +279,17 @@ func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Sta
 		out = append(out, st)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("projection/postgres: load statuses of %q: %w", name, err)
+		return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 	}
 	return out, nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
 // inside the Commit that moves the checkpoint past the event.
-func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position uint64, eventType string, cause error) error {
+func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, position uint64, eventType string, cause error) error {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	if !ok {
-		return errors.New("projection/postgres: SaveDeadLetter called outside a Store commit")
+		return errors.New("postgres: SaveDeadLetter called outside a ProjectionStore commit")
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
@@ -362,7 +298,7 @@ func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position
 		l.Name, l.Segment, position, eventType, cause.Error(),
 	)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
+		return fmt.Errorf("postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
 	}
 	return nil
 }
@@ -371,10 +307,10 @@ func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position
 // rolling it back otherwise. fn's own errors are returned unchanged, so
 // [projection.ErrClaimLost] and handler errors reach the runner as they
 // are; op names the call in errors from beginning or committing.
-func (s *Store) runTx(ctx context.Context, op string, l projection.Lease, fn func(ctx context.Context, tx pgx.Tx) error) error {
+func (s *ProjectionStore) runTx(ctx context.Context, op string, l projection.Lease, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("projection/postgres: %s %q segment %d: begin: %w", op, l.Name, l.Segment, err)
+		return fmt.Errorf("postgres: %s %q segment %d: begin: %w", op, l.Name, l.Segment, err)
 	}
 	// Rollback after Commit is a no-op, and a failed rollback leaves
 	// nothing to clean up: the transaction ends with the connection.
@@ -383,7 +319,7 @@ func (s *Store) runTx(ctx context.Context, op string, l projection.Lease, fn fun
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("projection/postgres: %s %q segment %d: commit: %w", op, l.Name, l.Segment, err)
+		return fmt.Errorf("postgres: %s %q segment %d: commit: %w", op, l.Name, l.Segment, err)
 	}
 	return nil
 }
@@ -404,8 +340,8 @@ func parsePhase(s string) projection.Phase {
 	return projection.Starting
 }
 
-// Store implements both projection.Store and projection.DeadLetterStore.
+// ProjectionStore implements both projection.Store and projection.DeadLetterStore.
 var (
-	_ projection.Store           = (*Store)(nil)
-	_ projection.DeadLetterStore = (*Store)(nil)
+	_ projection.Store           = (*ProjectionStore)(nil)
+	_ projection.DeadLetterStore = (*ProjectionStore)(nil)
 )

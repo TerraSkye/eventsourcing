@@ -2,16 +2,13 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	cqrs "github.com/terraskye/eventsourcing"
 )
@@ -484,49 +481,4 @@ func WithFilterEvents(types []string) cqrs.SubscriberOption {
 		}
 		opts.filterEvents = types
 	}
-}
-
-func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
-	var (
-		globalID       int64
-		rawUUID        pgtype.UUID
-		streamID       string
-		streamPosition int64
-		eventType      string
-		payload        []byte
-		metadata       []byte
-		occurredAt     time.Time
-	)
-
-	if err := rows.Scan(&globalID, &rawUUID, &streamID, &streamPosition, &eventType, &payload, &metadata, &occurredAt); err != nil {
-		return nil, fmt.Errorf("scan envelope: %w", err)
-	}
-
-	ev, err := cqrs.NewEventByName(eventType)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create event %q: %w", eventType, err)
-	}
-
-	if err := json.Unmarshal(payload, ev); err != nil {
-		return nil, fmt.Errorf("cannot unmarshal event %q: %w", eventType, err)
-	}
-
-	var meta map[string]any
-	if len(metadata) > 0 {
-		if err := json.Unmarshal(metadata, &meta); err != nil {
-			meta = make(map[string]any)
-		}
-	} else {
-		meta = make(map[string]any)
-	}
-
-	return &cqrs.Envelope{
-		EventID:        uuid.UUID(rawUUID.Bytes),
-		StreamID:       streamID,
-		Event:          ev,
-		Metadata:       meta,
-		Version:        uint64(streamPosition),
-		GlobalPosition: uint64(globalID),
-		OccurredAt:     occurredAt,
-	}, nil
 }
