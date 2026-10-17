@@ -194,8 +194,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	// One loop per segment. The loops compete for the claims with the
 	// loops of every other instance of this program.
 	var wg sync.WaitGroup
+	wg.Add(r.segments)
 	for seg := range r.segments {
-		wg.Go(func() { r.runSegment(ctx, seg) })
+		go func() {
+			defer wg.Done()
+			r.runSegment(ctx, seg)
+		}()
 	}
 	wg.Wait()
 	return ctx.Err()

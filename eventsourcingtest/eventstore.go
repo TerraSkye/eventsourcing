@@ -233,10 +233,12 @@ func (a *acceptance) saveConcurrentRevisionOneWins(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make([]error, writers)
+	wg.Add(writers)
 	for i := range writers {
-		wg.Go(func() {
+		go func() {
+			defer wg.Done()
 			_, errs[i] = a.store.Save(t.Context(), envelopes(id, 2, 1), eventsourcing.Revision(1))
-		})
+		}()
 	}
 	wg.Wait()
 
