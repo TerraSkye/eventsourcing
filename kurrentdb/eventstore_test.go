@@ -5,21 +5,15 @@ package kurrentdb_test
 import (
 	"context"
 	"errors"
-	"fmt"
-	"log"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	cqrs "github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
-	kdbstore "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
+	kdb "github.com/terraskye/eventsourcing/kurrentdb"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 type CheckEvent struct {
@@ -28,55 +22,6 @@ type CheckEvent struct {
 
 func (CheckEvent) AggregateID() string { return "check" }
 func (CheckEvent) EventType() string   { return "CheckEvent" }
-
-var testDB *kurrentdb.Client
-
-// TestMain starts a single kurrentdb container for every test in this
-// package, so each test doesn't pay its own container-startup cost.
-func TestMain(m *testing.M) {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &CheckEvent{} })
-
-	ctx := context.Background()
-	req := testcontainers.ContainerRequest{
-		Image:        "kurrentplatform/kurrentdb:latest",
-		ExposedPorts: []string{"2113/tcp"},
-		Env: map[string]string{
-			"EVENTSTORE_INSECURE":        "true",
-			"EVENTSTORE_RUN_PROJECTIONS": "None",
-			"EVENTSTORE_MEM_DB":          "true",
-			"EVENTSTORE_CLUSTER_SIZE":    "1",
-		},
-		WaitingFor: wait.ForLog("IS LEADER... SPARTA!").WithStartupTimeout(60 * time.Second),
-	}
-	kc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		log.Fatalf("start kurrentdb container: %v", err)
-	}
-	defer kc.Terminate(ctx) //nolint:errcheck
-
-	host, err := kc.Host(ctx)
-	if err != nil {
-		log.Fatalf("get host: %v", err)
-	}
-	port, err := kc.MappedPort(ctx, "2113")
-	if err != nil {
-		log.Fatalf("get port: %v", err)
-	}
-
-	settings, err := kurrentdb.ParseConnectionString(fmt.Sprintf("esdb://%s:%s?tls=false", host, port.Port()))
-	if err != nil {
-		log.Fatalf("parse connection string: %v", err)
-	}
-	testDB, err = kurrentdb.NewClient(settings)
-	if err != nil {
-		log.Fatalf("new client: %v", err)
-	}
-
-	os.Exit(m.Run())
-}
 
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
@@ -101,7 +46,7 @@ func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envel
 // previously-seen revision re-delivered the last-consumed event a second
 // time, corrupting aggregate state by evolving it twice.
 func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	ctx := context.Background()
 	streamID := "check-inclusive"
 
@@ -151,7 +96,7 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 // $all carries KurrentDB's own records, such as $metadata, which ReadAll
 // must skip rather than fail to decode.
 func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	ctx := context.Background()
 	streamID := "check-readall-end"
 
@@ -199,7 +144,7 @@ func (BackoffProbeEvent) AggregateID() string { return "backoff-probe" }
 func (BackoffProbeEvent) EventType() string   { return "BackoffProbeEvent" }
 
 // TestSave_UsesConfiguredBackoffNotDefault verifies Save actually retries
-// with the [kdbstore.Option] backoff it's given via [kdbstore.WithBackoff],
+// with the [kdb.Option] backoff it's given via [kdb.WithBackoff],
 // rather than silently falling back to a fresh, unconfigured
 // backoff.NewExponentialBackOff() (default MaxElapsedTime 15m). It uses a
 // short test-only backoff instead of Save's real 30s default so the test
@@ -207,7 +152,7 @@ func (BackoffProbeEvent) EventType() string   { return "BackoffProbeEvent" }
 func TestSave_UsesConfiguredBackoffNotDefault(t *testing.T) {
 	const maxElapsed = 200 * time.Millisecond
 
-	store := kdbstore.NewEventStore(testDB, kdbstore.WithBackoff(func() backoff.BackOff {
+	store := kdb.NewEventStore(testDB, kdb.WithBackoff(func() backoff.BackOff {
 		b := backoff.NewExponentialBackOff()
 		b.MaxElapsedTime = maxElapsed
 		b.InitialInterval = 10 * time.Millisecond
@@ -277,7 +222,7 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 		t.Skip("appends and reads back 5001 events")
 	}
 
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	ctx := context.Background()
 	streamID := "count-probe-stream"
 
@@ -339,7 +284,7 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 // store does not yet.
 func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	ctx := context.Background()
 	streamID := "check-huge-revision-kurrentdb"
 
@@ -385,7 +330,7 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 // LoadStream now reports a missing stream as cqrs.ErrStreamNotFound, the
 // same sentinel packages memory and file use.
 func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	ctx := context.Background()
 
 	iter, err := store.LoadStream(ctx, "stream-that-does-not-exist")
@@ -414,10 +359,10 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 // TestAcceptance does not Close the store: that would close testDB, which
 // every other test in this package shares.
 func TestAcceptance(t *testing.T) {
-	eventsourcingtest.AcceptanceTest(t, kdbstore.NewEventStore(testDB))
+	eventsourcingtest.AcceptanceTest(t, kdb.NewEventStore(testDB))
 }
 
 func TestGlobalReaderAcceptance(t *testing.T) {
-	store := kdbstore.NewEventStore(testDB)
+	store := kdb.NewEventStore(testDB)
 	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }
