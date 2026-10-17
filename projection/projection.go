@@ -85,9 +85,9 @@ func (p ErrorPolicy) String() string {
 //
 //	func NewProjection(list *TaskList) projection.Definition {
 //		return projection.Definition{
-//			Name:    "task-list",
-//			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-//			Events:  []string{"TaskCreated", "TaskCompleted"},
+//			Name:       "task-list",
+//			Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+//			EventTypes: []string{"TaskCreated", "TaskCompleted"},
 //		}
 //	}
 //
@@ -96,11 +96,11 @@ func (p ErrorPolicy) String() string {
 // A durable projection adds Version and Reset so it can be rebuilt:
 //
 //	projection.Definition{
-//		Name:    "task-list",
-//		Handler: eventsourcing.NewEventHandlerFunc(handle),
-//		Events:  []string{"TaskCreated", "TaskCompleted"},
-//		Version: 2,
-//		Reset:   reset,
+//		Name:       "task-list",
+//		Handler:    eventsourcing.NewEventHandlerFunc(handle),
+//		EventTypes: []string{"TaskCreated", "TaskCompleted"},
+//		Version:    2,
+//		Reset:      reset,
 //	}
 //
 // A projection whose one instance cannot keep up is segmented:
@@ -108,7 +108,7 @@ func (p ErrorPolicy) String() string {
 //	projection.Definition{
 //		Name:       "order-summaries-v1",
 //		Handler:    eventsourcing.NewEventHandlerFunc(handle),
-//		Events:     []string{"OrderPlaced", "OrderShipped"},
+//		EventTypes: []string{"OrderPlaced", "OrderShipped"},
 //		Segments:   64,
 //		SegmentKey: projection.ByStreamID,
 //	}
@@ -131,7 +131,7 @@ type Definition struct {
 	// [*eventsourcing.EventGroupProcessor].
 	Handler eventsourcing.EventHandler
 
-	// Events lists the registered names of the event types Handler
+	// EventTypes lists the registered names of the event types Handler
 	// handles; the runner reads only these. For an
 	// [*eventsourcing.EventGroupProcessor], pass its StreamFilter.
 	//
@@ -139,13 +139,13 @@ type Definition struct {
 	// bump Version with it. Otherwise the runner carries on from its
 	// checkpoint, and every event of the new type stored before it is
 	// never applied.
-	Events []string
+	EventTypes []string
 
 	// Version is the version of the projection's code, stored with the
 	// checkpoint. When the runner starts a segment and finds a stored
 	// version different from this one, the segment is rebuilt before
 	// processing new events. Bump the version whenever the projection
-	// starts writing the read model differently, including when Events
+	// starts writing the read model differently, including when EventTypes
 	// gains a type; see Reset.
 	//
 	// A rebuild empties the read model until the runner has caught up

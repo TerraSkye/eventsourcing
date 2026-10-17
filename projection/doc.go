@@ -54,9 +54,9 @@
 //
 //	func NewProjection(list *TaskList) projection.Definition {
 //		return projection.Definition{
-//			Name:    "task-list",
-//			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-//			Events:  []string{"TaskCreated"},
+//			Name:       "task-list",
+//			Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+//			EventTypes: []string{"TaskCreated"},
 //		}
 //	}
 //
@@ -72,7 +72,7 @@
 //
 // A handler that prefers one method per event type can group them with
 // [eventsourcing.NewEventGroupProcessor], pass the group as Handler, and
-// pass the group's StreamFilter as Events.
+// pass the group's StreamFilter as EventTypes.
 //
 // A read model in Postgres is its tables, so the projection keeps no state
 // at all. Handlers write through the batch's transaction, and the query
@@ -80,9 +80,9 @@
 //
 //	func NewProjection() projection.Definition {
 //		return projection.Definition{
-//			Name:    "task-list",
-//			Handler: eventsourcing.NewEventHandlerFunc(handle),
-//			Events:  []string{"TaskCreated"},
+//			Name:       "task-list",
+//			Handler:    eventsourcing.NewEventHandlerFunc(handle),
+//			EventTypes: []string{"TaskCreated"},
 //		}
 //	}
 //
@@ -128,7 +128,7 @@
 //     has no Version: rebuild it under a new [Definition.Name].
 //   - Call [Runner.Rebuild] on the active instance.
 //
-// Adding an event type to [Definition.Events] counts as a change: without
+// Adding an event type to [Definition.EventTypes] counts as a change: without
 // a Version bump, events of the new type stored before the change are
 // never applied.
 //

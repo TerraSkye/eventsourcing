@@ -85,7 +85,7 @@ func (req *rebuildRequest) finish(err error) {
 // NewRunner creates a Runner for p against reader and store.
 //
 // It panics on wiring mistakes that would otherwise fail silently: an empty
-// Name, nil Handler/reader/store, no Events or an unregistered one,
+// Name, nil Handler/reader/store, no EventTypes or an unregistered one,
 // Version > 0 without Reset, or Segments > 1 without SegmentKey or with a
 // Version.
 func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Runner {
@@ -94,8 +94,8 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		panic("projection: Definition.Name is required")
 	case p.Handler == nil:
 		panic(fmt.Sprintf("projection %q: Handler is required", p.Name))
-	case len(p.Events) == 0:
-		panic(fmt.Sprintf("projection %q: Events is required", p.Name))
+	case len(p.EventTypes) == 0:
+		panic(fmt.Sprintf("projection %q: EventTypes is required", p.Name))
 	case reader == nil:
 		panic(fmt.Sprintf("projection %q: reader is required", p.Name))
 	case store == nil:
@@ -111,7 +111,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 	if segments > 1 && p.Version != 0 {
 		panic(fmt.Sprintf("projection %q: a segmented projection cannot have a Version; rebuild it under a new Name", p.Name))
 	}
-	for _, name := range p.Events {
+	for _, name := range p.EventTypes {
 		if _, err := eventsourcing.NewEventByName(name); err != nil {
 			panic(fmt.Sprintf("projection %q: event %q is not registered; register it with eventsourcing.RegisterEvent", p.Name, name))
 		}
@@ -327,6 +327,6 @@ func (r *Runner) claim(ctx context.Context, seg int) (Checkpoint, bool, error) {
 func (r *Runner) readOptions() eventsourcing.ReadOptions {
 	return eventsourcing.ReadOptions{
 		Limit:      r.p.BatchSize,
-		EventTypes: r.p.Events,
+		EventTypes: r.p.EventTypes,
 	}
 }

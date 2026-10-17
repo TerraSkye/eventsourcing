@@ -35,9 +35,9 @@ package tasklist
 
 func NewProjectionV2() projection.Definition {
     return projection.Definition{
-        Name:    "task-list-v2",
-        Handler: eventsourcing.NewEventHandlerFunc(handleV2),
-        Events:  []string{"TaskCreated", "TaskCompleted", "TaskRenamed"},
+        Name:       "task-list-v2",
+        Handler:    eventsourcing.NewEventHandlerFunc(handleV2),
+        EventTypes: []string{"TaskCreated", "TaskCompleted", "TaskRenamed"},
     }
 }
 

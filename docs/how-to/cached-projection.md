@@ -8,7 +8,7 @@ The `projection` package provides a `Runner` that does the reading, checkpointin
 
 ```
          ┌──────────────── Runner ─────────────────┐
-log ───► │ ReadAll(after checkpoint, Events) ──►   │
+log ───► │ ReadAll(after checkpoint, EventTypes) ─►│
          │   Handler.Handle(ctx, event) ...        │
          │   Store.Commit(read-model writes +      │
          │                checkpoint, one unit)    │
@@ -43,9 +43,9 @@ type TaskList struct {
 
 func NewProjection(list *TaskList) projection.Definition {
     return projection.Definition{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
@@ -67,7 +67,7 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 
 - `Name` keys the projection's checkpoint, so it must be unique and stable between releases.
 - `Handler` is any `eventsourcing.EventHandler`, the same type an event bus subscriber takes.
-- `Events` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `Events` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
+- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
 
 If you prefer one method per event type, group them and pass the group's filter:
 
@@ -78,9 +78,9 @@ func NewProjection(list *TaskList) projection.Definition {
         eventsourcing.OnEvent(list.onTaskCompleted),
     )
     return projection.Definition{
-        Name:    "task-list",
-        Handler: group,
-        Events:  group.StreamFilter(),
+        Name:       "task-list",
+        Handler:    group,
+        EventTypes: group.StreamFilter(),
     }
 }
 ```
@@ -122,9 +122,9 @@ package tasklist
 
 func NewProjection() projection.Definition {
     return projection.Definition{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
@@ -186,11 +186,11 @@ When you change how a projection writes its read model, rebuild it from the star
 ```go
 func NewProjection() projection.Definition {
     return projection.Definition{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
-        Version: 2,
-        Reset:   reset,
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
+        Version:    2,
+        Reset:      reset,
     }
 }
 
@@ -203,7 +203,7 @@ func reset(ctx context.Context) error {
 On start, a runner whose stored version differs from `Version` runs `Reset` and the checkpoint move back to zero in one unit of work, then processes the log again. `runner.Rebuild(ctx)` does the same on demand.
 
 !!! warning "Adding an event type is a change too"
-    Bump `Version` when you add a name to `Events`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
+    Bump `Version` when you add a name to `EventTypes`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
 
 A rebuild in place empties the read model: queries see an empty table until the runner has caught up again. For a large log, build the new version next to the old one instead; see [Rebuild a projection without downtime](./rebuild-without-downtime.md).
 
@@ -258,7 +258,7 @@ func NewProjection() projection.Definition {
     return projection.Definition{
         Name:       "order-summaries",
         Handler:    eventsourcing.NewEventHandlerFunc(handle),
-        Events:     []string{"OrderPlaced", "OrderShipped"},
+        EventTypes: []string{"OrderPlaced", "OrderShipped"},
         Segments:   16,
         SegmentKey: projection.ByStreamID,
     }

@@ -101,14 +101,14 @@ import (
 // NewProjection returns the projection that keeps list up to date.
 func NewProjection(list *TaskList) projection.Definition {
     return projection.Definition{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
 // handle applies one event to the task list. The runner calls it for every
-// event in Events, in the order they were stored.
+// event in EventTypes, in the order they were stored.
 func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
     l.mu.Lock()
     defer l.mu.Unlock()
@@ -130,7 +130,7 @@ func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
 
 - `Name` identifies the projection's checkpoint, so it must be unique and stay the same between releases.
 - `Handler` is called for every event the runner reads. `NewEventHandlerFunc` turns a function into an `eventsourcing.EventHandler`.
-- `Events` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
+- `EventTypes` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
 
 ## Step 4: Write the query handler
 
