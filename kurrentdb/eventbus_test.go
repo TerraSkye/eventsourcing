@@ -5,8 +5,6 @@ package kurrentdb_test
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -16,66 +14,15 @@ import (
 	"time"
 
 	cqrs "github.com/terraskye/eventsourcing"
-	kdbbus "github.com/terraskye/eventsourcing/eventbus/kurrentdb"
+	kdb "github.com/terraskye/eventsourcing/kurrentdb"
 
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 type leakEvent struct{}
 
 func (leakEvent) AggregateID() string { return "leak" }
 func (leakEvent) EventType() string   { return "leakEvent" }
-
-var testDB *kurrentdb.Client
-
-// TestMain starts a single kurrentdb container for every test in this
-// package, so each test doesn't pay its own container-startup cost.
-func TestMain(m *testing.M) {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &leakEvent{} })
-
-	ctx := context.Background()
-	req := testcontainers.ContainerRequest{
-		Image:        "kurrentplatform/kurrentdb:latest",
-		ExposedPorts: []string{"2113/tcp"},
-		Env: map[string]string{
-			"EVENTSTORE_INSECURE":        "true",
-			"EVENTSTORE_RUN_PROJECTIONS": "None",
-			"EVENTSTORE_MEM_DB":          "true",
-			"EVENTSTORE_CLUSTER_SIZE":    "1",
-		},
-		WaitingFor: wait.ForLog("IS LEADER... SPARTA!").WithStartupTimeout(60 * time.Second),
-	}
-	kc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		log.Fatalf("start kurrentdb container: %v", err)
-	}
-	defer kc.Terminate(ctx) //nolint:errcheck
-
-	host, err := kc.Host(ctx)
-	if err != nil {
-		log.Fatalf("get host: %v", err)
-	}
-	port, err := kc.MappedPort(ctx, "2113")
-	if err != nil {
-		log.Fatalf("get port: %v", err)
-	}
-
-	settings, err := kurrentdb.ParseConnectionString(fmt.Sprintf("esdb://%s:%s?tls=false", host, port.Port()))
-	if err != nil {
-		log.Fatalf("parse connection string: %v", err)
-	}
-	testDB, err = kurrentdb.NewClient(settings)
-	if err != nil {
-		log.Fatalf("new client: %v", err)
-	}
-
-	os.Exit(m.Run())
-}
 
 func countGoroutinesCreatedBy(substr string) int {
 	buf := make([]byte, 4<<20)
@@ -91,9 +38,9 @@ func countGoroutinesCreatedBy(substr string) int {
 // life, unaffected by Close.
 func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	const n = 10
-	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/kurrentdb.(*EventBus).Subscribe"
+	const createdBy = "created by github.com/terraskye/eventsourcing/kurrentdb.(*EventBus).Subscribe"
 
-	bus := kdbbus.NewEventBus(testDB, 50)
+	bus := kdb.NewEventBus(testDB, 50)
 
 	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
 		return nil
@@ -133,13 +80,13 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 // so every Subscribe call passing WithFilterStream(nil) failed
 // unconditionally instead of being treated as "no filter".
 func TestSubscribe_WithFilterStreamEmptyAlwaysFails(t *testing.T) {
-	bus := kdbbus.NewEventBus(testDB, 50)
+	bus := kdb.NewEventBus(testDB, 50)
 
 	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
 		return nil
 	})
 
-	err := bus.Subscribe(context.Background(), "filter-stream-empty-sub", handler, kdbbus.WithFilterStream(nil))
+	err := bus.Subscribe(context.Background(), "filter-stream-empty-sub", handler, kdb.WithFilterStream(nil))
 	if err != nil {
 		t.Fatalf("Subscribe with an empty stream filter should succeed (treated as no filter), got error: %v", err)
 	}
@@ -155,7 +102,7 @@ func TestSubscribe_WithFilterStreamEmptyAlwaysFails(t *testing.T) {
 // KurrentDB client — this isolates the middlewares race from needing a live
 // server.
 func TestUse_RacesWithSubscribe(t *testing.T) {
-	bus := kdbbus.NewEventBus(nil, 10)
+	bus := kdb.NewEventBus(nil, 10)
 
 	if err := bus.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -197,7 +144,7 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 // filtering — deliver everything".
 func TestWithFilterEvents_EmptySliceMeansCatchAll(t *testing.T) {
 	opts := &kurrentdb.PersistentAllSubscriptionOptions{}
-	kdbbus.WithFilterEvents(nil)(opts)
+	kdb.WithFilterEvents(nil)(opts)
 
 	if opts.Filter == nil {
 		// No filter at all is also a valid way to mean "catch-all" — the
@@ -229,7 +176,7 @@ func TestWithFilterEvents_EmptySliceMeansCatchAll(t *testing.T) {
 // then reports as if reconnection attempts had been exhausted.
 func TestClose_SendsSpuriousErrorOnNormalShutdown(t *testing.T) {
 
-	bus := kdbbus.NewEventBus(testDB, 10)
+	bus := kdb.NewEventBus(testDB, 10)
 
 	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
 		return nil
@@ -299,8 +246,8 @@ func TestSubscribe_EnsureSubscriptionErrorDeadlocksBus(t *testing.T) {
 	for attempt := 0; attempt < attempts; attempt++ {
 		name := fmt.Sprintf("deadlock-race-sub-%d-%d", time.Now().UnixNano(), attempt)
 
-		bus1 := kdbbus.NewEventBus(testDB, 10)
-		bus2 := kdbbus.NewEventBus(testDB, 10)
+		bus1 := kdb.NewEventBus(testDB, 10)
+		bus2 := kdb.NewEventBus(testDB, 10)
 
 		var wg sync.WaitGroup
 		var err1, err2 error
@@ -320,7 +267,7 @@ func TestSubscribe_EnsureSubscriptionErrorDeadlocksBus(t *testing.T) {
 		close(start)
 		wg.Wait()
 
-		var failedBus *kdbbus.EventBus
+		var failedBus *kdb.EventBus
 		switch {
 		case err1 != nil && err2 == nil:
 			failedBus = bus1
@@ -357,7 +304,7 @@ func TestSubscribe_EnsureSubscriptionErrorDeadlocksBus(t *testing.T) {
 
 // closeWithTimeout closes bus, failing the test instead of hanging forever if
 // the bug this file documents makes Close block.
-func closeWithTimeout(t *testing.T, bus *kdbbus.EventBus) {
+func closeWithTimeout(t *testing.T, bus *kdb.EventBus) {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- bus.Close() }()
@@ -382,7 +329,7 @@ func closeWithTimeout(t *testing.T, bus *kdbbus.EventBus) {
 // widen the filter to match event types the caller never asked for.
 func TestWithFilterEvents_MetacharactersInEventTypeAreNotEscaped(t *testing.T) {
 	opts := &kurrentdb.PersistentAllSubscriptionOptions{}
-	kdbbus.WithFilterEvents([]string{"order.created"})(opts)
+	kdb.WithFilterEvents([]string{"order.created"})(opts)
 
 	re, err := regexp.Compile(opts.Filter.Regex)
 	if err != nil {

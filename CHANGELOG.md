@@ -50,6 +50,8 @@ release may break the API; every break is listed under **Breaking**.
   | `eventstore/postgres.NewEventStore` | `postgres.NewEventStore` |
   | `eventbus/postgres.NewEventBus` | `postgres.NewEventBus` |
   | `projection/postgres.NewStore` | `postgres.NewProjectionStore` |
+  | `eventstore/kurrentdb.NewEventStore` | `kurrentdb.NewEventStore` |
+  | `eventbus/kurrentdb.NewEventBus` | `kurrentdb.NewEventBus` |
 
   `postgres.Schema` (also shipped as `postgres/schema.sql`) creates every
   table the package uses, replacing `eventstore/postgres/schema.sql` and

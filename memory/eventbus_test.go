@@ -311,7 +311,7 @@ func countGoroutinesCreatedBy(substr string) int {
 // life, unaffected by Close.
 func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	const n = 50
-	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/memory.(*EventBus).Subscribe"
+	const createdBy = "created by github.com/terraskye/eventsourcing/memory.(*EventBus).Subscribe"
 
 	bus := memory.NewEventBus(1)
 
