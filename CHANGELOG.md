@@ -57,6 +57,14 @@ release may break the API; every break is listed under **Breaking**.
   table the package uses, replacing `eventstore/postgres/schema.sql` and
   `eventbus/postgres/schema.sql`.
 
+- `postgres`, `kurrentdb` and `telemetry` are separate Go modules, each
+  with its own `go.mod`; their import paths do not change, but each is
+  fetched with its own `go get`. The root module keeps the core
+  interfaces, `memory`, `file`, `projection` and the acceptance suites,
+  and no longer pulls in pgx, the KurrentDB client, gRPC, testcontainers
+  or OpenTelemetry. It requires Go 1.24; `postgres` and `kurrentdb`
+  require Go 1.25.
+
 ### Added
 
 - `eventsourcing.GlobalReader`, `ReadOptions` and `ReadResult`, with
