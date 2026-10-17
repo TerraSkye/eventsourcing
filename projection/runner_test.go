@@ -606,11 +606,9 @@ func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Take the segment over: release it as a, then claim it as b.
-	if err := ps.Release(t.Context(), projection.Lease{Name: "test", Owner: "a"}); err != nil {
-		t.Fatalf("Release(a): %v", err)
-	}
-	if _, ok, err := ps.Claim(t.Context(), projection.Lease{Name: "test", Owner: "b"}, time.Hour); err != nil || !ok {
+	// Take the segment over as b: with a ttl of 1ns, a's heartbeat counts
+	// as expired.
+	if _, _, ok, err := ps.Claim(t.Context(), projection.Lease{Name: "test", Owner: "b"}, time.Nanosecond); err != nil || !ok {
 		t.Fatalf("Claim(b) = %v, %v; want true, nil", ok, err)
 	}
 

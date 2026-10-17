@@ -89,7 +89,8 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	if err := store.Init(ctx, name, 1, 0); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if _, ok, err := store.Claim(ctx, a, ttl); err != nil || !ok {
+	a, _, ok, err := store.Claim(ctx, a, ttl)
+	if err != nil || !ok {
 		t.Fatalf("Claim(a) = %v, %v; want true, nil", ok, err)
 	}
 
@@ -98,7 +99,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 	go func() {
 		<-inBatch
 		time.Sleep(2 * ttl) // the claim has expired by the time this runs
-		_, ok, err := store.Claim(ctx, b, ttl)
+		_, _, ok, err := store.Claim(ctx, b, ttl)
 		if err != nil {
 			t.Errorf("Claim(b): %v", err)
 		}
@@ -107,7 +108,7 @@ func TestCommit_BatchLongerThanTTLKeepsClaim(t *testing.T) {
 
 	cp := projection.Checkpoint{Position: 1}
 	st := projection.Status{Phase: projection.Live, Position: 1, Owner: "a"}
-	err := store.Commit(ctx, a, cp, st, func(context.Context) error {
+	err = store.Commit(ctx, a, cp, st, func(context.Context) error {
 		close(inBatch)
 		time.Sleep(4 * ttl)
 		return nil

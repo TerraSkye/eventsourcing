@@ -135,6 +135,14 @@ type Lease struct {
 	// Owner identifies the instance that claims the segment; see
 	// [Projection.Owner].
 	Owner string
+
+	// Epoch is the fencing token of the claim, as returned by
+	// [Store.Claim]. Every takeover of a segment gives it a higher epoch,
+	// so a call made under an earlier claim is refused even when it comes
+	// from the same Owner: a process restarted under a fixed Owner, or one
+	// that stalled past its claim's ttl and resumed. Zero before the first
+	// claim.
+	Epoch uint64
 }
 
 // Store is everything a projection persists: segment claims, checkpoints,
@@ -156,8 +164,9 @@ type Lease struct {
 //     LoadStatuses, stored next to the checkpoint)
 //
 // A segment has at most one owner at a time. The calls that take a [Lease]
-// are fenced: when l.Owner no longer holds the segment, they change nothing,
-// and Commit, Reset and SaveStatus return [ErrClaimLost].
+// are fenced: when l.Owner no longer holds the segment, or l.Epoch is not
+// the epoch of its current claim, they change nothing, and Commit, Reset
+// and SaveStatus return [ErrClaimLost].
 //
 // Implementations must be safe for concurrent use, and are checked against
 // this contract by [projectiontest.StoreAcceptanceTest].
@@ -170,17 +179,20 @@ type Store interface {
 	// [ErrSegmentsChanged].
 	Init(ctx context.Context, name string, segments int, replayUntil uint64) error
 
-	// Claim takes the segment for l.Owner when it is unowned, already owned
-	// by l.Owner, or its last heartbeat is older than ttl (so a dead
-	// instance's claim is reclaimed). On success it refreshes the heartbeat
-	// and returns the segment's checkpoint and true; when another instance
-	// holds the segment it returns false.
-	Claim(ctx context.Context, l Lease, ttl time.Duration) (Checkpoint, bool, error)
+	// Claim takes the segment for l.Owner. When l is the segment's current
+	// claim (same Owner and Epoch), Claim refreshes it and keeps its epoch.
+	// Otherwise it takes the segment over when it is unowned or its last
+	// heartbeat is older than ttl (so a dead instance's claim is reclaimed),
+	// giving the claim a higher epoch than any before it. On success it
+	// refreshes the heartbeat and returns the claim's Lease, the segment's
+	// checkpoint and true; pass that Lease to every later call. When another
+	// claim holds the segment it returns false.
+	Claim(ctx context.Context, l Lease, ttl time.Duration) (Lease, Checkpoint, bool, error)
 
 	// Commit runs fn as one unit of work and, if fn returns nil, stores cp
 	// and status and refreshes the heartbeat in that same unit of work. If
-	// fn fails, or l.Owner no longer holds the segment, everything fn wrote
-	// is rolled back. The ctx passed to fn carries the unit of work; each
+	// fn fails, or l is no longer the segment's current claim, everything
+	// fn wrote is rolled back. The ctx passed to fn carries the unit of work; each
 	// implementation provides its own accessor, such as postgres.Tx in
 	// projection/postgres.
 	Commit(ctx context.Context, l Lease, cp Checkpoint, status Status, fn func(ctx context.Context) error) error
@@ -194,15 +206,15 @@ type Store interface {
 	// Release gives the segment up at once instead of waiting for its
 	// claim's ttl to expire, so another instance can take over without
 	// delay, and sets its phase to [Standby] so no one reads it as live. It
-	// does nothing when l.Owner does not hold the segment.
+	// does nothing when l is not the segment's current claim.
 	Release(ctx context.Context, l Lease) error
 
 	// SaveStatus publishes status between commits, so other instances see
 	// phase changes (Standby to Live, for example) without waiting for the
 	// next Commit, and refreshes the heartbeat. It stores Phase, Head and
 	// LastError only: the Position and Version that LoadStatuses reports
-	// come from the checkpoint, and Owner from the claim. When l.Owner does
-	// not hold the segment it changes nothing and returns [ErrClaimLost].
+	// come from the checkpoint, and Owner from the claim. When l is not the
+	// segment's current claim it changes nothing and returns [ErrClaimLost].
 	SaveStatus(ctx context.Context, l Lease, status Status) error
 
 	// LoadStatuses returns the status of every segment of the projection
