@@ -3,11 +3,14 @@ package projection
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -30,6 +33,14 @@ var (
 	// projection. A segmented projection is rebuilt by running it under a
 	// new name; see [Definition.Version].
 	ErrRebuildSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
+
+	// ErrEventTypesChanged stalls a segment whose stored checkpoint was
+	// written for a different [Definition.EventTypes] than the runner's,
+	// when the runner cannot rebuild: the projection has no Reset, or it is
+	// segmented. Carrying on would never apply the history of an added
+	// type. Bump [Definition.Version], or run the projection under a new
+	// Name.
+	ErrEventTypesChanged = errors.New("projection: EventTypes changed since the checkpoint was written")
 )
 
 // Runner keeps one projection up to date: it claims the segments it can,
@@ -45,6 +56,9 @@ type Runner struct {
 	reader   eventsourcing.GlobalReader
 	store    Store
 	segments int // normalized: at least 1
+
+	// fingerprint identifies p.EventTypes; see Checkpoint.Fingerprint.
+	fingerprint string
 
 	nudge chan struct{}
 
@@ -136,8 +150,10 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		store:    store,
 		segments: segments,
 		nudge:    make(chan struct{}, 1),
-		segs:     make([]*segmentState, segments),
-		changed:  make(chan struct{}),
+
+		fingerprint: fingerprint(p.EventTypes),
+		segs:        make([]*segmentState, segments),
+		changed:     make(chan struct{}),
 	}
 	for i := range r.segs {
 		r.segs[i] = &segmentState{
@@ -146,6 +162,16 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		}
 	}
 	return r
+}
+
+// fingerprint returns a short hash of the event type names, independent of
+// their order and of duplicates.
+func fingerprint(eventTypes []string) string {
+	names := slices.Clone(eventTypes)
+	slices.Sort(names)
+	names = slices.Compact(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return hex.EncodeToString(sum[:16])
 }
 
 // defaultOwner returns "hostname/pid/random", with "unknown" for a hostname

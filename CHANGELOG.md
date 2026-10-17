@@ -82,7 +82,10 @@ release may break the API; every break is listed under **Breaking**.
   checkpoints, claims across instances, segments, rebuilds, replay
   detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
   letters. Stores in `projection/memory` and `projection/postgres`,
-  checked by `projectiontest.StoreAcceptanceTest`.
+  checked by `projectiontest.StoreAcceptanceTest`. A checkpoint records
+  which event types it was written for, so changing a projection's
+  `EventTypes` rebuilds it, or stalls it with `ErrEventTypesChanged`
+  when it cannot rebuild.
 - Package `sqlite`, its own module: an event store, an event bus and a
   projection store in one SQLite database on the pure-Go
   `modernc.org/sqlite` driver, for development, tests that need real

@@ -105,9 +105,9 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 		  AND ((owner = ?3 AND epoch = ?5)
 		       OR owner IS NULL
 		       OR heartbeat < `+nowMS+` - ?4)
-		RETURNING epoch, position, version, replay_until`,
+		RETURNING epoch, position, version, replay_until, fingerprint`,
 		l.Name, l.Segment, l.Owner, ttl.Milliseconds(), int64(l.Epoch),
-	).Scan(&epoch, &position, &cp.Version, &replayUntil)
+	).Scan(&epoch, &position, &cp.Version, &replayUntil, &cp.Fingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
@@ -133,10 +133,10 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE projection_segments
-			SET position = ?, version = ?, replay_until = ?,
+			SET position = ?, version = ?, replay_until = ?, fingerprint = ?,
 			    phase = ?, head = ?, last_error = ?, heartbeat = `+nowMS+`
 			WHERE name = ? AND segment = ? AND owner = ? AND epoch = ?`,
-			int64(cp.Position), cp.Version, int64(cp.ReplayUntil),
+			int64(cp.Position), cp.Version, int64(cp.ReplayUntil), cp.Fingerprint,
 			status.Phase.String(), int64(status.Head), nullString(status.LastError),
 			l.Name, l.Segment, l.Owner, int64(l.Epoch),
 		)
@@ -160,7 +160,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = ?, replay_until = ?,
+			SET position = 0, version = ?, replay_until = ?, fingerprint = '',
 			    phase = 'starting', head = 0, last_error = NULL,
 			    heartbeat = `+nowMS+`
 			WHERE name = ? AND segment = ? AND owner = ? AND epoch = ?`,

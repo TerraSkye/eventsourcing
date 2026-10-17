@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -693,5 +694,145 @@ func TestRunner_StatusHeadReportsLag(t *testing.T) {
 	}
 	if st := r.Status(); st.Head != last {
 		t.Fatalf("Status.Head = %d at Position %d, want the head of the log, %d", st.Head, st.Position, last)
+	}
+}
+
+type taskRenamed struct{ ID string }
+
+func (e *taskRenamed) AggregateID() string { return e.ID }
+func (e *taskRenamed) EventType() string   { return "projection_test.TaskRenamed" }
+
+func init() {
+	eventsourcing.RegisterEvent(&taskRenamed{})
+}
+
+// typeCounter counts the events it applies per type, and its resets.
+type typeCounter struct {
+	mu      sync.Mutex
+	applied map[string]int
+	resets  int
+}
+
+func (c *typeCounter) Handle(_ context.Context, e eventsourcing.Event) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applied[e.EventType()]++
+	return nil
+}
+
+func (c *typeCounter) Reset(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applied = map[string]int{}
+	c.resets++
+	return nil
+}
+
+// eventTypesChangeSetup appends two TaskCreated and one TaskRenamed, runs
+// a projection over TaskCreated alone to the end of the log, and returns
+// the log, the projection store and the last position.
+func eventTypesChangeSetup(t *testing.T) (*testStore, *memory.ProjectionStore, uint64) {
+	t.Helper()
+	es := &testStore{}
+	save(t, es, 2)
+	res, err := es.Save(t.Context(), []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: "stream-1", Event: &taskRenamed{ID: "t"}}}, eventsourcing.Any{})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	ps := memory.NewProjectionStore()
+
+	first := &typeCounter{applied: map[string]int{}}
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      first,
+		EventTypes:   counterEvents,
+		Reset:        first.Reset,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, ps)
+	stop := runRunner(t, r)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, res.GlobalPosition); err != nil {
+		t.Fatalf("WaitUntil before the change: %v", err)
+	}
+	stop()
+	return es, ps, res.GlobalPosition
+}
+
+// TestRunner_EventTypesChangeRebuilds covers that adding an event type
+// without a Version bump rebuilds the projection when it has a Reset, so
+// the new type's history is applied.
+func TestRunner_EventTypesChangeRebuilds(t *testing.T) {
+	es, ps, last := eventTypesChangeSetup(t)
+
+	c := &typeCounter{applied: map[string]int{}}
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      c,
+		EventTypes:   []string{"projection_test.TaskCreated", "projection_test.TaskRenamed"},
+		Reset:        c.Reset,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, ps)
+	defer runRunner(t, r)()
+
+	// WaitUntil alone could answer from the checkpoint the first runner
+	// left in the store, before this runner claimed the segment; wait for
+	// the replay itself.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		c.mu.Lock()
+		done := c.applied["projection_test.TaskRenamed"] == 1
+		c.mu.Unlock()
+		if done || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil after the change: %v", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resets != 1 {
+		t.Fatalf("Reset ran %d times after adding an event type, want 1", c.resets)
+	}
+	if c.applied["projection_test.TaskRenamed"] != 1 || c.applied["projection_test.TaskCreated"] != 2 {
+		t.Fatalf("applied %v after the rebuild, want 2 TaskCreated and 1 TaskRenamed", c.applied)
+	}
+}
+
+// TestRunner_EventTypesChangeWithoutResetStalls covers that a projection
+// that cannot rebuild refuses to carry on over a changed EventTypes.
+func TestRunner_EventTypesChangeWithoutResetStalls(t *testing.T) {
+	es, ps, _ := eventTypesChangeSetup(t)
+
+	c := &typeCounter{applied: map[string]int{}}
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      c,
+		EventTypes:   []string{"projection_test.TaskCreated", "projection_test.TaskRenamed"},
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, ps)
+	defer runRunner(t, r)()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for r.Status().Phase != projection.Stalled {
+		if time.Now().After(deadline) {
+			t.Fatalf("Status() = %+v, want %s", r.Status(), projection.Stalled)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := r.Status().LastError; !strings.Contains(got, projection.ErrEventTypesChanged.Error()) {
+		t.Fatalf("LastError = %q, want it to report ErrEventTypesChanged", got)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.applied) != 0 {
+		t.Fatalf("applied %v over a changed EventTypes, want nothing", c.applied)
 	}
 }
