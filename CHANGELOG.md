@@ -39,10 +39,11 @@ release may break the API; every break is listed under **Breaking**.
   the contract.
 - `AppendResult.GlobalPosition`, the global position of the last event
   appended, set by every store.
-- Package `projection`: a `Runner` that keeps a read model up to date from
-  the global log, with checkpoints, claims across instances, segments,
-  rebuilds, replay detection (`IsReplaying`), read-your-writes
-  (`WaitUntil`) and dead letters. Stores in `projection/memory` and
-  `projection/postgres`, checked by `projectiontest.StoreAcceptanceTest`.
+- Package `projection`: a `Runner` that keeps a read model, described by a
+  `projection.Definition`, up to date from the global log, with
+  checkpoints, claims across instances, segments, rebuilds, replay
+  detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
+  letters. Stores in `projection/memory` and `projection/postgres`,
+  checked by `projectiontest.StoreAcceptanceTest`.
 - The `otel` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.

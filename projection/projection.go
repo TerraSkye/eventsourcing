@@ -8,7 +8,7 @@ import (
 	"github.com/terraskye/eventsourcing"
 )
 
-// Default values for [Projection]'s tuning fields.
+// Default values for [Definition]'s tuning fields.
 const (
 	DefaultBatchSize    = 500
 	DefaultPollInterval = time.Second
@@ -16,7 +16,7 @@ const (
 )
 
 // SegmentKey picks which segment an event belongs to in a segmented
-// projection; see [Projection.Segments]. It must return the same key for
+// projection; see [Definition.Segments]. It must return the same key for
 // every event that touches the same read-model rows, so that no two
 // segments ever write the same row.
 type SegmentKey func(env *eventsourcing.Envelope) string
@@ -77,14 +77,14 @@ func (p ErrorPolicy) String() string {
 	}
 }
 
-// Projection is a projection's definition and tuning. The zero value for
-// every optional field picks sensible defaults.
+// Definition describes a projection: what it handles and how it runs. The
+// zero value for every optional field picks sensible defaults.
 //
 // A projection is usually defined next to the read model it writes, by a
 // constructor in the same package, and handed to [NewRunner] by main:
 //
-//	func NewProjection(list *TaskList) projection.Projection {
-//		return projection.Projection{
+//	func NewProjection(list *TaskList) projection.Definition {
+//		return projection.Definition{
 //			Name:    "task-list",
 //			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
 //			Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -95,7 +95,7 @@ func (p ErrorPolicy) String() string {
 //
 // A durable projection adds Version and Reset so it can be rebuilt:
 //
-//	projection.Projection{
+//	projection.Definition{
 //		Name:    "task-list",
 //		Handler: eventsourcing.NewEventHandlerFunc(handle),
 //		Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -105,7 +105,7 @@ func (p ErrorPolicy) String() string {
 //
 // A projection whose one instance cannot keep up is segmented:
 //
-//	projection.Projection{
+//	projection.Definition{
 //		Name:       "order-summaries-v1",
 //		Handler:    eventsourcing.NewEventHandlerFunc(handle),
 //		Events:     []string{"OrderPlaced", "OrderShipped"},
@@ -116,10 +116,10 @@ func (p ErrorPolicy) String() string {
 // Nothing else changes. A segmented projection is just the same loop
 // scoped to each segment the store lets this instance claim.
 //
-// Projection is a plain value, so main can still adjust deployment
+// Definition is a plain value, so main can still adjust deployment
 // settings, such as PollInterval or a logging wrapper around Handler,
 // before passing it to NewRunner.
-type Projection struct {
+type Definition struct {
 	// Name identifies the projection. It keys the checkpoint and the
 	// claim, so it must be unique per read model and stable across
 	// deploys; renaming a projection makes it start from scratch.

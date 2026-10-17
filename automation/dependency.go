@@ -33,7 +33,7 @@ type Watcher interface {
 
 // Remote returns a [Dependency] for the projection called name, run by a
 // different program, judged by the status its runner publishes to store.
-// claimTTL is the [projection.Projection.ClaimTTL] that program runs the
+// claimTTL is the [projection.Definition.ClaimTTL] that program runs the
 // projection with, or 0 for [projection.DefaultClaimTTL]; a segment whose
 // status is older than that counts as not live, as its runner has stopped.
 //

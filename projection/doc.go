@@ -11,7 +11,7 @@
 //
 // A user wires up three things:
 //
-//  1. A [Projection] value, which describes the projection — its name, its
+//  1. A [Definition] value, which describes the projection — its name, its
 //     handlers, and anything optional like Version/Reset or segmentation.
 //  2. An [eventsourcing.GlobalReader], which is the event store the
 //     projection reads from.
@@ -38,7 +38,7 @@
 //
 // A slice that owns a read model has three parts: the read model itself,
 // the projection that writes it, and the query that reads it. The
-// projection is a constructor that returns a [Projection]: one handler
+// projection is a constructor that returns a [Definition]: one handler
 // that switches on the event type, and the registered names of the types
 // it handles. The query reads the read model directly; it never needs the
 // projection.
@@ -52,8 +52,8 @@
 //		tasks map[string]*Task
 //	}
 //
-//	func NewProjection(list *TaskList) projection.Projection {
-//		return projection.Projection{
+//	func NewProjection(list *TaskList) projection.Definition {
+//		return projection.Definition{
 //			Name:    "task-list",
 //			Handler: eventsourcing.NewEventHandlerFunc(list.handle),
 //			Events:  []string{"TaskCreated"},
@@ -78,8 +78,8 @@
 // at all. Handlers write through the batch's transaction, and the query
 // reads the tables with its own connection:
 //
-//	func NewProjection() projection.Projection {
-//		return projection.Projection{
+//	func NewProjection() projection.Definition {
+//		return projection.Definition{
 //			Name:    "task-list",
 //			Handler: eventsourcing.NewEventHandlerFunc(handle),
 //			Events:  []string{"TaskCreated"},
@@ -117,24 +117,24 @@
 // # Rebuilding
 //
 // A projection is rebuilt by wiping its read model and processing the log
-// again from the start. [Projection.Reset] says how to wipe it; the reset
+// again from the start. [Definition.Reset] says how to wipe it; the reset
 // runs in the same unit of work that moves the checkpoint back to zero.
 //
 // There are two ways to trigger a rebuild:
 //
-//   - Bump [Projection.Version] when you change how the projection writes
+//   - Bump [Definition.Version] when you change how the projection writes
 //     its read model. On start, a runner whose stored version differs from
 //     its configured one rebuilds automatically. A segmented projection
-//     has no Version: rebuild it under a new [Projection.Name].
+//     has no Version: rebuild it under a new [Definition.Name].
 //   - Call [Runner.Rebuild] on the active instance.
 //
-// Adding an event type to [Projection.Events] counts as a change: without
+// Adding an event type to [Definition.Events] counts as a change: without
 // a Version bump, events of the new type stored before the change are
 // never applied.
 //
 // A rebuild in place empties the read model until the runner has caught
 // up. When that takes too long, build the new version under a new
-// [Projection.Name], writing to new tables, and switch the queries over
+// [Definition.Name], writing to new tables, and switch the queries over
 // once it is [Live].
 //
 // # Failures
@@ -143,7 +143,7 @@
 // the error, backs off (from 0.5s up to 30s, jittered), and retries from
 // its last committed checkpoint. By
 // default a failing event stops the projection at that event until the
-// cause is fixed. [Projection.OnError] can make the runner skip failing
+// cause is fixed. [Definition.OnError] can make the runner skip failing
 // events instead, recording them through [DeadLetterStore] when the Store
 // supports it. A skipped event does not hold back its stream: later events
 // of the same stream are still applied.
@@ -180,7 +180,7 @@
 // # Scaling out
 //
 // A projection whose one instance cannot keep up is segmented by setting
-// [Projection.Segments] and [Projection.SegmentKey]. Each event goes to
+// [Definition.Segments] and [Definition.SegmentKey]. Each event goes to
 // the segment its key maps to; segments spread across every instance of
 // the program through the same claim mechanism as a single-segment
 // projection, each with its own checkpoint and status. Handlers are the

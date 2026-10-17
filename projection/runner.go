@@ -18,7 +18,7 @@ var (
 	// ErrNotActive is returned by [Runner.Rebuild] when this instance is not
 	// working the projection: Run has not started or has returned, or
 	// another instance holds the claim. A rebuild only reaches the runner
-	// in this process; bump [Projection.Version] to rebuild wherever the
+	// in this process; bump [Definition.Version] to rebuild wherever the
 	// projection runs.
 	ErrNotActive = errors.New("projection: runner is not active on this instance")
 
@@ -28,7 +28,7 @@ var (
 
 	// ErrSegmented is returned by [Runner.Rebuild] on a segmented projection.
 	// A segmented projection is rebuilt by running it under a new name; see
-	// [Projection.Version].
+	// [Definition.Version].
 	ErrSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
 )
 
@@ -41,7 +41,7 @@ var (
 // other methods are safe to call from any goroutine, before, during or
 // after Run.
 type Runner struct {
-	p        Projection
+	p        Definition
 	reader   eventsourcing.GlobalReader
 	store    Store
 	segments int // normalized: at least 1
@@ -88,10 +88,10 @@ func (req *rebuildRequest) finish(err error) {
 // Name, nil Handler/reader/store, no Events or an unregistered one,
 // Version > 0 without Reset, or Segments > 1 without SegmentKey or with a
 // Version.
-func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Runner {
+func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Runner {
 	switch {
 	case p.Name == "":
-		panic("projection: Projection.Name is required")
+		panic("projection: Definition.Name is required")
 	case p.Handler == nil:
 		panic(fmt.Sprintf("projection %q: Handler is required", p.Name))
 	case len(p.Events) == 0:
@@ -175,7 +175,7 @@ func (r *Runner) Name() string { return r.p.Name }
 //
 // Each segment competes for its claim: on success Run loads the checkpoint
 // and processes events; otherwise it reports [Standby] for that segment and
-// keeps trying. If the stored version differs from [Projection.Version] on
+// keeps trying. If the stored version differs from [Definition.Version] on
 // a segment, that segment is rebuilt first.
 //
 // Call Run once per Runner. On return it has released every claim it held.
@@ -210,7 +210,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // Rebuild returns [ErrSegmented] on a segmented projection, [ErrNoReset]
 // when the projection has no Reset, and [ErrNotActive] when this instance
 // is not processing the projection, or stops before the rebuild ran. To
-// rebuild wherever the projection runs, bump [Projection.Version]; to
+// rebuild wherever the projection runs, bump [Definition.Version]; to
 // rebuild a segmented projection, run it under a new Name.
 func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.segments > 1 {
@@ -299,7 +299,7 @@ func (r *Runner) notifyWatchers() {
 }
 
 // Skipped returns the number of events skipped under a non-stalling
-// [Projection.OnError] since the Runner was created.
+// [Definition.OnError] since the Runner was created.
 func (r *Runner) Skipped() int64 { return r.skipped.Load() }
 
 // lease returns this runner's [Lease] on seg.

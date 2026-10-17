@@ -303,7 +303,7 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 }
 
 // shouldSkip reports whether a failing event is skipped under
-// [Projection.OnError]. phase is the phase of the read that returned the
+// [Definition.OnError]. phase is the phase of the read that returned the
 // event, not the one last published: after a restart or a stall, a read
 // that reaches the head of the log is Live even though the segment has not
 // reported Live since.

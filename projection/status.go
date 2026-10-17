@@ -55,8 +55,8 @@ func phaseRank(p Phase) int {
 // IsLive reports whether s, as returned by [Store.LoadStatuses], shows a
 // live segment: caught up with the head of the log, held by an owner, and
 // published no longer than claimTTL ago. claimTTL is the
-// [Projection.ClaimTTL] the projection runs with; a live owner publishes
-// its status at least every [Projection.PollInterval], so a status older
+// [Definition.ClaimTTL] the projection runs with; a live owner publishes
+// its status at least every [Definition.PollInterval], so a status older
 // than its claim is one whose owner stopped without releasing it.
 func (s Status) IsLive(claimTTL time.Duration) bool {
 	return s.Phase == Live && s.Owner != "" && s.Age <= claimTTL
@@ -101,7 +101,7 @@ func (r *Runner) Live(ctx context.Context) (bool, error) {
 //
 // Events the projection does not handle count as processed. On segments
 // this instance owns, WaitUntil watches memory; on segments another
-// instance owns, it polls [Store.LoadStatuses] at [Projection.PollInterval].
+// instance owns, it polls [Store.LoadStatuses] at [Definition.PollInterval].
 func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 	for {
 		// Take the change signal before checking, so a change that lands

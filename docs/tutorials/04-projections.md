@@ -99,8 +99,8 @@ import (
 )
 
 // NewProjection returns the projection that keeps list up to date.
-func NewProjection(list *TaskList) projection.Projection {
-    return projection.Projection{
+func NewProjection(list *TaskList) projection.Definition {
+    return projection.Definition{
         Name:    "task-list",
         Handler: eventsourcing.NewEventHandlerFunc(list.handle),
         Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -223,7 +223,7 @@ func main() {
 - The **event store** to read from. The memory store implements `eventsourcing.GlobalReader`.
 - A **projection store** to keep the checkpoint in. `projmem.NewStore()` keeps it in memory, which fits a read model that also lives in memory: both start empty on every run, and the runner rebuilds the task list from the start of the log.
 
-`main.go` decides how the projection runs; the slice decides what it does. Because `Projection` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
+`main.go` decides how the projection runs; the slice decides what it does. Because `Definition` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
 
 ```go
 p := tasklist.NewProjection(list)
