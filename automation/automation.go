@@ -4,13 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
+	"log/slog"
+	"sync"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
+	"github.com/terraskye/eventsourcing"
 )
 
-// errNotImplemented marks the parts of this package that are still a
-// design draft: signatures and documentation only.
-var errNotImplemented = errors.New("automation: not implemented yet")
+// Default values for [Definition]'s tuning fields.
+const (
+	DefaultBatchSize = 10
+	DefaultLease     = time.Minute
+	DefaultInterval  = 5 * time.Second
+)
 
 // ClaimFunc reads up to max pending items from a todo list and leases them
 // for lease, so that other instances of the automation skip them until the
@@ -22,6 +29,8 @@ var errNotImplemented = errors.New("automation: not implemented yet")
 // its work succeeding is pending again and will be claimed again.
 //
 // ClaimFunc returns an empty slice, not an error, when nothing is pending.
+// automationtest.ClaimAcceptanceTest checks an implementation against this
+// contract.
 type ClaimFunc[T any] func(ctx context.Context, max int, lease time.Duration) ([]T, error)
 
 // WorkFunc does the work for one claimed item, typically ending in a
@@ -32,13 +41,16 @@ type ClaimFunc[T any] func(ctx context.Context, max int, lease time.Duration) ([
 // the package documentation.
 type WorkFunc[T any] func(ctx context.Context, item T) error
 
-// State is what an automation is doing.
-type State int
+// Phase is what an automation is doing.
+type Phase int
 
 const (
+	// Starting means [Automation.Run] has not checked its dependencies yet.
+	Starting Phase = iota
+
 	// Waiting means a dependency is not live, so the automation does not
 	// claim work. [Status.WaitingFor] names the dependency.
-	Waiting State = iota
+	Waiting
 
 	// Idle means the dependencies are live and the last claim found
 	// nothing to do.
@@ -46,27 +58,37 @@ const (
 
 	// Working means the automation is processing claimed items.
 	Working
+
+	// Stalled means checking a dependency or claiming failed; the
+	// automation is backing off before it tries again. [Status.LastError]
+	// says why.
+	Stalled
 )
 
-// String returns the state's name in lower case.
-func (s State) String() string {
-	switch s {
+// String returns the phase's lower-case name.
+func (p Phase) String() string {
+	switch p {
+	case Starting:
+		return "starting"
 	case Waiting:
 		return "waiting"
 	case Idle:
 		return "idle"
 	case Working:
 		return "working"
+	case Stalled:
+		return "stalled"
 	default:
 		return "unknown"
 	}
 }
 
 // Status describes what an automation is doing, as reported by
-// [Automation.Status].
+// [Automation.Status]. Its shape follows projection.Status, so one
+// dashboard reads both.
 type Status struct {
-	// State is what the automation is doing.
-	State State
+	// Phase is what the automation is doing.
+	Phase Phase
 
 	// WaitingFor is the name of the dependency the automation is waiting
 	// for while [Waiting], or "" otherwise.
@@ -80,82 +102,260 @@ type Status struct {
 	// automation started.
 	Failed uint64
 
-	// LastError is the error of the most recent failed claim or work
-	// attempt, or "" if there was none.
+	// LastError is the error of the most recent failed check, claim or
+	// work attempt, or "" if there was none.
 	LastError string
+}
+
+// Definition describes an automation: the todo list it works off, how it
+// claims and does the work, and its tuning. The zero value for every
+// optional field picks sensible defaults.
+//
+// An automation is usually defined next to its todo list, by a constructor
+// in the same package, and handed to [New] by main:
+//
+//	func NewShipOrders(list *OrdersToShip, runner *projection.Runner, bus eventsourcing.Dispatcher, carrier Carrier) automation.Definition[ShippingTodo] {
+//		return automation.Definition[ShippingTodo]{
+//			Name:     "ship-orders",
+//			TodoList: runner,
+//			Claim:    list.Claim,
+//			Work:     ShipOrder(bus, carrier),
+//		}
+//	}
+type Definition[T any] struct {
+	// Name identifies the automation in logs and as the causation of the
+	// commands it sends.
+	Name string
+
+	// TodoList is the projection Claim reads from. The automation only
+	// claims work while it is live; pass a *projection.Runner when the
+	// projection runs in this program, or [Remote] when it runs elsewhere.
+	TodoList Dependency
+
+	// Claim leases pending items; see [ClaimFunc].
+	Claim ClaimFunc[T]
+
+	// Work processes one claimed item; see [WorkFunc].
+	Work WorkFunc[T]
+
+	// WaitFor lists projections that must be live, besides the todo list,
+	// before the automation claims work. Use it when the work reads other
+	// read models that must be up to date for it to decide correctly.
+	WaitFor []Dependency
+
+	// BatchSize is how many items are claimed at once. Items of a batch
+	// are processed one after the other and all of them are leased from
+	// the moment of the claim, so BatchSize times the time one item takes
+	// must stay well below Lease. Default [DefaultBatchSize].
+	BatchSize int
+
+	// Lease is how long claimed items are reserved for this instance. An
+	// item whose work did not lead to its removal from the todo list
+	// within the lease is claimed again: too short a lease makes slow work
+	// run twice concurrently, too long a lease delays the retry after a
+	// crash. Default [DefaultLease].
+	Lease time.Duration
+
+	// Interval is how long an idle automation waits before checking for
+	// work again when nothing nudges it. With a todo list in the same
+	// program nudges usually come first; with a [Remote] todo list the
+	// interval decides how quickly new work is picked up. Default
+	// [DefaultInterval].
+	Interval time.Duration
+
+	// Logger receives the automation's transitions: waiting for a
+	// dependency, stalled with its error, and failed work. Nothing is
+	// logged per successful item or while idle. Default slog.Default().
+	Logger *slog.Logger
 }
 
 // Automation processes the items of a todo list: it claims pending items,
 // runs the work for each, and repeats. Create one with [New] and start it
 // with [Automation.Run].
 type Automation[T any] struct {
-	name    string
+	d       Definition[T]
 	waitFor []Dependency
-	claim   ClaimFunc[T]
-	work    WorkFunc[T]
-	cfg     config
 	nudge   chan struct{}
-	statusV atomic.Pointer[Status]
+
+	mu     sync.Mutex
+	status Status
 }
 
-// New creates an automation called name that works off todoList.
+// New creates the automation d describes.
 //
-// todoList is the projection claim reads from. The automation only claims
-// work while it is live; pass a [*projection.Runner] when the projection
-// runs in this program, or [Remote] when it runs elsewhere.
-//
-// claim leases pending items and work processes one of them. Without
-// options, the automation claims up to 10 items at a time, leases them for
-// one minute, and checks for work every five seconds and whenever it is
-// nudged.
-//
-// name identifies the automation in logs, metrics and as the causation of
-// the commands it sends. New panics if name is empty or todoList, claim or
-// work is nil.
-func New[T any](name string, todoList Dependency, claim ClaimFunc[T], work WorkFunc[T], opts ...Option) *Automation[T] {
+// It panics on wiring mistakes: an empty Name, or a nil TodoList, Claim or
+// Work.
+func New[T any](d Definition[T]) *Automation[T] {
 	switch {
-	case name == "":
-		panic("automation: New requires a name")
-	case todoList == nil:
-		panic(fmt.Sprintf("automation %s: New requires a todo list", name))
-	case claim == nil || work == nil:
-		panic(fmt.Sprintf("automation %s: New requires claim and work functions", name))
+	case d.Name == "":
+		panic("automation: Definition.Name is required")
+	case d.TodoList == nil:
+		panic(fmt.Sprintf("automation %q: TodoList is required", d.Name))
+	case d.Claim == nil || d.Work == nil:
+		panic(fmt.Sprintf("automation %q: Claim and Work are required", d.Name))
 	}
-
-	cfg := defaultConfig()
-	for _, opt := range opts {
-		opt(&cfg)
+	if d.BatchSize <= 0 {
+		d.BatchSize = DefaultBatchSize
 	}
-
-	a := &Automation[T]{
-		name:    name,
-		waitFor: append([]Dependency{todoList}, cfg.waitFor...),
-		claim:   claim,
-		work:    work,
-		cfg:     cfg,
+	if d.Lease <= 0 {
+		d.Lease = DefaultLease
+	}
+	if d.Interval <= 0 {
+		d.Interval = DefaultInterval
+	}
+	if d.Logger == nil {
+		d.Logger = slog.Default()
+	}
+	return &Automation[T]{
+		d:       d,
+		waitFor: append([]Dependency{d.TodoList}, d.WaitFor...),
 		nudge:   make(chan struct{}, 1),
 	}
-	a.statusV.Store(&Status{State: Waiting, WaitingFor: todoList.Name()})
-	return a
 }
 
-// Name returns the automation's name, as passed to [New].
-func (a *Automation[T]) Name() string { return a.name }
+// Name returns the automation's name.
+func (a *Automation[T]) Name() string { return a.d.Name }
 
 // Run claims and processes work until ctx is done, and then returns
 // ctx.Err().
 //
-// Each round, Run checks that every dependency is live, claims up to the
-// batch size of items, and runs the work for each of them in turn. If a
-// full batch was claimed, the next round starts right away; otherwise Run
-// waits for the interval or a nudge. A failing claim or work function is
-// recorded in [Status.LastError] and never stops Run.
+// Each round, Run checks that every dependency is live, claims up to
+// BatchSize items, and runs the work for each of them in turn. If a full
+// batch was claimed, the next round starts right away; otherwise Run waits
+// for the interval or a nudge. A dependency that is not live makes Run
+// wait ([Waiting]); a failing check or claim makes it back off from 0.5s up
+// to 30s ([Stalled]); a failing work call is counted and logged, and its
+// item comes back once its lease expires. Run never gives up.
 //
-// When a dependency implements [Watcher], Run registers the
-// automation's Nudge with it, so the automation wakes up when the todo list
-// changes.
+// When a dependency implements [Watcher], Run registers the automation's
+// Nudge with it, so the automation wakes up when the todo list changes.
+// Call Run once per Automation.
 func (a *Automation[T]) Run(ctx context.Context) error {
-	panic(errNotImplemented)
+	for _, dep := range a.waitFor {
+		if w, ok := dep.(Watcher); ok {
+			w.Watch(a.Nudge)
+		}
+	}
+
+	retry := newRetryBackOff()
+	for ctx.Err() == nil {
+		dep, err := a.notLive(ctx)
+		switch {
+		case err != nil:
+			a.stall(ctx, fmt.Errorf("check %s: %w", dep, err), retry)
+			continue
+		case dep != "":
+			a.setWaiting(ctx, dep)
+			a.wait(ctx)
+			continue
+		}
+
+		items, err := a.d.Claim(ctx, a.d.BatchSize, a.d.Lease)
+		if err != nil {
+			a.stall(ctx, fmt.Errorf("claim: %w", err), retry)
+			continue
+		}
+		retry.Reset()
+		if len(items) == 0 {
+			a.setPhase(Idle, "")
+			a.wait(ctx)
+			continue
+		}
+
+		a.setPhase(Working, "")
+		workCtx := eventsourcing.WithCausation(ctx, a.d.Name)
+		for _, item := range items {
+			if ctx.Err() != nil {
+				break
+			}
+			a.doWork(workCtx, item)
+		}
+		if len(items) < a.d.BatchSize {
+			a.setPhase(Idle, "")
+			a.wait(ctx)
+		}
+	}
+	return ctx.Err()
+}
+
+// notLive returns the name of the first dependency that is not live, or
+// "" when all are. err is set when a dependency could not be checked; the
+// name is then that dependency's.
+func (a *Automation[T]) notLive(ctx context.Context) (string, error) {
+	for _, dep := range a.waitFor {
+		live, err := dep.IsLive(ctx)
+		if err != nil {
+			return dep.Name(), err
+		}
+		if !live {
+			return dep.Name(), nil
+		}
+	}
+	return "", nil
+}
+
+// doWork runs the work for one item and records the outcome.
+func (a *Automation[T]) doWork(ctx context.Context, item T) {
+	err := a.d.Work(ctx, item)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err == nil {
+		a.status.Processed++
+		return
+	}
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return // stopping, not failing
+	}
+	a.status.Failed++
+	a.status.LastError = err.Error()
+	a.d.Logger.LogAttrs(ctx, slog.LevelWarn, "automation work failed",
+		slog.String("automation", a.d.Name), slog.String("error", err.Error()))
+}
+
+// stall reports err, logs it, and backs off.
+func (a *Automation[T]) stall(ctx context.Context, err error, retry *backoff.ExponentialBackOff) {
+	a.setPhase(Stalled, err.Error())
+	wait := retry.NextBackOff()
+	a.d.Logger.LogAttrs(ctx, slog.LevelError, "automation stalled",
+		slog.String("automation", a.d.Name), slog.String("error", err.Error()), slog.Duration("retry_in", wait))
+	sleepCtx(ctx, wait)
+}
+
+// setWaiting records that the automation waits for dep, logging the
+// change once.
+func (a *Automation[T]) setWaiting(ctx context.Context, dep string) {
+	a.mu.Lock()
+	changed := a.status.Phase != Waiting || a.status.WaitingFor != dep
+	a.status.Phase = Waiting
+	a.status.WaitingFor = dep
+	a.mu.Unlock()
+	if changed {
+		a.d.Logger.LogAttrs(ctx, slog.LevelInfo, "automation waiting for dependency",
+			slog.String("automation", a.d.Name), slog.String("dependency", dep))
+	}
+}
+
+// setPhase moves the automation to p. lastErr replaces LastError when it
+// is not empty.
+func (a *Automation[T]) setPhase(p Phase, lastErr string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status.Phase = p
+	a.status.WaitingFor = ""
+	if lastErr != "" {
+		a.status.LastError = lastErr
+	}
+}
+
+// wait blocks until a nudge, the interval, or ctx is done.
+func (a *Automation[T]) wait(ctx context.Context) {
+	t := time.NewTimer(a.d.Interval)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-a.nudge:
+	case <-t.C:
+	}
 }
 
 // Nudge asks the automation to check for work now instead of at its next
@@ -170,5 +370,29 @@ func (a *Automation[T]) Nudge() {
 
 // Status returns what the automation is doing.
 func (a *Automation[T]) Status() Status {
-	return *a.statusV.Load()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.status
+}
+
+// sleepCtx waits for d or until ctx is done, whichever comes first.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+// newRetryBackOff returns the capped exponential delay used while the
+// automation is stalled, the same as a stalled projection's: 0.5s growing
+// to 30s, jittered, never giving up.
+func newRetryBackOff() *backoff.ExponentialBackOff {
+	return backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(500*time.Millisecond),
+		backoff.WithMultiplier(2),
+		backoff.WithMaxInterval(30*time.Second),
+		backoff.WithMaxElapsedTime(0),
+	)
 }
