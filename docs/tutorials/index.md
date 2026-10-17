@@ -13,7 +13,7 @@ A task management system with:
 
 ## Prerequisites
 
-- Go 1.21+ installed
+- Go 1.24+ installed (1.25+ to use the Postgres or KurrentDB packages)
 - Basic understanding of Go structs and interfaces
 - Familiarity with HTTP APIs
 - No event sourcing knowledge required
