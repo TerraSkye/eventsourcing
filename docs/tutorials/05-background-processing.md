@@ -153,7 +153,7 @@ The processor reacts to new events as they are stored, so it subscribes to an ev
 
 ```go
 // In main.go, after creating the store:
-bus := membus.NewEventBus(100) // github.com/terraskye/eventsourcing/eventbus/memory
+bus := memory.NewEventBus(100) // github.com/terraskye/eventsourcing/memory
 defer bus.Close()
 
 go func() {

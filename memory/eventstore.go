@@ -14,15 +14,15 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = (*MemoryStore)(nil)
-	_ eventsourcing.GlobalReader = (*MemoryStore)(nil)
+	_ eventsourcing.EventStore   = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader = (*EventStore)(nil)
 )
 
-// MemoryStore is an in-memory [eventsourcing.EventStore] intended for tests
+// EventStore is an in-memory [eventsourcing.EventStore] intended for tests
 // and local development. It keeps every stream and the global event log in a
 // single process's memory, so its contents do not survive a restart and it
 // cannot be shared across processes. It is safe for concurrent use.
-type MemoryStore struct {
+type EventStore struct {
 	tracer trace.Tracer
 	mu     sync.RWMutex
 	closed bool
@@ -34,7 +34,7 @@ type MemoryStore struct {
 // ReadAll implements [eventsourcing.GlobalReader]. Events are kept in a
 // single slice in append order and GlobalPosition is their index plus one,
 // so a read is a slice of that slice, filtered in Go.
-func (m *MemoryStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+func (m *EventStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return eventsourcing.ReadResult{}, err
 	}
@@ -85,7 +85,7 @@ func matches(env *eventsourcing.Envelope, types map[string]bool, prefixes []stri
 }
 
 // Head implements [eventsourcing.GlobalReader].
-func (m *MemoryStore) Head(ctx context.Context) (uint64, error) {
+func (m *EventStore) Head(ctx context.Context) (uint64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return uint64(len(m.global)), nil
@@ -103,7 +103,7 @@ func (m *MemoryStore) Head(ctx context.Context) (uint64, error) {
 // exactly, returning a [eventsourcing.StreamRevisionConflictError] on
 // mismatch. On success it returns an [eventsourcing.AppendResult] whose
 // NextExpectedVersion is the stream's new length.
-func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
+func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -188,7 +188,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 // LoadStream returns a lazy iterator over all events in the stream
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
-func (m *MemoryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (m *EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	return m.LoadStreamFrom(ctx, id, eventsourcing.StreamExists{})
 }
 
@@ -201,7 +201,7 @@ func (m *MemoryStore) LoadStream(ctx context.Context, id string) (*eventsourcing
 // including [eventsourcing.Any], reads from the beginning of the stream. It
 // also returns a non-nil error if the requested revision is beyond the
 // stream's current length.
-func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (m *EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 
 	m.mu.RLock()
 	events, exists := m.events[id]
@@ -254,17 +254,17 @@ func (m *MemoryStore) LoadStreamFrom(ctx context.Context, id string, version eve
 // Events returns a channel that receives every [eventsourcing.Envelope] as it
 // is saved. It is not part of the [eventsourcing.EventStore] interface; it
 // exists so tests and local tooling can observe writes as they happen. The
-// channel has the buffer size passed to [NewMemoryStore] and sends are
+// channel has the buffer size passed to [NewEventStore] and sends are
 // non-blocking, so a slow consumer misses events rather than blocking Save.
 // The channel is closed by Close.
-func (m *MemoryStore) Events() <-chan *eventsourcing.Envelope {
+func (m *EventStore) Events() <-chan *eventsourcing.Envelope {
 	return m.bus
 }
 
 // Close discards all stored events and closes the channel returned by
 // Events. After Close, Save returns an error instead of appending. Calling
 // Close more than once is a no-op.
-func (m *MemoryStore) Close() error {
+func (m *EventStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -279,10 +279,10 @@ func (m *MemoryStore) Close() error {
 	return nil
 }
 
-// NewMemoryStore constructs an empty [MemoryStore]. buffer sets the capacity
-// of the channel returned by [MemoryStore.Events].
-func NewMemoryStore(buffer int64) *MemoryStore {
-	return &MemoryStore{
+// NewEventStore constructs an empty [EventStore]. buffer sets the capacity
+// of the channel returned by [EventStore.Events].
+func NewEventStore(buffer int64) *EventStore {
+	return &EventStore{
 		events: make(map[string][]*eventsourcing.Envelope),
 		global: make([]*eventsourcing.Envelope, 0),
 		bus:    make(chan *eventsourcing.Envelope, buffer),

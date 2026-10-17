@@ -20,7 +20,7 @@ A runner needs three things:
 
 1. A `projection.Definition`: the projection's name, its handler, and the event types it handles.
 2. An `eventsourcing.GlobalReader` to read the log from. The memory, file, Postgres and KurrentDB event stores all implement it.
-3. A `projection.Store` that holds checkpoints, claims and status. Use `projection/memory` for in-memory read models and tests, and `projection/postgres` for read models in Postgres.
+3. A `projection.Store` that holds checkpoints, claims and status. Use `memory` for in-memory read models and tests, and `projection/postgres` for read models in Postgres.
 
 ## Step 1: Define the projection
 
@@ -90,10 +90,10 @@ func NewProjection(list *TaskList) projection.Definition {
 `main.go` creates the read model and hands the projection to a runner, together with the event store to read from and a store for the checkpoint:
 
 ```go
-eventStore := memstore.NewMemoryStore(100)
+eventStore := memory.NewEventStore(100)
 
 list := tasklist.NewTaskList()
-runner := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewStore()) // projection/memory
+runner := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewProjectionStore())
 queries := tasklist.NewQueryHandler(list)
 
 go runner.Run(ctx)
@@ -101,7 +101,7 @@ go runner.Run(ctx)
 
 `Run` blocks until `ctx` is done. It never gives up on errors; see [Failures](#failures).
 
-With `memory.NewStore()` the checkpoint lives in memory too, so the projection replays the whole log on every start. That is right for an in-memory read model, which is empty after a restart anyway.
+With `memory.NewProjectionStore()` the checkpoint lives in memory too, so the projection replays the whole log on every start. That is right for an in-memory read model, which is empty after a restart anyway.
 
 `Definition` is a plain value, so `main.go` can still change how it runs, such as `PollInterval` or a logging wrapper (see [Failures](#failures)), without the slice knowing.
 
@@ -240,7 +240,7 @@ The runner does not log. Wrap the handler to log failures, the same way you woul
 ```go
 p := tasklist.NewProjection(list)
 p.Handler = logging.WithEventLogging(logger, p.Handler)
-runner := projection.NewRunner(p, eventStore, memory.NewStore())
+runner := projection.NewRunner(p, eventStore, memory.NewProjectionStore())
 ```
 
 `runner.Status()` reports the phase (`Starting`, `Standby`, `CatchingUp`, `Live`, `Stalled`), the position, the head, and the last error.

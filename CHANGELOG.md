@@ -36,6 +36,16 @@ release may break the API; every break is listed under **Breaking**.
   its name with `go.opentelemetry.io/otel`, which every user imports
   alongside it. Only the import path and the package name change.
 
+- Backends are laid out one package per backend instead of one per
+  concern. Each backend package offers `NewEventStore`, `NewEventBus` and,
+  where it has one, `NewProjectionStore`:
+
+  | Before | After |
+  |---|---|
+  | `eventstore/memory.NewMemoryStore` | `memory.NewEventStore` |
+  | `eventbus/memory.NewEventBus` | `memory.NewEventBus` |
+  | `projection/memory.NewStore` | `memory.NewProjectionStore` |
+
 ### Added
 
 - `eventsourcing.GlobalReader`, `ReadOptions` and `ReadResult`, with

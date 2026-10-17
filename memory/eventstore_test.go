@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	cqrs "github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
-	"github.com/terraskye/eventsourcing/eventstore/memory"
+	"github.com/terraskye/eventsourcing/memory"
 )
 
 // Test event types
@@ -67,7 +67,7 @@ func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envel
 // Save Tests
 
 func TestSave_EmptySlice(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	result, err := store.Save(context.Background(), []cqrs.Envelope{}, cqrs.Any{})
@@ -81,7 +81,7 @@ func TestSave_EmptySlice(t *testing.T) {
 }
 
 func TestSave_SingleEvent(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	event := newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
@@ -102,7 +102,7 @@ func TestSave_SingleEvent(t *testing.T) {
 }
 
 func TestSave_MultipleEvents(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	events := []cqrs.Envelope{
@@ -122,7 +122,7 @@ func TestSave_MultipleEvents(t *testing.T) {
 }
 
 func TestSave_MixedStreamIDs_Fails(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	events := []cqrs.Envelope{
@@ -146,7 +146,7 @@ func TestSave_MixedStreamIDs_Fails(t *testing.T) {
 // Revision Tests
 
 func TestSave_NoStream_Success(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	event := newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
@@ -161,7 +161,7 @@ func TestSave_NoStream_Success(t *testing.T) {
 }
 
 func TestSave_NoStream_FailsWhenStreamExists(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Create stream first
@@ -181,7 +181,7 @@ func TestSave_NoStream_FailsWhenStreamExists(t *testing.T) {
 }
 
 func TestSave_StreamExists_Success(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Create stream first
@@ -201,7 +201,7 @@ func TestSave_StreamExists_Success(t *testing.T) {
 }
 
 func TestSave_StreamExists_FailsWhenNoStream(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	event := newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
@@ -216,7 +216,7 @@ func TestSave_StreamExists_FailsWhenNoStream(t *testing.T) {
 }
 
 func TestSave_Revision_Success(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Create stream with 2 events
@@ -239,7 +239,7 @@ func TestSave_Revision_Success(t *testing.T) {
 }
 
 func TestSave_Revision_Conflict(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Create stream with 2 events
@@ -266,7 +266,7 @@ func TestSave_Revision_Conflict(t *testing.T) {
 // LoadStream Tests
 
 func TestLoadStream_ExistingStream(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save events
@@ -296,7 +296,7 @@ func TestLoadStream_ExistingStream(t *testing.T) {
 }
 
 func TestLoadStream_NonExistingStream(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	_, err := store.LoadStream(context.Background(), "non-existing")
@@ -310,7 +310,7 @@ func TestLoadStream_NonExistingStream(t *testing.T) {
 }
 
 func TestLoadStream_ContextCancellation(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save many events
@@ -344,7 +344,7 @@ func TestLoadStream_ContextCancellation(t *testing.T) {
 // LoadStreamFrom Tests
 
 func TestLoadStreamFrom_AtVersion(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save 5 events
@@ -375,7 +375,7 @@ func TestLoadStreamFrom_AtVersion(t *testing.T) {
 }
 
 func TestLoadStreamFrom_InvalidVersion(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save 2 events
@@ -403,7 +403,7 @@ func TestLoadStreamFrom_InvalidVersion(t *testing.T) {
 // smaller out-of-range revisions, rather than deferring an error to the
 // iterator or panicking.
 func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
-	store := memory.NewMemoryStore(0)
+	store := memory.NewEventStore(0)
 	defer store.Close()
 
 	// A Revision whose uint64 value is >= 2^63 becomes negative once
@@ -425,7 +425,7 @@ func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
 }
 
 func TestLoadStreamFrom_StreamExists(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save events
@@ -447,7 +447,7 @@ func TestLoadStreamFrom_StreamExists(t *testing.T) {
 }
 
 func TestLoadStreamFrom_NoStream(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save events
@@ -470,7 +470,7 @@ func TestLoadStreamFrom_NoStream(t *testing.T) {
 // ReadAll Tests
 
 func TestReadAll_AllEvents(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save events to multiple streams
@@ -505,7 +505,7 @@ func TestReadAll_AllEvents(t *testing.T) {
 }
 
 func TestReadAll_AfterPosition(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	// Save 5 events
@@ -526,7 +526,7 @@ func TestReadAll_AfterPosition(t *testing.T) {
 // page at the end of the log, with Next left where it was, rather than an
 // error, since a position past the head is simply nothing new yet.
 func TestReadAll_AfterHead(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	_, _ = store.Save(context.Background(), []cqrs.Envelope{
@@ -549,7 +549,7 @@ func TestReadAll_AfterHead(t *testing.T) {
 // Events Channel Tests
 
 func TestEvents_ReceivesPublishedEvents(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	eventsChan := store.Events()
@@ -571,7 +571,7 @@ func TestEvents_ReceivesPublishedEvents(t *testing.T) {
 // Close Tests
 
 func TestClose(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 
 	err := store.Close()
 	if err != nil {
@@ -593,7 +593,7 @@ func TestClose(t *testing.T) {
 // Concurrency Tests
 
 func TestConcurrent_Saves(t *testing.T) {
-	store := memory.NewMemoryStore(100)
+	store := memory.NewEventStore(100)
 	defer store.Close()
 
 	done := make(chan bool)
@@ -625,7 +625,7 @@ func TestConcurrent_Saves(t *testing.T) {
 }
 
 func TestConcurrent_SaveAndLoad(t *testing.T) {
-	store := memory.NewMemoryStore(100)
+	store := memory.NewEventStore(100)
 	defer store.Close()
 
 	// First create the stream
@@ -665,7 +665,7 @@ func TestConcurrent_SaveAndLoad(t *testing.T) {
 // panicked with "close of closed channel", contrary to the EventStore
 // contract that Close must be idempotent.
 func TestClose_CalledTwice_Panics(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 
 	if err := store.Close(); err != nil {
 		t.Fatalf("first Close: unexpected error: %v", err)
@@ -687,7 +687,7 @@ func TestClose_CalledTwice_Panics(t *testing.T) {
 // not a closed one, so any Save call after Close panicked with "send on
 // closed channel" instead of returning an error.
 func TestSave_AfterClose_Panics(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: unexpected error: %v", err)
@@ -726,7 +726,7 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := memory.NewMemoryStore(10)
+			store := memory.NewEventStore(10)
 			defer store.Close()
 
 			if tt.eventCount > 0 {
@@ -763,7 +763,7 @@ func (c createOrder) AggregateID() string { return c.ID }
 func (c createOrder) CommandType() string { return "createOrder" }
 
 func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 
 	handler := cqrs.NewCommandHandler(
@@ -800,7 +800,7 @@ func (e closeTestEvent) EventType() string   { return "closeTestEvent" }
 // event log ReadAll reads, not just per-stream reads.
 func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	ctx := context.Background()
 
 	if _, err := store.Save(ctx, []cqrs.Envelope{
@@ -836,7 +836,7 @@ func (e aliasTestEvent) EventType() string   { return "aliasTestEvent" }
 // latest Save call's contents.
 func TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes(t *testing.T) {
 
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	ctx := context.Background()
 
 	// A single-element buffer reused across independent Save calls, as a
@@ -872,14 +872,14 @@ func TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes(t *testing.T)
 }
 
 func TestAcceptance(t *testing.T) {
-	store := memory.NewMemoryStore(0)
+	store := memory.NewEventStore(0)
 	t.Cleanup(func() { store.Close() })
 
 	eventsourcingtest.AcceptanceTest(t, store)
 }
 
 func TestGlobalReaderAcceptance(t *testing.T) {
-	store := memory.NewMemoryStore(0)
+	store := memory.NewEventStore(0)
 	t.Cleanup(func() { store.Close() })
 
 	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
@@ -889,7 +889,7 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 // GlobalPosition, and assigned it to the caller's slice instead, so every
 // stored event read back with GlobalPosition 0.
 func TestSave_StoresGlobalPosition(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 	ctx := context.Background()
 
@@ -929,7 +929,7 @@ func TestSave_StoresGlobalPosition(t *testing.T) {
 // slice. A caller reusing that slice across Save calls saw every envelope
 // still buffered on the channel rewritten to the latest call's data.
 func TestSave_EventsChannelDoesNotAliasCallerSlice(t *testing.T) {
-	store := memory.NewMemoryStore(10)
+	store := memory.NewEventStore(10)
 	defer store.Close()
 	ctx := context.Background()
 
@@ -961,7 +961,7 @@ func TestSave_EventsChannelDoesNotAliasCallerSlice(t *testing.T) {
 
 // readAll pages through the store's global log after position after and
 // returns every event.
-func readAll(t *testing.T, store *memory.MemoryStore, after uint64) []*cqrs.Envelope {
+func readAll(t *testing.T, store *memory.EventStore, after uint64) []*cqrs.Envelope {
 	t.Helper()
 	var out []*cqrs.Envelope
 	for {
