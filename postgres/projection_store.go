@@ -286,19 +286,64 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
 // inside the Commit that moves the checkpoint past the event.
-func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, position uint64, eventType string, cause error) error {
+func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, d projection.DeadLetter) error {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	if !ok {
 		return errors.New("postgres: SaveDeadLetter called outside a ProjectionStore commit")
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
-		(projection, segment, global_position, event_type, error)
-		VALUES ($1, $2, $3, $4, $5)`,
-		l.Name, l.Segment, position, eventType, cause.Error(),
+		(projection, segment, global_position, stream_id, event_type, error)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		l.Name, l.Segment, d.Position, d.StreamID, d.EventType, d.Error,
 	)
 	if err != nil {
-		return fmt.Errorf("postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
+		return fmt.Errorf("postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, d.Position, err)
+	}
+	return nil
+}
+
+// LoadDeadLetters implements [projection.DeadLetterStore].
+func (s *ProjectionStore) LoadDeadLetters(ctx context.Context, name string, segment int) ([]projection.DeadLetter, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT global_position, stream_id, event_type, error
+		FROM projection_dead_letters
+		WHERE projection = $1 AND segment = $2
+		ORDER BY global_position`,
+		name, segment,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+	}
+	defer rows.Close()
+	var out []projection.DeadLetter
+	for rows.Next() {
+		var d projection.DeadLetter
+		if err := rows.Scan(&d.Position, &d.StreamID, &d.EventType, &d.Error); err != nil {
+			return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+	}
+	return out, nil
+}
+
+// DeleteDeadLetter implements [projection.DeadLetterStore]. It is called
+// inside the Commit that applies the event again.
+func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lease, position uint64) error {
+	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
+	if !ok {
+		return errors.New("postgres: DeleteDeadLetter called outside a ProjectionStore commit")
+	}
+	_, err := tx.Exec(ctx, `
+		DELETE FROM projection_dead_letters
+		WHERE projection = $1 AND segment = $2 AND global_position = $3`,
+		l.Name, l.Segment, position,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: delete dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
 	}
 	return nil
 }

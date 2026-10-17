@@ -47,10 +47,11 @@ CREATE TABLE IF NOT EXISTS projection_dead_letters (
     projection      TEXT    NOT NULL,
     segment         INTEGER NOT NULL,
     global_position INTEGER NOT NULL,
+    stream_id       TEXT    NOT NULL DEFAULT '',
     event_type      TEXT    NOT NULL,
     error           TEXT    NOT NULL,
     skipped_at      INTEGER NOT NULL -- Unix time in milliseconds
 );
 
 CREATE INDEX IF NOT EXISTS idx_projection_dead_letters_projection
-    ON projection_dead_letters (projection, global_position);
+    ON projection_dead_letters (projection, segment, global_position);

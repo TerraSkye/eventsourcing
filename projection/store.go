@@ -227,13 +227,40 @@ type Store interface {
 	LoadStatuses(ctx context.Context, name string) ([]Status, error)
 }
 
+// DeadLetter is an event a segment skipped instead of applying.
+type DeadLetter struct {
+	// Position is the event's GlobalPosition.
+	Position uint64
+
+	// StreamID is the event's stream. A stream with a dead letter is
+	// parked: the segment skips its later events too, until
+	// [Runner.ReplayStream] applies them.
+	StreamID string
+
+	// EventType is the event's registered name.
+	EventType string
+
+	// Error is why the event was skipped: the handler's error, or
+	// [ErrStreamParked] for a later event of a parked stream.
+	Error string
+}
+
 // DeadLetterStore is optionally implemented by a [Store] to record events
-// the runner skipped under a non-stalling error policy, so they can be
-// inspected and replayed. It is called inside the Commit that moves the
-// checkpoint past the event, so the record and the move commit together.
+// the runner skipped, so they can be inspected and replayed. Without it a
+// skipped event is gone, and a parked stream is forgotten when the runner
+// stops.
 type DeadLetterStore interface {
-	// SaveDeadLetter records that the segment l skipped the event at
-	// position because its handler returned cause. ctx carries the Commit's
-	// unit of work.
-	SaveDeadLetter(ctx context.Context, l Lease, position uint64, eventType string, cause error) error
+	// SaveDeadLetter records d for the segment l. It is called inside the
+	// Commit that moves the checkpoint past the event, and ctx carries that
+	// Commit's unit of work, so the record and the move commit together.
+	SaveDeadLetter(ctx context.Context, l Lease, d DeadLetter) error
+
+	// LoadDeadLetters returns the dead letters of segment segment of the
+	// projection name, ordered by Position.
+	LoadDeadLetters(ctx context.Context, name string, segment int) ([]DeadLetter, error)
+
+	// DeleteDeadLetter removes the dead letter at position from the
+	// segment l. It is called inside the Commit that applies the event
+	// again, and ctx carries that Commit's unit of work.
+	DeleteDeadLetter(ctx context.Context, l Lease, position uint64) error
 }
