@@ -65,6 +65,11 @@ release may break the API; every break is listed under **Breaking**.
   or OpenTelemetry. It requires Go 1.24; `postgres` and `kurrentdb`
   require Go 1.25.
 
+### Deprecated
+
+- Package `file`. Use `sqlite` instead; `sqlite.Import` copies a file
+  store's events into SQLite. `file` will be removed in a later release.
+
 ### Added
 
 - `eventsourcing.GlobalReader`, `ReadOptions` and `ReadResult`, with
