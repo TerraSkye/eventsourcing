@@ -164,7 +164,7 @@ The read model's tables must be in the same database as the store's tables, sinc
 A read model is eventually consistent. Two methods let you wait for it:
 
 - `runner.IsLive(ctx)` reports whether the projection has reached the head of the log. Use it for readiness probes, or to hold off work that must not see a half-built read model.
-- `runner.WaitUntil(ctx, globalVersion)` blocks until the projection has processed the log up to that position. Use it for read-your-writes after a command:
+- `runner.WaitUntil(ctx, position)` blocks until the projection has processed the log up to that position. Use it for read-your-writes after a command:
 
 ```go
 res, err := commandBus.Dispatch(ctx, createtask.CreateTask{...})
@@ -239,10 +239,11 @@ if err := runner.ReplayStream(ctx, "order-42"); err != nil {
 }
 ``` A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
-The runner does not log. Wrap the handler to log failures, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
+The runner logs its lifecycle to `Logger` (default `slog.Default()`): a segment claimed, released or lost, a rebuild started and finished, an event skipped, and a segment stalled with its error. It logs nothing per applied event and nothing while idle. To log every handler call as well, wrap the handler, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
 
 ```go
 p := tasklist.NewProjection(list)
+p.Logger = logger
 p.Handler = logging.WithEventLogging(logger, p.Handler)
 runner := projection.NewRunner(p, eventStore, memory.NewProjectionStore())
 ```

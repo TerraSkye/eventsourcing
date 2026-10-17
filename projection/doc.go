@@ -159,9 +159,11 @@
 // prevent that, since a retry is not a replay. Side effects that must not
 // repeat belong in an automation, not in a projection.
 //
-// The runner does not log. To log handler failures, wrap the Handler, for
-// example with logging.WithEventLogging; [Runner.Status] reports why a
-// segment is stalled.
+// The runner logs its lifecycle to [Definition.Logger]: claims, releases,
+// rebuilds, skipped events and stalls, never each applied event. To log
+// handler calls, wrap the Handler, for example with
+// logging.WithEventLogging. [Runner.Status] reports why a segment is
+// stalled.
 //
 // A handler that returns [eventsourcing.SkippedEventError] has declined
 // the event; that is not a failure, and the checkpoint moves past it.

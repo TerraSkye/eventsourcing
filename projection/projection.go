@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"hash/fnv"
+	"log/slog"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -201,6 +202,16 @@ type Definition struct {
 	// OnError is what the runner does when a handler fails on an event;
 	// see [ErrorPolicy]. Default [StallOnError].
 	OnError ErrorPolicy
+
+	// Logger receives the runner's lifecycle: a segment claimed, released
+	// or lost (Info, Warn), a rebuild started and finished (Info), an event
+	// skipped (Warn), and a segment stalled with its error (Error). Every
+	// record carries projection, segment, owner, position and head. The
+	// runner logs nothing per applied event and nothing while idle; to log
+	// handler calls, wrap Handler, for example with
+	// logging.WithEventLogging. Default slog.Default(); pass
+	// slog.New(slog.DiscardHandler) for silence.
+	Logger *slog.Logger
 
 	// Owner identifies this instance to the store, so other instances see
 	// who holds a segment. Claims are fenced by [Lease.Epoch], so two
