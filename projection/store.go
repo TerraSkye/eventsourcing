@@ -29,7 +29,7 @@ type Checkpoint struct {
 	Position uint64
 
 	// Version is the projection version that wrote the read model; see
-	// [Projection.Version].
+	// [Definition.Version].
 	Version int
 
 	// ReplayUntil is the position up to which events count as replayed; see
@@ -113,7 +113,7 @@ type Status struct {
 	Owner string
 
 	// Segment is which segment this status describes. 0 for an
-	// unsegmented projection ([Projection.Segments] <= 1).
+	// unsegmented projection ([Definition.Segments] <= 1).
 	Segment int
 
 	// Age is how long ago this status was published, by the store's clock
@@ -125,7 +125,7 @@ type Status struct {
 // Lease identifies one segment of a projection and the instance that
 // claims it. Every [Store] call that acts on a claimed segment takes one.
 type Lease struct {
-	// Name is the projection's name; see [Projection.Name].
+	// Name is the projection's name; see [Definition.Name].
 	Name string
 
 	// Segment is the segment, in [0, segments). 0 for a single-segment
@@ -133,7 +133,7 @@ type Lease struct {
 	Segment int
 
 	// Owner identifies the instance that claims the segment; see
-	// [Projection.Owner].
+	// [Definition.Owner].
 	Owner string
 
 	// Epoch is the fencing token of the claim, as returned by

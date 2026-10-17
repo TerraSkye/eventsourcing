@@ -44,7 +44,7 @@ import (
 // segment 0.
 //
 // projection_dead_letters holds events skipped under
-// [projection.Projection.OnError] on a non-stalling policy.
+// [projection.Definition.OnError] on a non-stalling policy.
 const Schema = `
 CREATE TABLE IF NOT EXISTS projection_segments (
     name          TEXT        NOT NULL,

@@ -33,8 +33,8 @@ Put the version in both the projection's name and its table, so the next version
 ```go
 package tasklist
 
-func NewProjectionV2() projection.Projection {
-    return projection.Projection{
+func NewProjectionV2() projection.Definition {
+    return projection.Definition{
         Name:    "task-list-v2",
         Handler: eventsourcing.NewEventHandlerFunc(handleV2),
         Events:  []string{"TaskCreated", "TaskCompleted", "TaskRenamed"},

@@ -18,7 +18,7 @@ log ───► │ ReadAll(after checkpoint, Events) ──►   │
 
 A runner needs three things:
 
-1. A `projection.Projection`: the projection's name, its handler, and the event types it handles.
+1. A `projection.Definition`: the projection's name, its handler, and the event types it handles.
 2. An `eventsourcing.GlobalReader` to read the log from. The memory, file, Postgres and KurrentDB event stores all implement it.
 3. A `projection.Store` that holds checkpoints, claims and status. Use `projection/memory` for in-memory read models and tests, and `projection/postgres` for read models in Postgres.
 
@@ -30,7 +30,7 @@ A slice that owns a read model has three parts:
 - the **projection**: how events turn into that read model;
 - the **query**: reads the read model. It never needs the projection.
 
-An in-memory read model is a type both sides share. The projection is a constructor that returns a `projection.Projection` with one handler that switches on the event type:
+An in-memory read model is a type both sides share. The projection is a constructor that returns a `projection.Definition` with one handler that switches on the event type:
 
 ```go
 package tasklist
@@ -41,8 +41,8 @@ type TaskList struct {
     tasks map[string]*Task
 }
 
-func NewProjection(list *TaskList) projection.Projection {
-    return projection.Projection{
+func NewProjection(list *TaskList) projection.Definition {
+    return projection.Definition{
         Name:    "task-list",
         Handler: eventsourcing.NewEventHandlerFunc(list.handle),
         Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -72,12 +72,12 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 If you prefer one method per event type, group them and pass the group's filter:
 
 ```go
-func NewProjection(list *TaskList) projection.Projection {
+func NewProjection(list *TaskList) projection.Definition {
     group := eventsourcing.NewEventGroupProcessor(
         eventsourcing.OnEvent(list.onTaskCreated),
         eventsourcing.OnEvent(list.onTaskCompleted),
     )
-    return projection.Projection{
+    return projection.Definition{
         Name:    "task-list",
         Handler: group,
         Events:  group.StreamFilter(),
@@ -103,7 +103,7 @@ go runner.Run(ctx)
 
 With `memory.NewStore()` the checkpoint lives in memory too, so the projection replays the whole log on every start. That is right for an in-memory read model, which is empty after a restart anyway.
 
-`Projection` is a plain value, so `main.go` can still change how it runs, such as `PollInterval` or a logging wrapper (see [Failures](#failures)), without the slice knowing.
+`Definition` is a plain value, so `main.go` can still change how it runs, such as `PollInterval` or a logging wrapper (see [Failures](#failures)), without the slice knowing.
 
 ## Store the read model in Postgres
 
@@ -120,8 +120,8 @@ Here the read model is the `tasks` table, so the projection keeps no state. The 
 ```go
 package tasklist
 
-func NewProjection() projection.Projection {
-    return projection.Projection{
+func NewProjection() projection.Definition {
+    return projection.Definition{
         Name:    "task-list",
         Handler: eventsourcing.NewEventHandlerFunc(handle),
         Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -184,8 +184,8 @@ At the head of the log the runner polls every `PollInterval` (1s by default). Ca
 When you change how a projection writes its read model, rebuild it from the start of the log. Give the projection a `Reset` that wipes the read model, and bump `Version` in the same change as the handler:
 
 ```go
-func NewProjection() projection.Projection {
-    return projection.Projection{
+func NewProjection() projection.Definition {
+    return projection.Definition{
         Name:    "task-list",
         Handler: eventsourcing.NewEventHandlerFunc(handle),
         Events:  []string{"TaskCreated", "TaskCompleted"},
@@ -252,8 +252,8 @@ The claim's heartbeat is refreshed when a batch commits, not while its handlers 
 When one instance cannot keep up, split the projection into segments:
 
 ```go
-func NewProjection() projection.Projection {
-    return projection.Projection{
+func NewProjection() projection.Definition {
+    return projection.Definition{
         Name:       "order-summaries",
         Handler:    eventsourcing.NewEventHandlerFunc(handle),
         Events:     []string{"OrderPlaced", "OrderShipped"},
