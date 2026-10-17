@@ -273,7 +273,7 @@ if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
 
 ## Going further
 
-- **A durable read model.** Keep the task list in Postgres with `projection/postgres`: the handler's writes and the checkpoint commit in one transaction, so a restart resumes where it left off instead of starting over.
+- **A durable read model.** Keep the task list in Postgres with `postgres.NewProjectionStore`: the handler's writes and the checkpoint commit in one transaction, so a restart resumes where it left off instead of starting over.
 - **Rebuilds.** Give the projection a `Version` and a `Reset`; bumping the version rebuilds the read model from the start of the log.
 - **Several instances.** Run the same projection in every instance of the service; one processes the events and the others stand by to take over.
 

@@ -5,12 +5,12 @@ A PostgreSQL-backed implementation of `EventStore` using [pgx](https://github.co
 ## Package
 
 ```
-github.com/terraskye/eventsourcing/eventstore/postgres
+github.com/terraskye/eventsourcing/postgres
 ```
 
 ## Schema
 
-Apply `eventstore/postgres/schema.sql` before use:
+Apply `postgres.Schema` before use. It creates the tables of the event store, the event bus and the projection store; the same SQL ships as `postgres/schema.sql`. The events table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS events (

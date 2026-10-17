@@ -4,11 +4,8 @@ package postgres_test
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -21,115 +18,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	cqrs "github.com/terraskye/eventsourcing"
-	pgbus "github.com/terraskye/eventsourcing/eventbus/postgres"
-	pgstore "github.com/terraskye/eventsourcing/eventstore/postgres"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/terraskye/eventsourcing/postgres"
 )
-
-//go:embed schema.sql
-var busSchema string
-
-// events table schema — kept in sync with eventstore/postgres/schema.sql
-const storeSchema = `
-CREATE TABLE IF NOT EXISTS events (
-    id              BIGSERIAL    PRIMARY KEY,
-    event_id        UUID         NOT NULL,
-    stream_id       VARCHAR      NOT NULL,
-    stream_position BIGINT       NOT NULL,
-    event_type      VARCHAR      NOT NULL,
-    payload         BYTEA        NOT NULL,
-    metadata        BYTEA,
-    occurred_at     TIMESTAMPTZ  NOT NULL,
-    UNIQUE (stream_id, stream_position)
-);
-CREATE INDEX IF NOT EXISTS idx_events_stream_id ON events (stream_id);
-`
-
-// --- Test event type ---
-
-type OrderCreated struct {
-	OrderID string
-}
-
-func (e *OrderCreated) AggregateID() string { return e.OrderID }
-func (e *OrderCreated) EventType() string   { return "OrderCreated" }
-
-// --- Package-level state ---
-
-var testDSN string
-
-func TestMain(m *testing.M) {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &OrderCreated{} })
-
-	ctx := context.Background()
-	pgc, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("testdb"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-	)
-	if err != nil {
-		log.Fatalf("start postgres container: %v", err)
-	}
-	defer pgc.Terminate(ctx) //nolint:errcheck
-
-	testDSN, err = pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		log.Fatalf("get connection string: %v", err)
-	}
-
-	pool, err := pgxpool.New(ctx, testDSN)
-	if err != nil {
-		log.Fatalf("connect: %v", err)
-	}
-	// pgxpool.New is lazy; ping with retries to wait for the container to be
-	// fully accepting connections (it can reset connections briefly after the
-	// "ready" log line appears).
-	for i := range 20 {
-		if err = pool.Ping(ctx); err == nil {
-			break
-		}
-		if i == 19 {
-			log.Fatalf("ping postgres: %v", err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if _, err = pool.Exec(ctx, storeSchema); err != nil {
-		log.Fatalf("apply store schema: %v", err)
-	}
-	if _, err = pool.Exec(ctx, busSchema); err != nil {
-		log.Fatalf("apply bus schema: %v", err)
-	}
-	pool.Close()
-
-	os.Exit(m.Run())
-}
-
-// --- Helpers ---
-
-func newPool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, testDSN)
-	if err != nil {
-		t.Fatalf("connect pool: %v", err)
-	}
-	_, err = pool.Exec(ctx, "TRUNCATE events RESTART IDENTITY; TRUNCATE event_subscriptions")
-	if err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
-	return cqrs.Envelope{
-		EventID:    uuid.New(),
-		StreamID:   streamID,
-		Event:      event,
-		OccurredAt: time.Now(),
-		Metadata:   map[string]any{},
-	}
-}
 
 // collectHandler returns a handler that appends received events to a slice,
 // and a function to read the current snapshot of that slice.
@@ -169,8 +59,8 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 
 func TestSubscribe_ReceivesEvents(t *testing.T) {
 	pool := newPool(t)
-	store := pgstore.NewEventStore(pool)
-	bus := pgbus.NewEventBus(pool, 20*time.Millisecond)
+	store := postgres.NewEventStore(pool)
+	bus := postgres.NewEventBus(pool, 20*time.Millisecond)
 	defer bus.Close() //nolint:errcheck
 
 	handler, snapshot := collectHandler()
@@ -196,7 +86,7 @@ func TestSubscribe_ReceivesEvents(t *testing.T) {
 
 func TestSubscribe_PositionPersisted(t *testing.T) {
 	pool := newPool(t)
-	store := pgstore.NewEventStore(pool)
+	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
 	// Save 2 events, then start a subscriber and let it consume them.
@@ -205,7 +95,7 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 	}, cqrs.Any{})
 
-	bus1 := pgbus.NewEventBus(pool, 20*time.Millisecond)
+	bus1 := postgres.NewEventBus(pool, 20*time.Millisecond)
 	handler1, snapshot1 := collectHandler()
 	subCtx, cancel := context.WithCancel(context.Background())
 
@@ -227,7 +117,7 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 
 	// Start a new bus with the same subscriber name. It must resume from the
 	// persisted position and only deliver the third event.
-	bus2 := pgbus.NewEventBus(pool, 20*time.Millisecond)
+	bus2 := postgres.NewEventBus(pool, 20*time.Millisecond)
 	defer bus2.Close() //nolint:errcheck
 	handler2, snapshot2 := collectHandler()
 
@@ -250,8 +140,8 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 //   - TX1 commits → subscriber eventually receives both events in order
 func TestSubscribe_IgnoresInFlightTransactions(t *testing.T) {
 	pool := newPool(t)
-	store := pgstore.NewEventStore(pool)
-	bus := pgbus.NewEventBus(pool, 20*time.Millisecond)
+	store := postgres.NewEventStore(pool)
+	bus := postgres.NewEventBus(pool, 20*time.Millisecond)
 	defer bus.Close() //nolint:errcheck
 
 	handler, snapshot := collectHandler()
@@ -323,8 +213,8 @@ func TestSubscribe_IgnoresInFlightTransactions(t *testing.T) {
 // its (here, deliberately very long) pollInterval ticker.
 func TestSubscribe_NotifyWakesImmediately(t *testing.T) {
 	pool := newPool(t)
-	store := pgstore.NewEventStore(pool)
-	bus := pgbus.NewEventBus(pool, 10*time.Second)
+	store := postgres.NewEventStore(pool)
+	bus := postgres.NewEventBus(pool, 10*time.Second)
 	defer bus.Close() //nolint:errcheck
 
 	handler, snapshot := collectHandler()
@@ -378,8 +268,8 @@ func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	store := pgstore.NewEventStore(pool)
-	bus := pgbus.NewEventBus(pool, 10*time.Millisecond)
+	store := postgres.NewEventStore(pool)
+	bus := postgres.NewEventBus(pool, 10*time.Millisecond)
 	defer bus.Close() //nolint:errcheck
 
 	const numSubscribers = 20
@@ -425,7 +315,7 @@ func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
 // Subscribe was a data race under `go test -race`.
 func TestUse_RacesWithSubscribe(t *testing.T) {
 	pool := newPool(t)
-	bus := pgbus.NewEventBus(pool, 50*time.Millisecond)
+	bus := postgres.NewEventBus(pool, 50*time.Millisecond)
 	t.Cleanup(func() { _ = bus.Close() })
 
 	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
@@ -471,10 +361,10 @@ func countGoroutinesCreatedBy(substr string) int {
 // life, unaffected by Close.
 func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	const n = 20
-	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/postgres.(*EventBus).Subscribe"
+	const createdBy = "created by github.com/terraskye/eventsourcing/postgres.(*EventBus).Subscribe"
 
 	pool := newPool(t)
-	bus := pgbus.NewEventBus(pool, 50*time.Millisecond)
+	bus := postgres.NewEventBus(pool, 50*time.Millisecond)
 
 	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
 		return nil

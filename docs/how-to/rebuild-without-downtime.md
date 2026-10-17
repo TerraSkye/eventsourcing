@@ -61,7 +61,7 @@ Create `tasks_v2` with your migrations. The new projection does not need a `Vers
 Deploy with both runners. The old one keeps the current read model up to date; the new one works through the log from the start:
 
 ```go
-store := postgres.NewStore(pool)
+store := postgres.NewProjectionStore(pool)
 
 v1 := projection.NewRunner(tasklist.NewProjection(), eventStore, store)
 v2 := projection.NewRunner(tasklist.NewProjectionV2(), eventStore, store)
