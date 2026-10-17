@@ -191,6 +191,57 @@ func TestSave_NoStream_FailsWhenStreamExists(t *testing.T) {
 	}
 }
 
+// slowEvent blocks in MarshalJSON until release is closed, signalling on
+// entered when it starts.
+type slowEvent struct {
+	ID      string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (e *slowEvent) AggregateID() string { return e.ID }
+func (e *slowEvent) EventType() string   { return "SlowEvent" }
+
+func (e *slowEvent) MarshalJSON() ([]byte, error) {
+	close(e.entered)
+	<-e.release
+	return json.Marshal(struct{ ID string }{e.ID})
+}
+
+// TestSave_MarshalsOutsideAppendLock covers that encoding a Save's events
+// does not hold the append lock every Save shares: a Save whose payload is
+// slow to marshal must not stall appends to other streams.
+func TestSave_MarshalsOutsideAppendLock(t *testing.T) {
+	pool := newPool(t)
+	store := pgstore.NewEventStore(pool)
+	ctx := context.Background()
+
+	slow := &slowEvent{ID: "slow-1", entered: make(chan struct{}), release: make(chan struct{})}
+	slowDone := make(chan error, 1)
+	go func() {
+		_, err := store.Save(ctx, []cqrs.Envelope{newEnvelope("slow-1", slow)}, cqrs.Any{})
+		slowDone <- err
+	}()
+	defer func() {
+		close(slow.release)
+		if err := <-slowDone; err != nil {
+			t.Errorf("slow save: %v", err)
+		}
+	}()
+
+	select {
+	case <-slow.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow save never started marshalling")
+	}
+
+	fastCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if _, err := store.Save(fastCtx, []cqrs.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, cqrs.Any{}); err != nil {
+		t.Fatalf("save to another stream while one is marshalling: %v", err)
+	}
+}
+
 func TestLoadStream_NotFound(t *testing.T) {
 	pool := newPool(t)
 	store := pgstore.NewEventStore(pool)
