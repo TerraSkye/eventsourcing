@@ -179,7 +179,7 @@ type Definition struct {
 	// Set this only when one instance cannot keep up. The segment count is
 	// fixed per name; changing it takes a new name. So does rebuilding a
 	// segmented projection: it cannot have a Version, and [Runner.Rebuild]
-	// returns [ErrSegmented].
+	// returns [ErrRebuildSegmented].
 	//
 	// Segments parallelize the handlers, not the reads: every segment reads
 	// the filtered log on its own and drops the events of other segments,

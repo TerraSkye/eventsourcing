@@ -26,10 +26,10 @@ var (
 	// Reset function registered.
 	ErrNoReset = errors.New("projection: rebuild requires a Reset function")
 
-	// ErrSegmented is returned by [Runner.Rebuild] on a segmented projection.
-	// A segmented projection is rebuilt by running it under a new name; see
-	// [Definition.Version].
-	ErrSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
+	// ErrRebuildSegmented is returned by [Runner.Rebuild] on a segmented
+	// projection. A segmented projection is rebuilt by running it under a
+	// new name; see [Definition.Version].
+	ErrRebuildSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
 )
 
 // Runner keeps one projection up to date: it claims the segments it can,
@@ -207,14 +207,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // ctx only bounds how long Rebuild waits: once requested, the rebuild runs
 // even if ctx ends first. Concurrent calls share one rebuild.
 //
-// Rebuild returns [ErrSegmented] on a segmented projection, [ErrNoReset]
+// Rebuild returns [ErrRebuildSegmented] on a segmented projection, [ErrNoReset]
 // when the projection has no Reset, and [ErrNotActive] when this instance
 // is not processing the projection, or stops before the rebuild ran. To
 // rebuild wherever the projection runs, bump [Definition.Version]; to
 // rebuild a segmented projection, run it under a new Name.
 func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.segments > 1 {
-		return ErrSegmented
+		return ErrRebuildSegmented
 	}
 	if r.p.Reset == nil {
 		return ErrNoReset
