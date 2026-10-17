@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,8 +256,24 @@ func TestRunner_Rebuild(t *testing.T) {
 		t.Fatalf("initial WaitUntil: %v", err)
 	}
 
+	// Hold the replay until the status right after Rebuild has been checked.
+	var rebuilding atomic.Bool
+	gate := make(chan struct{})
+	c.fail = func(uint64) error {
+		if rebuilding.Load() {
+			<-gate
+		}
+		return nil
+	}
+	rebuilding.Store(true)
 	if err := r.Rebuild(ctx); err != nil {
+		close(gate)
 		t.Fatalf("Rebuild: %v", err)
+	}
+	st := r.Status()
+	close(gate)
+	if st.Position != 0 || st.Phase != projection.CatchingUp {
+		t.Fatalf("Status() after Rebuild = %s at %d, want %s at 0", st.Phase, st.Position, projection.CatchingUp)
 	}
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("post-rebuild WaitUntil: %v", err)
