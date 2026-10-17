@@ -1,4 +1,4 @@
-package otel
+package telemetry
 
 import (
 	"context"
@@ -37,7 +37,7 @@ type TelemetryEventBus struct {
 // non-error skip. It returns an error if the underlying bus fails to
 // register the subscription.
 //
-//	bus := otel.WithEventBusTelemetry(eventBus)
+//	bus := telemetry.WithEventBusTelemetry(eventBus)
 //	err := bus.Subscribe(ctx, "order-projector", orderProjector)
 func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eventsourcing.EventHandler, options ...eventsourcing.SubscriberOption) error {
 
@@ -136,8 +136,8 @@ func (t *TelemetryEventBus) Close() error {
 // metrics. See [TelemetryEventBus.Subscribe] for what is recorded; options
 // such as [WithAttributes] and [WithOperation] customize the spans produced.
 //
-//	bus := otel.WithEventBusTelemetry(eventBus,
-//	    otel.WithAttributes(attribute.String("service", "orders")),
+//	bus := telemetry.WithEventBusTelemetry(eventBus,
+//	    telemetry.WithAttributes(attribute.String("service", "orders")),
 //	)
 //	err := bus.Subscribe(ctx, "order-projector", handler)
 func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *TelemetryEventBus {

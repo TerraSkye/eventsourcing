@@ -1,4 +1,4 @@
-package otel
+package telemetry
 
 import (
 	"context"
@@ -330,7 +330,7 @@ func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) e
 // instruments an [eventsourcing.EventStore] with OpenTelemetry tracing and
 // metrics; it wraps the store with [WithEventStoreTelemetry].
 //
-//	store = otel.EventStoreTelemetry()(store)
+//	store = telemetry.EventStoreTelemetry()(store)
 func EventStoreTelemetry(options ...Option) eventsourcing.EventStoreMiddleware {
 	return func(next eventsourcing.EventStore) eventsourcing.EventStore {
 		return WithEventStoreTelemetry(next, options...)
