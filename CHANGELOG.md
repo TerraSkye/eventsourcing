@@ -95,5 +95,11 @@ release may break the API; every break is listed under **Breaking**.
   `modernc.org/sqlite` driver, for development, tests that need real
   transactions, and single-process services. It passes the same
   acceptance suites as the Postgres store, in memory and on disk.
+- Package `automation` runs Event Modeling automations: `automation.New`
+  takes a `Definition[T]` with a todo list to wait for, a `ClaimFunc` that
+  leases pending items and a `WorkFunc` for one item, claims only while
+  the todo list and `WaitFor` dependencies are live, and reports a
+  `Phase` and counts like a projection. `automationtest.ClaimAcceptanceTest`
+  checks a todo list's claim. Tutorial 5 is rewritten around it.
 - The `telemetry` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.
