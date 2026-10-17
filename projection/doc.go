@@ -101,7 +101,7 @@
 //
 // A runner that is behind the head of the log is [CatchingUp]; once a read
 // reaches the head it is [Live]. [Runner.Status] reports the current
-// [Phase], and [Runner.Live] answers the common question directly. Use it
+// [Phase], and [Runner.IsLive] answers the common question directly. Use it
 // to gate work that must not run on a half-built read model: a readiness
 // probe, an automation, or a test's wait with [Runner.WaitUntil].
 //

@@ -78,7 +78,7 @@ While `v2` processes events that were stored before it first started, `projectio
 
 ## Step 3: Wait until the new version is live
 
-`v2.Live(ctx)` reports true once it has reached the head of the log. From outside the service, read the status the runner publishes:
+`v2.IsLive(ctx)` reports true once it has reached the head of the log. From outside the service, read the status the runner publishes:
 
 ```sql
 SELECT segment, phase, position, head

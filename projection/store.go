@@ -87,7 +87,7 @@ func (p Phase) String() string {
 // Status describes how a projection, or one of its segments, is doing. The
 // runner publishes it to the [Store] after every committed batch and on
 // every change of [Phase]; other instances read it with [Store.LoadStatuses]
-// to answer [Runner.Live] and [Runner.WaitUntil] about segments they do
+// to answer [Runner.IsLive] and [Runner.WaitUntil] about segments they do
 // not own.
 type Status struct {
 	// Phase is where the segment is in its life cycle.

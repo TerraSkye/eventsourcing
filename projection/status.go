@@ -62,13 +62,13 @@ func (s Status) IsLive(claimTTL time.Duration) bool {
 	return s.Phase == Live && s.Owner != "" && s.Age <= claimTTL
 }
 
-// Live reports whether the projection is live: caught up with the head of
+// IsLive reports whether the projection is live: caught up with the head of
 // the log on every segment, on whichever instance owns each segment.
 //
-// On segments this instance owns, Live answers from memory. On segments
+// On segments this instance owns, IsLive answers from memory. On segments
 // another instance owns, it reads [Store.LoadStatuses] and judges each with
 // [Status.IsLive], so a segment whose owner stopped or crashed is not live.
-func (r *Runner) Live(ctx context.Context) (bool, error) {
+func (r *Runner) IsLive(ctx context.Context) (bool, error) {
 	if r.segments == 1 {
 		r.mu.Lock()
 		st := r.segs[0].status
