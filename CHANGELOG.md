@@ -45,6 +45,8 @@ release may break the API; every break is listed under **Breaking**.
   | `eventstore/memory.NewMemoryStore` | `memory.NewEventStore` |
   | `eventbus/memory.NewEventBus` | `memory.NewEventBus` |
   | `projection/memory.NewStore` | `memory.NewProjectionStore` |
+  | `eventstore/file.NewFileStore` | `file.NewEventStore` |
+  | `eventbus/file.NewFileEventBus` | `file.NewEventBus` |
 
 ### Added
 

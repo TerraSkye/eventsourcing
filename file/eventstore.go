@@ -20,12 +20,12 @@ import (
 )
 
 var (
-	_ cqrs.EventStore   = (*FilesStore)(nil)
-	_ cqrs.GlobalReader = (*FilesStore)(nil)
+	_ cqrs.EventStore   = (*EventStore)(nil)
+	_ cqrs.GlobalReader = (*EventStore)(nil)
 )
 
 // allDirName is the top-level directory holding the symlink fan-in of every
-// event across all streams, used by [FilesStore.ReadAll].
+// event across all streams, used by [EventStore.ReadAll].
 const allDirName = "all"
 
 // streamsDirName is the top-level directory under which each stream gets
@@ -35,12 +35,12 @@ const allDirName = "all"
 // allDirName.
 const streamsDirName = "streams"
 
-// FilesStore is a file-backed [cqrs.EventStore] intended for tests and local
+// EventStore is a file-backed [cqrs.EventStore] intended for tests and local
 // development. Each stream's events are stored as one JSON file per event
 // under its own directory (see streamDir), and a symlink to every event is
-// also kept under an "all" directory to support [FilesStore.ReadAll].
+// also kept under an "all" directory to support [EventStore.ReadAll].
 // It is safe for concurrent use.
-type FilesStore struct {
+type EventStore struct {
 	baseDir   string
 	mu        sync.Mutex
 	closed    bool
@@ -50,7 +50,7 @@ type FilesStore struct {
 	watchDone chan struct{}
 }
 
-// NewFileStore creates a [FilesStore] rooted at dir, creating dir and its
+// NewEventStore creates a [EventStore] rooted at dir, creating dir and its
 // reserved subdirectories if they do not already exist. If dir already
 // contains events from a previous instance, the global sequence used to
 // number new events (see Save) resumes after the highest one already on
@@ -58,10 +58,10 @@ type FilesStore struct {
 //
 // A background watcher then keeps that sequence in sync with allDir for the
 // life of the store (see watchGlobalSequence), not just at startup: if
-// another FilesStore instance is writing into the same directory
+// another EventStore instance is writing into the same directory
 // concurrently, its symlinks bump this store's globalSeq too, so the two
 // don't reissue each other's versions.
-func NewFileStore(dir string) (*FilesStore, error) {
+func NewEventStore(dir string) (*EventStore, error) {
 	allDir := filepath.Join(dir, allDirName)
 	if err := os.MkdirAll(allDir, 0o755); err != nil {
 		return nil, err
@@ -90,7 +90,7 @@ func NewFileStore(dir string) (*FilesStore, error) {
 		return nil, fmt.Errorf("recover global sequence: %w", err)
 	}
 
-	f := &FilesStore{
+	f := &EventStore{
 		baseDir:   dir,
 		bus:       make(chan *cqrs.Envelope, 100),
 		globalSeq: globalSeq,
@@ -122,12 +122,12 @@ func highestGlobalPosition(allDir string) (uint64, error) {
 
 // watchGlobalSequence keeps f.globalSeq in sync with allDir for the life of
 // the store: whenever a new symlink appears there — from this store's own
-// Save or from a peer FilesStore instance writing into the same directory
+// Save or from a peer EventStore instance writing into the same directory
 // concurrently — its encoded global position is folded into f.globalSeq if
 // higher, so the next Save (by either instance, once it also observes the
 // other's writes) resumes past it instead of reissuing it. It returns once
 // f.watcher is closed (see Close).
-func (f *FilesStore) watchGlobalSequence() {
+func (f *EventStore) watchGlobalSequence() {
 	defer close(f.watchDone)
 
 	for {
@@ -185,7 +185,7 @@ func eventFileName(v uint64, eventType string) string {
 	return fmt.Sprintf("%020d-%s.json", v, eventType)
 }
 
-func (f *FilesStore) streamDir(id string) string {
+func (f *EventStore) streamDir(id string) string {
 	return filepath.Join(f.baseDir, streamsDirName, id)
 }
 
@@ -221,7 +221,7 @@ func (f *FilesStore) streamDir(id string) string {
 // silently overwrite earlier ones on disk and Save still reports success
 // with no error (confirmed: saving 3 events with Version left unset leaves
 // only 1 file, and LoadStream then returns only that 1 event).
-func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
+func (f *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
 	if len(events) == 0 {
 		return cqrs.AppendResult{Successful: true}, nil
 	}
@@ -389,7 +389,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 // LoadStream returns a lazy iterator over all events in the stream
 // identified by id, in the order they were appended. It returns a non-nil
 // error if the stream does not exist.
-func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *EventStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(ctx, f.streamDir(id), cqrs.StreamExists{})
 }
 
@@ -401,7 +401,7 @@ func (f *FilesStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 // any other [cqrs.StreamState], including [cqrs.Any], reads from the
 // beginning of the stream. It also returns a non-nil error if the requested
 // revision is beyond the stream's current length.
-func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *EventStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	return f.loadFromDir(ctx, f.streamDir(id), version)
 }
 
@@ -411,9 +411,9 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 //
 // The listing is taken under the store's lock, so it never includes part of
 // a batch that this store is still writing and might roll back. Another
-// FilesStore writing into the same directory is not covered by that lock;
+// EventStore writing into the same directory is not covered by that lock;
 // sharing a directory between writers is for tests only.
-func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
+func (f *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
 	if err := ctx.Err(); err != nil {
 		return cqrs.ReadResult{}, err
 	}
@@ -465,7 +465,7 @@ func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 
 // Head implements [cqrs.GlobalReader]: it returns the highest GlobalPosition
 // in the "all" directory, or 0 if it is empty.
-func (f *FilesStore) Head(ctx context.Context) (uint64, error) {
+func (f *EventStore) Head(ctx context.Context) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return highestGlobalPosition(filepath.Join(f.baseDir, allDirName))
@@ -520,7 +520,7 @@ func readEventFile(path string) (*cqrs.Envelope, error) {
 // exclusive: only versions above N are returned, matching
 // [memory.EventStore] and the Postgres implementation of the
 // same method. Every other StreamState reads the directory whole.
-func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (f *EventStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// A stream's directory is only created lazily, on its first successful
 	// Save, so a never-saved stream (a perfectly normal thing to load, e.g.
 	// via Any{} or NoStream{} for a brand-new aggregate) has no directory at
@@ -639,14 +639,14 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 // tests and local tooling can observe writes as they happen. The channel has
 // a fixed buffer of 100 and sends are non-blocking, so a slow consumer
 // misses events rather than blocking Save. The channel is closed by Close.
-func (f *FilesStore) Events() <-chan *cqrs.Envelope {
+func (f *EventStore) Events() <-chan *cqrs.Envelope {
 	return f.bus
 }
 
 // Close stops the background watcher (see watchGlobalSequence) and closes
 // the channel returned by Events. After Close, Save returns an error
 // instead of appending. Calling Close more than once is a no-op.
-func (f *FilesStore) Close() error {
+func (f *EventStore) Close() error {
 	f.mu.Lock()
 	if f.closed {
 		f.mu.Unlock()
@@ -667,7 +667,11 @@ func (f *FilesStore) Close() error {
 	return nil
 }
 
-// storedEvent is the on-disk JSON representation of a saved [cqrs.Envelope].
+// storedEvent is the on-disk JSON representation of an envelope, as the
+// store saves it and the bus dispatches it. Envelope.Event is an interface
+// with no (un)marshaller, so storedEvent keeps the payload as raw JSON next
+// to an EventType discriminator, from which the concrete type is rebuilt
+// with [cqrs.NewEventByName].
 type storedEvent struct {
 	EventID        uuid.UUID       `json:"event_id"`
 	StreamID       string          `json:"stream_id"`

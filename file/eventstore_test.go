@@ -32,7 +32,7 @@ func envelopeFor(streamID string, version uint64, name string) cqrs.Envelope {
 
 // TestSave_StreamNamedAllCollidesWithGlobalDir is a regression test for
 // GitHub issue #38: streamDir(id) had no guard against the reserved "all"
-// directory name FilesStore uses for its global symlink fan-in, so a stream
+// directory name EventStore uses for its global symlink fan-in, so a stream
 // literally named "all" read and wrote that same directory. Save with
 // NoStream{} against a brand-new stream "all" incorrectly failed with
 // "stream already exists" once any other stream had saved at least one
@@ -42,9 +42,9 @@ func TestSave_StreamNamedAllCollidesWithGlobalDir(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	store, err := NewFileStore(dir)
+	store, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 
@@ -93,9 +93,9 @@ func TestSave_StreamNamedAllCollidesWithGlobalDir(t *testing.T) {
 // calling it a second time panicked with "close of closed channel",
 // contrary to the EventStore contract that Close must be idempotent.
 func TestFileStoreClose_CalledTwice_Panics(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 
 	if err := store.Close(); err != nil {
@@ -118,9 +118,9 @@ func TestFileStoreClose_CalledTwice_Panics(t *testing.T) {
 // channel, not a closed one, so any Save call after Close panicked with
 // "send on closed channel" instead of returning an error.
 func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 
 	if err := store.Close(); err != nil {
@@ -142,7 +142,7 @@ func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
 }
 
 // TestFileStoreGlobalSequenceSurvivesReopen is a regression test for GitHub
-// issue #40: globalSeq started at 0 on every NewFileStore call and was never
+// issue #40: globalSeq started at 0 on every NewEventStore call and was never
 // recovered from the events already on disk, so reopening a store over an
 // existing directory re-issued global positions that were already taken —
 // causing Save to fail with "file exists" (same event type as an existing
@@ -152,9 +152,9 @@ func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	first, err := NewFileStore(dir)
+	first, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	res, err := first.Save(ctx, []cqrs.Envelope{envelopeFor("cart-1", 0, "first")}, cqrs.NoStream{})
 	if err != nil {
@@ -168,9 +168,9 @@ func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
 	}
 
 	// Reopen the same directory, as a process restart would.
-	second, err := NewFileStore(dir)
+	second, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("reopen NewFileStore: %v", err)
+		t.Fatalf("reopen NewEventStore: %v", err)
 	}
 	defer second.Close()
 
@@ -208,9 +208,9 @@ func TestSave_GlobalSequenceConflictRollsBackBatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	store, err := NewFileStore(dir)
+	store, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 
@@ -271,7 +271,7 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 
 	t.Run("Any_should_yield_empty_iterator", func(t *testing.T) {
 		dir := t.TempDir()
-		store, err := NewFileStore(dir)
+		store, err := NewEventStore(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -288,7 +288,7 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 
 	t.Run("NoStream_should_yield_empty_iterator", func(t *testing.T) {
 		dir := t.TempDir()
-		store, err := NewFileStore(dir)
+		store, err := NewEventStore(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +305,7 @@ func TestLoadStreamFrom_NeverCreatedStream(t *testing.T) {
 
 	t.Run("StreamExists_should_wrap_ErrStreamNotFound", func(t *testing.T) {
 		dir := t.TempDir()
-		store, err := NewFileStore(dir)
+		store, err := NewEventStore(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -343,9 +343,9 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			store, err := NewFileStore(dir)
+			store, err := NewEventStore(dir)
 			if err != nil {
-				t.Fatalf("NewFileStore: %v", err)
+				t.Fatalf("NewEventStore: %v", err)
 			}
 			defer store.Close()
 
@@ -387,7 +387,7 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 
 // TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent documents a bug: unlike
 // [memory.EventStore] and [eventstore/postgres]'s implementation
-// of the same [cqrs.EventStore] interface, FilesStore.LoadStreamFrom treats
+// of the same [cqrs.EventStore] interface, EventStore.LoadStreamFrom treats
 // Revision(N) as an INCLUSIVE start position (returns the event whose
 // Version equals N again) instead of an EXCLUSIVE one (only events with
 // Version > N).
@@ -398,7 +398,7 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 // revision to Revision(lastly-evolved event's Version) before reloading and
 // retrying incrementally rather than from scratch. That retry path depends
 // on LoadStreamFrom(id, Revision(N)) excluding the event already folded into
-// state; FilesStore including it again would double-apply that event to the
+// state; EventStore including it again would double-apply that event to the
 // aggregate's state on every conflict retry.
 //
 // See .bug/eventstore-file-loadstreamfrom-revision-off-by-one-includes-seen-event.md.
@@ -407,9 +407,9 @@ func TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	store, err := NewFileStore(dir)
+	store, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 
@@ -457,9 +457,9 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 	ctx := context.Background()
 	dir := t.TempDir()
 
-	store, err := NewFileStore(dir)
+	store, err := NewEventStore(dir)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 
@@ -496,9 +496,9 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 func TestReadAll_GlobalPositionAbove9999999999KeepsOrder(t *testing.T) {
 	ctx := context.Background()
 
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 
@@ -531,9 +531,9 @@ func TestReadAll_GlobalPositionAbove9999999999KeepsOrder(t *testing.T) {
 }
 
 func TestAcceptance(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 
@@ -541,9 +541,9 @@ func TestAcceptance(t *testing.T) {
 }
 
 func TestGlobalReaderAcceptance(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
 
@@ -568,7 +568,7 @@ func TestFilesStore_EventsChannelAliasesCallerSlice(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	store, err := NewFileStore(dir)
+	store, err := NewEventStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,9 +621,9 @@ func TestSave_UnreadableStreamDirBypassesConcurrencyCheck(t *testing.T) {
 
 	ctx := context.Background()
 
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewEventStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("NewEventStore: %v", err)
 	}
 	defer store.Close()
 

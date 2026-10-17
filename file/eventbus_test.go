@@ -23,9 +23,9 @@ import (
 // instead of being a no-op, unlike the sibling eventbus/memory implementation.
 func TestFileEventBusCloseIdempotent(t *testing.T) {
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 
 	if err := bus.Close(); err != nil {
@@ -46,9 +46,9 @@ func TestFileEventBusCloseIdempotent(t *testing.T) {
 // and completes normally even if Close runs concurrently.
 func TestFileEventBusClose_LetsInFlightHandlerFinish(t *testing.T) {
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 
 	handlerStarted := make(chan struct{})
@@ -125,12 +125,12 @@ func countGoroutinesCreatedBy(substr string) int {
 // rest of the process's life, unaffected by Close.
 func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	const n = 20
-	const createdBy = "created by github.com/terraskye/eventsourcing/eventbus/file.(*FileEventBus).Subscribe"
+	const createdBy = "created by github.com/terraskye/eventsourcing/file.(*EventBus).Subscribe"
 
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 
 	before := countGoroutinesCreatedBy(createdBy)
@@ -173,9 +173,9 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 // concurrently with Subscribe was a data race under `go test -race`.
 func TestFileEventBus_UseRacesWithSubscribe(t *testing.T) {
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 	defer bus.Close()
 
@@ -221,9 +221,9 @@ func init() {
 // and every dispatched file accumulated on disk forever.
 func TestFileEventBusDeliversDispatchedEvent(t *testing.T) {
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 	t.Cleanup(func() { _ = bus.Close() })
 
@@ -299,9 +299,9 @@ func TestFileEventBusDeliversDispatchedEvent(t *testing.T) {
 func TestFileEventBusCrashRecoverySkipsTmpFiles(t *testing.T) {
 
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 	t.Cleanup(func() { _ = bus.Close() })
 
@@ -374,9 +374,9 @@ func TestFileEventBusCrashRecoverySkipsTmpFiles(t *testing.T) {
 func TestDispatch_ConcurrentCallsAreAllDelivered(t *testing.T) {
 
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 	t.Cleanup(func() { _ = bus.Close() })
 

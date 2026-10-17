@@ -383,7 +383,7 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 // that did not exist -- and equally a connection that dropped halfway
 // through a read -- was indistinguishable from a complete, empty read.
 // LoadStream now reports a missing stream as cqrs.ErrStreamNotFound, the
-// same sentinel eventstore/memory and eventstore/file use.
+// same sentinel packages memory and file use.
 func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 	store := kdbstore.NewEventStore(testDB)
 	ctx := context.Background()
