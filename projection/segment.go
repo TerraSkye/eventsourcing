@@ -80,12 +80,8 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 	// processed yet) just picks up the configured version on its first
 	// commit.
 	if r.p.Version != 0 && cp.Version != r.p.Version && cp.Position > 0 {
-		if err := r.store.Reset(ctx, l, r.p.Version, r.p.Reset); err != nil {
-			return fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
-		}
-		r.notifyWatchers()
 		var err error
-		if cp, err = r.reclaim(ctx, l); err != nil {
+		if cp, err = r.rebuild(ctx, seg); err != nil {
 			return err
 		}
 	}
@@ -97,7 +93,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 
 		if req := r.takeRebuild(seg); req != nil {
 			var err error
-			cp, err = r.rebuild(ctx, l)
+			cp, err = r.rebuild(ctx, seg)
 			req.finish(err)
 			if err != nil {
 				return err
@@ -185,13 +181,32 @@ func (r *Runner) reclaim(ctx context.Context, l Lease) (Checkpoint, error) {
 	return cp, nil
 }
 
-// rebuild performs a [Runner.Rebuild] on the segment l and returns the
-// checkpoint to continue from.
-func (r *Runner) rebuild(ctx context.Context, l Lease) (Checkpoint, error) {
+// rebuild resets seg through [Store.Reset] and returns the checkpoint to
+// continue from. Before it returns, the in-memory status is back at
+// position 0, so a [Runner.WaitUntil] after a rebuild waits for the replay
+// rather than seeing the position reached before it.
+func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
+	l := r.lease(seg)
 	if err := r.store.Reset(ctx, l, r.p.Version, r.p.Reset); err != nil {
-		return Checkpoint{}, fmt.Errorf("projection %q: rebuild: %w", r.p.Name, err)
+		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
-	return r.reclaim(ctx, l)
+	cp, err := r.reclaim(ctx, l)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	r.mu.Lock()
+	head := r.segs[seg].status.Head
+	r.mu.Unlock()
+	r.setStatus(seg, Status{
+		Phase:    CatchingUp,
+		Position: cp.Position,
+		Head:     head,
+		Version:  r.p.Version,
+		Owner:    r.p.Owner,
+		Segment:  seg,
+	})
+	r.notifyWatchers()
+	return cp, nil
 }
 
 // ownEvents returns the events that belong to seg, reusing the backing
