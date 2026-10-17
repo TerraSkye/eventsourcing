@@ -83,6 +83,46 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		}
 	}
 
+	// Encode before taking any lock, so the locks cover only the database
+	// work.
+	type row struct {
+		eventID    uuid.UUID
+		eventType  string
+		payload    []byte
+		metadata   []byte
+		occurredAt time.Time
+	}
+	rows := make([]row, len(events))
+	for i, e := range events {
+		payload, err := json.Marshal(e.Event)
+		if err != nil {
+			return cqrs.AppendResult{Successful: false, StreamID: streamID},
+				fmt.Errorf("save events to stream %q: marshal event %d: %w", streamID, i, err)
+		}
+
+		meta := e.Metadata
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		metadataJSON, err := json.Marshal(meta)
+		if err != nil {
+			return cqrs.AppendResult{Successful: false, StreamID: streamID},
+				fmt.Errorf("save events to stream %q: marshal metadata %d: %w", streamID, i, err)
+		}
+
+		occurredAt := e.OccurredAt
+		if occurredAt.IsZero() {
+			occurredAt = time.Now()
+		}
+
+		eventID := e.EventID
+		if eventID == uuid.Nil {
+			eventID = uuid.New()
+		}
+
+		rows[i] = row{eventID, e.Event.EventType(), payload, metadataJSON, occurredAt}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return cqrs.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: begin tx: %w", streamID, err)
@@ -141,39 +181,13 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	nextPosition := currentVersion + 1
 
 	var lastID int64 // id of the last event inserted: its GlobalVersion
-	for i, e := range events {
-		payload, err := json.Marshal(e.Event)
-		if err != nil {
-			return cqrs.AppendResult{Successful: false, StreamID: streamID},
-				fmt.Errorf("save events to stream %q: marshal event %d: %w", streamID, i, err)
-		}
-
-		meta := e.Metadata
-		if meta == nil {
-			meta = map[string]any{}
-		}
-		metadataJSON, err := json.Marshal(meta)
-		if err != nil {
-			return cqrs.AppendResult{Successful: false, StreamID: streamID},
-				fmt.Errorf("save events to stream %q: marshal metadata %d: %w", streamID, i, err)
-		}
-
-		occurredAt := e.OccurredAt
-		if occurredAt.IsZero() {
-			occurredAt = time.Now()
-		}
-
+	for i, r := range rows {
 		pos := int64(nextPosition) + int64(i)
-		eventID := e.EventID
-		if eventID == uuid.Nil {
-			eventID = uuid.New()
-		}
-
 		err = tx.QueryRow(ctx, `
 			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			RETURNING id`,
-			eventID, streamID, pos, e.Event.EventType(), payload, metadataJSON, occurredAt,
+			r.eventID, streamID, pos, r.eventType, r.payload, r.metadata, r.occurredAt,
 		).Scan(&lastID)
 		if err != nil {
 			var pgErr *pgconn.PgError
