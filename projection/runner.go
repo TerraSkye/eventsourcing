@@ -2,6 +2,8 @@ package projection
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -139,14 +141,19 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 	return r
 }
 
-// defaultOwner returns "hostname/pid", or "unknown/pid" when the hostname
-// cannot be read.
+// defaultOwner returns "hostname/pid/random", with "unknown" for a hostname
+// that cannot be read. The random part keeps two runners in one process
+// apart, and a restarted process apart from the claims of the one before
+// it: in containers the pid is usually the same after a restart, and Claim
+// hands a segment back to the owner that already holds it.
 func defaultOwner() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		host = "unknown"
 	}
-	return host + "/" + strconv.Itoa(os.Getpid())
+	var b [4]byte
+	_, _ = rand.Read(b[:]) // never returns an error
+	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b[:])
 }
 
 // Name returns the projection's name.

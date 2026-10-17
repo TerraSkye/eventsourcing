@@ -192,7 +192,9 @@ type Projection struct {
 	OnError ErrorPolicy
 
 	// Owner identifies this instance to the store, so other instances see
-	// who holds a segment. Defaults to "hostname/pid".
+	// who holds a segment. It must be unique per Runner: a Claim by an
+	// Owner that already holds the segment succeeds. Defaults to
+	// "hostname/pid/random", unique per Runner.
 	Owner string
 
 	// BatchSize is the maximum number of events read and committed in one
