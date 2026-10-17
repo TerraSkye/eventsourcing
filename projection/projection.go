@@ -39,12 +39,19 @@ func SegmentOf(key string, segments int) int {
 
 // ErrorPolicy decides what the runner does when a handler returns an error
 // for an event.
+//
+// A skipped event does not hold back its stream: the runner keeps applying
+// that stream's later events, so a read model can see OrderShipped without
+// the OrderPlaced it skipped. Handlers used with a skipping policy must
+// tolerate such gaps, or the projection should stall instead.
 type ErrorPolicy int
 
 const (
 	// StallOnError stops the segment at the failing event: the runner
 	// reports [Stalled], backs off and retries until the handler succeeds
-	// or the projection is rebuilt. Nothing is skipped silently. Default.
+	// or the projection is rebuilt. The backoff grows from 0.5s to at most
+	// 30s, jittered, and never gives up. Nothing is skipped silently.
+	// Default.
 	StallOnError ErrorPolicy = iota
 
 	// SkipWhenLive skips failing events while [Live], and stalls on them
@@ -174,8 +181,11 @@ type Definition struct {
 	// segmented projection: it cannot have a Version, and [Runner.Rebuild]
 	// returns [ErrRebuildSegmented].
 	//
-	// Every segment reads the filtered log on its own and drops the events
-	// of other segments, so N segments read the log N times. A read model
+	// Segments parallelize the handlers, not the reads: every segment reads
+	// the filtered log on its own and drops the events of other segments,
+	// so N segments read the log N times. Every segment also writes a
+	// heartbeat to the store once per PollInterval while idle, so many
+	// segments across many instances add a steady write load. A read model
 	// that combines events of many streams into one row, such as a total
 	// or a count, cannot be segmented: no SegmentKey keeps that row within
 	// one segment.

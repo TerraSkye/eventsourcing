@@ -140,11 +140,13 @@
 // # Failures
 //
 // A runner never gives up. When a batch fails, it reports [Stalled] with
-// the error, backs off, and retries from its last committed checkpoint. By
+// the error, backs off (from 0.5s up to 30s, jittered), and retries from
+// its last committed checkpoint. By
 // default a failing event stops the projection at that event until the
 // cause is fixed. [Definition.OnError] can make the runner skip failing
 // events instead, recording them through [DeadLetterStore] when the Store
-// supports it.
+// supports it. A skipped event does not hold back its stream: later events
+// of the same stream are still applied.
 //
 // Exactly-once covers only what a handler writes through the Store's unit
 // of work, such as postgres.Tx(ctx). Anything else a handler does, such as

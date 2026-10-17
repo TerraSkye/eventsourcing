@@ -231,6 +231,8 @@ When a batch fails, the runner retries it one event at a time to find the failin
 | `SkipWhenLive` | Skips failing events while live; stalls while catching up or rebuilding. |
 | `SkipAlways` | Skips failing events in every phase. |
 
+A skipped event does not hold back its stream: the runner keeps applying that stream's later events, so a read model can see `OrderShipped` without the `OrderPlaced` it skipped. Use a skipping policy only when the handlers tolerate such gaps.
+
 Skipped events are recorded in `projection_dead_letters` by the Postgres store. A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
 The runner does not log. Wrap the handler to log failures, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
@@ -268,6 +270,7 @@ Each event goes to the segment its key maps to, and instances share the segments
 Know the limits before you segment:
 
 - **Each segment reads the log.** Every segment reads the filtered log on its own and drops the events of other segments, so 16 segments read the log 16 times. Segment when handlers are the bottleneck, not reading.
+- **Each segment writes a heartbeat.** An idle segment refreshes its claim once per `PollInterval`, so 64 segments across many instances keep up a steady write load on the store.
 - **Cross-stream read models cannot be segmented.** A row that combines events from many streams, such as a total, a count or a leaderboard, would be written by every segment, and the order between streams is lost. Keep such a projection on one segment. The segment count is fixed per name; changing it takes a new name.
 
 ## Write your own Store
