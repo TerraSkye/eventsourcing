@@ -270,7 +270,7 @@ if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
 }
 ```
 
-`taskList.Live(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
+`taskList.IsLive(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
 
 ## Going further
 

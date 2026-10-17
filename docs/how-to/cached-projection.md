@@ -163,7 +163,7 @@ The read model's tables must be in the same database as the store's tables, sinc
 
 A read model is eventually consistent. Two methods let you wait for it:
 
-- `runner.Live(ctx)` reports whether the projection has reached the head of the log. Use it for readiness probes, or to hold off work that must not see a half-built read model.
+- `runner.IsLive(ctx)` reports whether the projection has reached the head of the log. Use it for readiness probes, or to hold off work that must not see a half-built read model.
 - `runner.WaitUntil(ctx, globalVersion)` blocks until the projection has processed the log up to that position. Use it for read-your-writes after a command:
 
 ```go

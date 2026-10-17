@@ -236,9 +236,9 @@ func TestRunner_WaitUntilReturnsOnLive(t *testing.T) {
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v", err)
 	}
-	live, err := r.Live(ctx)
+	live, err := r.IsLive(ctx)
 	if err != nil || !live {
-		t.Fatalf("Live() = %v, %v; want true, nil", live, err)
+		t.Fatalf("IsLive() = %v, %v; want true, nil", live, err)
 	}
 }
 
@@ -636,7 +636,7 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	for {
-		if live, _ := r.Live(ctx); live {
+		if live, _ := r.IsLive(ctx); live {
 			break
 		}
 		if ctx.Err() != nil {
@@ -653,12 +653,12 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 		Events:  counterEvents,
 		Owner:   "other",
 	}, es, ps)
-	live, err := other.Live(t.Context())
+	live, err := other.IsLive(t.Context())
 	if err != nil {
-		t.Fatalf("Live() on another instance: %v", err)
+		t.Fatalf("IsLive() on another instance: %v", err)
 	}
 	if live {
-		t.Fatal("Live() on another instance = true after the only runner stopped, want false")
+		t.Fatal("IsLive() on another instance = true after the only runner stopped, want false")
 	}
 }
 
