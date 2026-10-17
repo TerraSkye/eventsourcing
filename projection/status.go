@@ -95,7 +95,7 @@ func (r *Runner) Live(ctx context.Context) (bool, error) {
 // WaitUntil blocks until the projection has processed the log up to and
 // including position on every segment, or until ctx is done.
 //
-// position is an [eventsourcing.Envelope.GlobalVersion], typically from the
+// position is an [eventsourcing.Envelope.GlobalPosition], typically from the
 // [eventsourcing.AppendResult] of the command whose effects the caller
 // wants to see.
 //

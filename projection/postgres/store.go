@@ -65,14 +65,14 @@ CREATE TABLE IF NOT EXISTS projection_dead_letters (
     id             BIGSERIAL   PRIMARY KEY,
     projection     TEXT        NOT NULL,
     segment        INT         NOT NULL,
-    global_version BIGINT      NOT NULL,
+    global_position BIGINT      NOT NULL,
     event_type     TEXT        NOT NULL,
     error          TEXT        NOT NULL,
     skipped_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_projection_dead_letters_projection
-    ON projection_dead_letters (projection, global_version);
+    ON projection_dead_letters (projection, global_position);
 `
 
 type txKey struct{}
@@ -357,7 +357,7 @@ func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
-		(projection, segment, global_version, event_type, error)
+		(projection, segment, global_position, event_type, error)
 		VALUES ($1, $2, $3, $4, $5)`,
 		l.Name, l.Segment, position, eventType, cause.Error(),
 	)

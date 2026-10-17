@@ -76,7 +76,7 @@ func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) er
 | `StreamIDFromContext(ctx)` | `string` |
 | `AggregateIDFromContext(ctx)` | `string` |
 | `VersionFromContext(ctx)` | `uint64` |
-| `GlobalVersionFromContext(ctx)` | `uint64` |
+| `GlobalPositionFromContext(ctx)` | `uint64` |
 | `OccurredAtFromContext(ctx)` | `time.Time` |
 
 See [Context reference](../reference/context.md) for full documentation.

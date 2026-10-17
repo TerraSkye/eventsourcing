@@ -226,14 +226,14 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 	}
 
 	data, err := json.Marshal(storedEvent{
-		EventID:       env.EventID,
-		StreamID:      env.StreamID,
-		Metadata:      env.Metadata,
-		EventType:     env.Event.EventType(),
-		Data:          eventData,
-		Version:       env.Version,
-		GlobalVersion: env.GlobalVersion,
-		OccurredAt:    env.OccurredAt,
+		EventID:        env.EventID,
+		StreamID:       env.StreamID,
+		Metadata:       env.Metadata,
+		EventType:      env.Event.EventType(),
+		Data:           eventData,
+		Version:        env.Version,
+		GlobalPosition: env.GlobalPosition,
+		OccurredAt:     env.OccurredAt,
 	})
 
 	if err != nil {
@@ -382,13 +382,13 @@ func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path stri
 	}
 
 	envelope := &eventsourcing.Envelope{
-		EventID:       storedEv.EventID,
-		StreamID:      storedEv.StreamID,
-		Event:         eventData,
-		Metadata:      storedEv.Metadata,
-		Version:       storedEv.Version,
-		GlobalVersion: storedEv.GlobalVersion,
-		OccurredAt:    storedEv.OccurredAt,
+		EventID:        storedEv.EventID,
+		StreamID:       storedEv.StreamID,
+		Event:          eventData,
+		Metadata:       storedEv.Metadata,
+		Version:        storedEv.Version,
+		GlobalPosition: storedEv.GlobalPosition,
+		OccurredAt:     storedEv.OccurredAt,
 	}
 
 	if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, envelope), envelope.Event); err != nil {
@@ -458,12 +458,12 @@ func (b *FileEventBus) Close() error {
 // the concrete type via [eventsourcing.NewEventByName] — the same scheme
 // eventstore/file uses for the same reason.
 type storedEvent struct {
-	EventID       uuid.UUID       `json:"event_id"`
-	StreamID      string          `json:"stream_id"`
-	Metadata      map[string]any  `json:"metadata"`
-	EventType     string          `json:"event_type"`
-	Data          json.RawMessage `json:"data"`
-	Version       uint64          `json:"version"`
-	GlobalVersion uint64          `json:"global_version"`
-	OccurredAt    time.Time       `json:"occurred_at"`
+	EventID        uuid.UUID       `json:"event_id"`
+	StreamID       string          `json:"stream_id"`
+	Metadata       map[string]any  `json:"metadata"`
+	EventType      string          `json:"event_type"`
+	Data           json.RawMessage `json:"data"`
+	Version        uint64          `json:"version"`
+	GlobalPosition uint64          `json:"global_version"` // JSON name predates the rename; kept for files on disk
+	OccurredAt     time.Time       `json:"occurred_at"`
 }

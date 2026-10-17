@@ -27,14 +27,14 @@ func (s *testStore) Save(ctx context.Context, envs []eventsourcing.Envelope, sta
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range envs {
-		envs[i].GlobalVersion = uint64(len(s.events) + 1)
+		envs[i].GlobalPosition = uint64(len(s.events) + 1)
 		envs[i].OccurredAt = time.Now()
 		copy := envs[i]
 		s.events = append(s.events, &copy)
 	}
 	var res eventsourcing.AppendResult
 	if n := len(envs); n > 0 {
-		res.GlobalVersion = envs[n-1].GlobalVersion
+		res.GlobalPosition = envs[n-1].GlobalPosition
 	}
 	return res, nil
 }
@@ -49,10 +49,10 @@ func (s *testStore) ReadAll(ctx context.Context, after uint64, opts eventsourcin
 	out := make([]*eventsourcing.Envelope, 0, limit)
 	next := after
 	for _, env := range s.events {
-		if env.GlobalVersion <= after {
+		if env.GlobalPosition <= after {
 			continue
 		}
-		next = env.GlobalVersion
+		next = env.GlobalPosition
 		if len(opts.EventTypes) > 0 {
 			ok := false
 			for _, t := range opts.EventTypes {
@@ -112,7 +112,7 @@ func newCounter() *counter {
 }
 
 func (c *counter) OnTaskCreated(ctx context.Context, e *taskCreated) error {
-	gv := eventsourcing.GlobalVersionFromContext(ctx)
+	gv := eventsourcing.GlobalPositionFromContext(ctx)
 	if c.fail != nil {
 		if err := c.fail(gv); err != nil {
 			return err
@@ -144,7 +144,7 @@ func (c *counter) Handle(ctx context.Context, event eventsourcing.Event) error {
 
 var counterEvents = []string{"projection_test.TaskCreated"}
 
-// save appends n events, returning the last GlobalVersion.
+// save appends n events, returning the last GlobalPosition.
 func save(t *testing.T, store *testStore, n int) uint64 {
 	t.Helper()
 	envs := make([]eventsourcing.Envelope, n)
@@ -160,7 +160,7 @@ func save(t *testing.T, store *testStore, n int) uint64 {
 	if err != nil {
 		t.Fatalf("Save(%d events) = %v", n, err)
 	}
-	return res.GlobalVersion
+	return res.GlobalPosition
 }
 
 // runRunner starts r and returns a cancel func that waits for Run to exit.

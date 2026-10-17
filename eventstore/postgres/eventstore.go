@@ -33,7 +33,7 @@ const appendLockKey1, appendLockKey2 = 0x65766e74, 0x616c6c00 // "evnt", "all"
 // EventStore is a PostgreSQL-backed [cqrs.EventStore] that also implements
 // [cqrs.GlobalReader]. Stream membership and per-stream ordering are recorded
 // in the events table's stream_id and stream_position columns; the table's
-// own auto-incrementing id column is the GlobalVersion that
+// own auto-incrementing id column is the GlobalPosition that
 // [EventStore.ReadAll] orders by. Create one with [NewEventStore].
 type EventStore struct {
 	pool *pgxpool.Pool
@@ -180,7 +180,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 	nextPosition := currentVersion + 1
 
-	var lastID int64 // id of the last event inserted: its GlobalVersion
+	var lastID int64 // id of the last event inserted: its GlobalPosition
 	for i, r := range rows {
 		pos := int64(nextPosition) + int64(i)
 		err = tx.QueryRow(ctx, `
@@ -214,7 +214,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: finalVersion,
-		GlobalVersion:       uint64(lastID),
+		GlobalPosition:      uint64(lastID),
 	}, nil
 }
 
@@ -348,7 +348,7 @@ func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 	// A full page may stop short of the head; anything less means every
 	// row up to the head was scanned.
 	if len(res.Events) == limit {
-		res.Next = res.Events[len(res.Events)-1].GlobalVersion
+		res.Next = res.Events[len(res.Events)-1].GlobalPosition
 		res.AtEnd = res.Next >= head
 	}
 	return res, nil
@@ -436,12 +436,12 @@ func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
 	}
 
 	return &cqrs.Envelope{
-		EventID:       uuid.UUID(rawUUID.Bytes),
-		StreamID:      streamID,
-		Event:         ev,
-		Metadata:      meta,
-		Version:       uint64(streamPosition),
-		GlobalVersion: uint64(globalID),
-		OccurredAt:    occurredAt,
+		EventID:        uuid.UUID(rawUUID.Bytes),
+		StreamID:       streamID,
+		Event:          ev,
+		Metadata:       meta,
+		Version:        uint64(streamPosition),
+		GlobalPosition: uint64(globalID),
+		OccurredAt:     occurredAt,
 	}, nil
 }

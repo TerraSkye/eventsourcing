@@ -24,7 +24,7 @@ var (
 // Checkpoint records how far a segment of a projection has processed the
 // log, and which projection version wrote the read model.
 type Checkpoint struct {
-	// Position is the GlobalVersion up to which the segment has processed
+	// Position is the GlobalPosition up to which the segment has processed
 	// the log. Zero means nothing has been processed yet.
 	Position uint64
 
@@ -93,7 +93,7 @@ type Status struct {
 	// Phase is where the segment is in its life cycle.
 	Phase Phase
 
-	// Position is the checkpoint: the GlobalVersion up to which the segment
+	// Position is the checkpoint: the GlobalPosition up to which the segment
 	// has processed the log.
 	Position uint64
 
