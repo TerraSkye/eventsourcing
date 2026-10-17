@@ -20,7 +20,7 @@ import (
 // Close used to close(b.errs) unconditionally, so calling it a second time
 // (e.g. once from an explicit shutdown path and again from a deferred
 // cleanup, a common pattern) panicked with "close of closed channel"
-// instead of being a no-op, unlike the sibling eventbus/memory implementation.
+// instead of being a no-op, unlike memory.EventBus.
 func TestFileEventBusCloseIdempotent(t *testing.T) {
 	root := t.TempDir()
 	bus, err := NewEventBus(root)

@@ -1042,7 +1042,7 @@ func TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate(t *testing
 	}
 
 	// A minimal stand-in for a real store's Revision check, matching
-	// eventstore/memory: a mismatch is a StreamRevisionConflictError.
+	// memory.EventStore: a mismatch is a StreamRevisionConflictError.
 	var storedVersion uint64
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		if rev, ok := revision.(Revision); ok && uint64(rev) != storedVersion {

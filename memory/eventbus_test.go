@@ -173,7 +173,7 @@ func (e *UnrelatedEvent) EventType() string   { return "UnrelatedEvent" }
 
 // TestStreamFilterAllUnregisteredInvertsToCatchAll documents a consequence
 // of the current omit-unregistered behavior: when no handled type is
-// registered, StreamFilter() returns an empty slice, which eventbus/memory
+// registered, StreamFilter() returns an empty slice, which memory.EventBus
 // reads as "no filter" — the subscriber ends up firehosed with every event
 // on the bus instead of just the ones it has handlers for.
 func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {

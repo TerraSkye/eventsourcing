@@ -4,7 +4,7 @@
 // own tests:
 //
 //	func TestAcceptance(t *testing.T) {
-//		projectiontest.StoreAcceptanceTest(t, memory.NewStore())
+//		projectiontest.StoreAcceptanceTest(t, memory.NewProjectionStore())
 //	}
 package projectiontest
 
