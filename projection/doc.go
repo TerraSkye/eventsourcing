@@ -23,11 +23,11 @@
 // That's the whole surface:
 //
 //	list := tasklist.NewTaskList()
-//	r := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewStore())
+//	r := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewProjectionStore())
 //
 //	go r.Run(ctx)
 //
-// For an in-memory read model, projection/memory.NewStore is enough; the
+// For an in-memory read model, memory.NewProjectionStore is enough; the
 // whole projection is replayed on every start, which is right for a read
 // model that is empty after a restart anyway. For a durable read model,
 // use the Store that belongs to your database — for example

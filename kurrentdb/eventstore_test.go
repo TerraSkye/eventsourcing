@@ -280,7 +280,7 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 // ToRawInt64 now panics rather than returning a value that means something
 // else, so the replay cannot happen. That is the loud half of the fix; a
 // revision merely past the end of the stream (but below 1<<63) is a separate
-// question — eventstore/memory rejects it with ErrInvalidRevision, and this
+// question — memory.EventStore rejects it with ErrInvalidRevision, and this
 // store does not yet.
 func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
