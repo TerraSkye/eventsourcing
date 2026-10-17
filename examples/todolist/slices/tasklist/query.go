@@ -7,13 +7,20 @@ type ListTasks struct{}
 func (q ListTasks) ID() []byte { return []byte("task-list") }
 
 type QueryHandler struct {
-	projector *Projector
+	list *TaskList
 }
 
-func NewQueryHandler(p *Projector) *QueryHandler {
-	return &QueryHandler{projector: p}
+func NewQueryHandler(list *TaskList) *QueryHandler {
+	return &QueryHandler{list: list}
 }
 
 func (h *QueryHandler) HandleQuery(_ context.Context, _ ListTasks) ([]Task, error) {
-	return h.projector.All(), nil
+	h.list.mu.RLock()
+	defer h.list.mu.RUnlock()
+
+	result := make([]Task, 0, len(h.list.tasks))
+	for _, t := range h.list.tasks {
+		result = append(result, *t)
+	}
+	return result, nil
 }

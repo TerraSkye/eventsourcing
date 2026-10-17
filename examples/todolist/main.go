@@ -1,7 +1,7 @@
 // Command todolist is the worked example from the terraskye/eventsourcing
 // tutorials (see docs/tutorials/): a small task management API that
-// demonstrates commands, queries, real-time projections via the event bus,
-// and background processing with a saga-style processor.
+// demonstrates commands, queries, a projection kept up to date by the
+// projection runner, and an automation that works off a todo list.
 package main
 
 import (
@@ -13,62 +13,63 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/terraskye/eventsourcing"
-	"github.com/terraskye/eventsourcing/examples/todolist/processors/archivetasks"
-	"github.com/terraskye/eventsourcing/examples/todolist/slices/archivetask"
+	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/logging"
+	"github.com/terraskye/eventsourcing/memory"
+	"github.com/terraskye/eventsourcing/projection"
 
-	membus "github.com/terraskye/eventsourcing/eventbus/memory"
-	memstore "github.com/terraskye/eventsourcing/eventstore/memory"
-
+	"github.com/terraskye/eventsourcing/examples/todolist/automations/archivetasks"
+	"github.com/terraskye/eventsourcing/examples/todolist/slices/archivetask"
 	"github.com/terraskye/eventsourcing/examples/todolist/slices/completetask"
 	"github.com/terraskye/eventsourcing/examples/todolist/slices/createtask"
 	"github.com/terraskye/eventsourcing/examples/todolist/slices/tasklist"
+	"github.com/terraskye/eventsourcing/examples/todolist/slices/taskstoarchive"
 )
 
 func main() {
-
+	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	commandBus := eventsourcing.NewCommandBus(20, 1)
 	commandBus.Use(logging.CommandLogging(logger))
-
 	defer commandBus.Stop()
 
-	store := memstore.NewMemoryStore(100)
+	store := memory.NewEventStore(100)
 	defer store.Close()
 
-	eventBus := membus.NewEventBus(100)
-	eventBus.Use(logging.EventLogging(logger))
-	defer eventBus.Close()
-
-	eventsourcing.Register(commandBus, archivetask.NewHandler(store))
 	eventsourcing.Register(commandBus, completetask.NewHandler(store))
 	eventsourcing.Register(commandBus, createtask.NewHandler(store))
 
-	// Cached projection, kept up to date in real time (Part 4).
-	projector := tasklist.NewProjector()
+	// The task list, kept up to date by the projection runner (Part 4).
+	list := tasklist.NewTaskList()
+	p := tasklist.NewProjection(list)
+	p.Logger = logger
+	taskList := projection.NewRunner(p, store, memory.NewProjectionStore())
 
-	if err := eventBus.Subscribe(context.Background(), "task-list-projector", projector.EventHandlers(), membus.WithFilterEvents(projector.EventHandlers().StreamFilter())); err != nil {
-		log.Fatal(err)
+	// Archive completed tasks once they are due (Part 5): a todo list and
+	// the automation that works off it. 5 seconds here for a quick demo;
+	// production would use 30*24*time.Hour.
+	archiveList := taskstoarchive.NewTasksToArchive(5 * time.Second)
+	todo := taskstoarchive.NewProjection(archiveList)
+	todo.Logger = logger
+	archiveTodo := projection.NewRunner(todo, store, memory.NewProjectionStore())
+
+	archive := archivetasks.NewAutomation(archiveList, archiveTodo, archivetask.NewHandler(store))
+	archive.Logger = logger
+	archive.Interval = time.Second
+	archiveTasks := automation.New(archive)
+
+	for _, run := range []func(context.Context) error{taskList.Run, archiveTodo.Run, archiveTasks.Run} {
+		go func() {
+			if err := run(ctx); err != nil && ctx.Err() == nil {
+				log.Fatal(err)
+			}
+		}()
 	}
-
-	// Auto-archive completed tasks after a delay (Part 5).
-	// 5 seconds here for a quick demo; production would use 30*24*time.Hour.
-	archiveProcessor := archivetasks.NewProcessor(commandBus, 5*time.Second)
-	if err := eventBus.Subscribe(context.Background(), "archive-processor", archiveProcessor.EventHandlers(), membus.WithFilterEvents(archiveProcessor.EventHandlers().StreamFilter())); err != nil {
-		log.Fatal(err)
-	}
-
-	// Forward events from the store to the bus.
-	go func() {
-		for env := range store.Events() {
-			eventBus.Dispatch(env)
-		}
-	}()
 
 	createTaskHTTP := createtask.NewHTTPHandler(commandBus)
 	completeTaskHTTP := completetask.NewHTTPHandler(commandBus)
-	listTasksHTTP := tasklist.NewHTTPHandler(tasklist.NewQueryHandler(projector))
+	listTasksHTTP := tasklist.NewHTTPHandler(tasklist.NewQueryHandler(list))
 
 	r := gin.Default()
 	tasks := r.Group("/api/v1/tasks")
