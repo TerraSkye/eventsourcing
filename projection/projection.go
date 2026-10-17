@@ -40,10 +40,11 @@ func SegmentOf(key string, segments int) int {
 // ErrorPolicy decides what the runner does when a handler returns an error
 // for an event.
 //
-// A skipped event does not hold back its stream: the runner keeps applying
-// that stream's later events, so a read model can see OrderShipped without
-// the OrderPlaced it skipped. Handlers used with a skipping policy must
-// tolerate such gaps, or the projection should stall instead.
+// A skipped event parks its stream: the runner skips that stream's later
+// events too, recording each as a dead letter, so a read model never sees
+// OrderShipped without the OrderPlaced it skipped. Other streams carry on.
+// [Runner.ReplayStream] applies a parked stream's events once the cause is
+// fixed.
 type ErrorPolicy int
 
 const (

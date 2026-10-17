@@ -85,7 +85,9 @@ release may break the API; every break is listed under **Breaking**.
   checked by `projectiontest.StoreAcceptanceTest`. A checkpoint records
   which event types it was written for, so changing a projection's
   `EventTypes` rebuilds it, or stalls it with `ErrEventTypesChanged`
-  when it cannot rebuild.
+  when it cannot rebuild. A skipped event parks its stream: later events
+  of the stream are recorded as dead letters instead of applied, until
+  `Runner.ReplayStream` applies them in order.
 - Package `sqlite`, its own module: an event store, an event bus and a
   projection store in one SQLite database on the pure-Go
   `modernc.org/sqlite` driver, for development, tests that need real

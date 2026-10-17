@@ -231,9 +231,13 @@ When a batch fails, the runner retries it one event at a time to find the failin
 | `SkipWhenLive` | Skips failing events while live; stalls while catching up or rebuilding. |
 | `SkipAlways` | Skips failing events in every phase. |
 
-A skipped event does not hold back its stream: the runner keeps applying that stream's later events, so a read model can see `OrderShipped` without the `OrderPlaced` it skipped. Use a skipping policy only when the handlers tolerate such gaps.
+A skipped event parks its stream: the runner skips that stream's later events too, so a read model never sees `OrderShipped` without the `OrderPlaced` it skipped, while other streams carry on. Every skipped event is recorded as a dead letter (in `projection_dead_letters` by the Postgres and SQLite stores, in memory by the memory store). Once the cause is fixed, apply a parked stream's events in order:
 
-Skipped events are recorded in `projection_dead_letters` by the Postgres store. A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
+```go
+if err := runner.ReplayStream(ctx, "order-42"); err != nil {
+    log.Printf("replay order-42: %v", err) // the stream stays parked
+}
+``` A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
 The runner does not log. Wrap the handler to log failures, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
 

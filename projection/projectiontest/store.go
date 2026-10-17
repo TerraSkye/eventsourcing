@@ -60,8 +60,9 @@ type leaseKey struct {
 // work; only that the checkpoint and status stay put. Implementations that
 // open a real transaction should test that themselves.
 //
-// If store implements [projection.DeadLetterStore], SaveDeadLetter is
-// called inside a Commit and must succeed.
+// If store implements [projection.DeadLetterStore], the suite also checks
+// that dead letters saved and deleted inside a Commit load back per
+// segment, ordered by position.
 func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	t.Helper()
 
@@ -121,7 +122,11 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	})
 	if _, ok := store.(projection.DeadLetterStore); ok {
 		s.group(t, "DeadLetter", map[string]func(*testing.T){
-			"InsideCommit": s.deadLetterInsideCommit,
+			"InsideCommit":        s.deadLetterInsideCommit,
+			"LoadOrdered":         s.deadLetterLoadOrdered,
+			"Delete":              s.deadLetterDelete,
+			"SegmentsIndependent": s.deadLetterSegmentsIndependent,
+			"UnknownName":         s.deadLetterUnknownName,
 		})
 	}
 }
@@ -664,16 +669,94 @@ func (s *storeAcceptance) loadStatusesAge(t *testing.T) {
 // --- DeadLetter ---
 
 func (s *storeAcceptance) deadLetterInsideCommit(t *testing.T) {
-	dls := s.store.(projection.DeadLetterStore)
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	err := s.store.Commit(t.Context(), s.lease(name, 0, owner), projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
+	want := projection.DeadLetter{Position: 1, StreamID: "order-1", EventType: "projectiontest.Event", Error: errWrite.Error()}
+	s.saveDeadLetters(t, name, 0, want)
+	if got := s.deadLetters(t, name, 0); len(got) != 1 || got[0] != want {
+		t.Fatalf("LoadDeadLetters = %+v, want [%+v]", got, want)
+	}
+}
+
+func (s *storeAcceptance) deadLetterLoadOrdered(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	s.saveDeadLetters(t, name, 0,
+		projection.DeadLetter{Position: 7, StreamID: "order-2", EventType: "projectiontest.Event", Error: "b"},
+		projection.DeadLetter{Position: 3, StreamID: "order-1", EventType: "projectiontest.Event", Error: "a"},
+	)
+	got := s.deadLetters(t, name, 0)
+	if len(got) != 2 || got[0].Position != 3 || got[1].Position != 7 {
+		t.Fatalf("LoadDeadLetters = %+v, want positions 3 then 7", got)
+	}
+}
+
+func (s *storeAcceptance) deadLetterDelete(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	s.saveDeadLetters(t, name, 0,
+		projection.DeadLetter{Position: 3, StreamID: "order-1", EventType: "projectiontest.Event", Error: "a"},
+		projection.DeadLetter{Position: 4, StreamID: "order-1", EventType: "projectiontest.Event", Error: "b"},
+	)
+	dls := s.store.(projection.DeadLetterStore)
+	err := s.store.Commit(t.Context(), s.lease(name, 0, owner), projection.Checkpoint{Position: 9}, projection.Status{Phase: projection.Live, Position: 9, Owner: owner},
 		func(ctx context.Context) error {
-			return dls.SaveDeadLetter(ctx, s.lease(name, 0, owner), 1, "projectiontest.Event", errWrite)
+			return dls.DeleteDeadLetter(ctx, s.lease(name, 0, owner), 3)
+		})
+	if err != nil {
+		t.Fatalf("Commit with DeleteDeadLetter: %v", err)
+	}
+	if got := s.deadLetters(t, name, 0); len(got) != 1 || got[0].Position != 4 {
+		t.Fatalf("LoadDeadLetters after deleting position 3 = %+v, want only position 4", got)
+	}
+}
+
+func (s *storeAcceptance) deadLetterSegmentsIndependent(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, owner, longTTL)
+	s.saveDeadLetters(t, name, 1, projection.DeadLetter{Position: 5, StreamID: "order-1", EventType: "projectiontest.Event", Error: "a"})
+	if got := s.deadLetters(t, name, 0); len(got) != 0 {
+		t.Fatalf("segment 0 holds %+v, want no dead letters", got)
+	}
+	if got := s.deadLetters(t, name, 1); len(got) != 1 {
+		t.Fatalf("segment 1 holds %+v, want one dead letter", got)
+	}
+}
+
+func (s *storeAcceptance) deadLetterUnknownName(t *testing.T) {
+	got, err := s.store.(projection.DeadLetterStore).LoadDeadLetters(t.Context(), "projectiontest-"+uuid.NewString(), 0)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("LoadDeadLetters for an unknown name = %+v, %v; want none, nil", got, err)
+	}
+}
+
+// saveDeadLetters records ds for segment in one Commit by owner.
+func (s *storeAcceptance) saveDeadLetters(t *testing.T, name string, segment int, ds ...projection.DeadLetter) {
+	t.Helper()
+	dls := s.store.(projection.DeadLetterStore)
+	l := s.lease(name, segment, owner)
+	err := s.store.Commit(t.Context(), l, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner, Segment: segment},
+		func(ctx context.Context) error {
+			for _, d := range ds {
+				if err := dls.SaveDeadLetter(ctx, l, d); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	if err != nil {
 		t.Fatalf("Commit with SaveDeadLetter: %v", err)
 	}
+}
+
+func (s *storeAcceptance) deadLetters(t *testing.T, name string, segment int) []projection.DeadLetter {
+	t.Helper()
+	got, err := s.store.(projection.DeadLetterStore).LoadDeadLetters(t.Context(), name, segment)
+	if err != nil {
+		t.Fatalf("LoadDeadLetters: %v", err)
+	}
+	return got
 }
 
 // --- helpers ---

@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -834,5 +835,100 @@ func TestRunner_EventTypesChangeWithoutResetStalls(t *testing.T) {
 	defer c.mu.Unlock()
 	if len(c.applied) != 0 {
 		t.Fatalf("applied %v over a changed EventTypes, want nothing", c.applied)
+	}
+}
+
+// streamLog records the events it applies as "stream:type", and fails
+// TaskCreated on stream "s1" while failing is set.
+type streamLog struct {
+	mu      sync.Mutex
+	applied []string
+	failing atomic.Bool
+}
+
+func (l *streamLog) Handle(ctx context.Context, e eventsourcing.Event) error {
+	stream := eventsourcing.StreamIDFromContext(ctx)
+	if _, ok := e.(*taskCreated); ok && stream == "s1" && l.failing.Load() {
+		return errors.New("boom")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.applied = append(l.applied, stream+":"+e.EventType())
+	return nil
+}
+
+func (l *streamLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.applied...)
+}
+
+// TestRunner_SkippedEventParksItsStream covers that skipping an event
+// holds back the later events of its stream, records them as dead
+// letters, and that ReplayStream applies them in order once the handler
+// is fixed.
+func TestRunner_SkippedEventParksItsStream(t *testing.T) {
+	es := &testStore{}
+	saveTo := func(stream string, e eventsourcing.Event) uint64 {
+		t.Helper()
+		res, err := es.Save(t.Context(), []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: stream, Event: e}}, eventsourcing.Any{})
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		return res.GlobalPosition
+	}
+	saveTo("s1", &taskCreated{ID: "1"}) // fails, skipped
+	saveTo("s2", &taskCreated{ID: "2"})
+	last := saveTo("s1", &taskRenamed{ID: "1"}) // parked behind the skipped event
+
+	ps := memory.NewProjectionStore()
+	h := &streamLog{}
+	h.failing.Store(true)
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      h,
+		EventTypes:   []string{"projection_test.TaskCreated", "projection_test.TaskRenamed"},
+		OnError:      projection.SkipAlways,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, ps)
+	defer runRunner(t, r)()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+	if got := h.snapshot(); !slices.Equal(got, []string{"s2:projection_test.TaskCreated"}) {
+		t.Fatalf("applied %v, want only s2's event: s1's later event must wait for the skipped one", got)
+	}
+	letters, err := ps.LoadDeadLetters(t.Context(), "test", 0)
+	if err != nil {
+		t.Fatalf("LoadDeadLetters: %v", err)
+	}
+	if len(letters) != 2 || letters[0].StreamID != "s1" || letters[1].Error != projection.ErrStreamParked.Error() {
+		t.Fatalf("dead letters = %+v, want s1's failed event and its parked successor", letters)
+	}
+
+	h.failing.Store(false)
+	if err := r.ReplayStream(ctx, "s1"); err != nil {
+		t.Fatalf("ReplayStream: %v", err)
+	}
+	want := []string{"s2:projection_test.TaskCreated", "s1:projection_test.TaskCreated", "s1:projection_test.TaskRenamed"}
+	if got := h.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("applied %v after ReplayStream, want %v", got, want)
+	}
+	if letters, _ := ps.LoadDeadLetters(t.Context(), "test", 0); len(letters) != 0 {
+		t.Fatalf("dead letters after ReplayStream = %+v, want none", letters)
+	}
+
+	// The stream is no longer parked: its next event applies as usual.
+	next := saveTo("s1", &taskRenamed{ID: "1"})
+	r.Nudge()
+	if err := r.WaitUntil(ctx, next); err != nil {
+		t.Fatalf("WaitUntil after ReplayStream: %v", err)
+	}
+	if got := h.snapshot(); len(got) != 4 || got[3] != "s1:projection_test.TaskRenamed" {
+		t.Fatalf("applied %v, want s1's new event applied after the replay", got)
 	}
 }
