@@ -1,4 +1,4 @@
-package otel
+package telemetry
 
 import (
 	"github.com/terraskye/eventsourcing"

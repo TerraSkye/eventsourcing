@@ -31,6 +31,10 @@ release may break the API; every break is listed under **Breaking**.
   logging middleware's `global_version` attribute is now
   `global_position`. The file store and file bus keep `global_version` as
   the JSON name, so existing files still load.
+- Package `otel` is renamed `telemetry` and moves to
+  `github.com/terraskye/eventsourcing/telemetry`, so it no longer shares
+  its name with `go.opentelemetry.io/otel`, which every user imports
+  alongside it. Only the import path and the package name change.
 
 ### Added
 
@@ -45,5 +49,5 @@ release may break the API; every break is listed under **Breaking**.
   detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
   letters. Stores in `projection/memory` and `projection/postgres`,
   checked by `projectiontest.StoreAcceptanceTest`.
-- The `otel` event store wrapper traces `ReadAll` and `Head`, and
+- The `telemetry` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.

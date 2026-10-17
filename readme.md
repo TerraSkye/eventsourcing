@@ -31,7 +31,7 @@ go get github.com/terraskye/eventsourcing
 
 ## OpenTelemetry Instrumentation
 
-The `otel` subpackage provides built-in observability for your event-sourced application using OpenTelemetry standards.
+The `telemetry` subpackage provides built-in observability for your event-sourced application using OpenTelemetry standards.
 
 ### Why Instrumentation?
 
@@ -41,7 +41,7 @@ Event-sourced systems are inherently distributed and asynchronous. Without prope
 - Concurrency conflicts are invisible
 - Performance bottlenecks in the event store remain hidden
 
-The `otel` package wraps your handlers and stores with tracing spans and metrics, giving you full visibility into your system's behavior without modifying business logic.
+The `telemetry` package wraps your handlers and stores with tracing spans and metrics, giving you full visibility into your system's behavior without modifying business logic.
 
 ### What's Instrumented
 
@@ -56,16 +56,16 @@ The `otel` package wraps your handlers and stores with tracing spans and metrics
 Wrap your handlers and stores with the telemetry decorators:
 
 ```go
-import "github.com/terraskye/eventsourcing/otel"
+import "github.com/terraskye/eventsourcing/telemetry"
 
 // Wrap a command handler
-handler := otel.WithCommandTelemetry(myCommandHandler)
+handler := telemetry.WithCommandTelemetry(myCommandHandler)
 
 // Wrap an event handler
-eventHandler := otel.WithEventTelemetry(myEventHandler)
+eventHandler := telemetry.WithEventTelemetry(myEventHandler)
 
 // Wrap an event store
-store := otel.WithEventStoreTelemetry(myEventStore)
+store := telemetry.WithEventStoreTelemetry(myEventStore)
 ```
 
 ### Configuration Options
@@ -74,21 +74,21 @@ Customize span names and attributes using options:
 
 ```go
 // Static operation name
-handler := otel.WithCommandTelemetry(myHandler,
-    otel.WithOperation("order.create"),
+handler := telemetry.WithCommandTelemetry(myHandler,
+    telemetry.WithOperation("order.create"),
 )
 
 // Add static attributes to all spans
-handler := otel.WithCommandTelemetry(myHandler,
-    otel.WithAttributes(
+handler := telemetry.WithCommandTelemetry(myHandler,
+    telemetry.WithAttributes(
         attribute.String("service.name", "orders"),
         attribute.String("service.version", "1.0.0"),
     ),
 )
 
 // Dynamic operation name based on context
-handler := otel.WithCommandTelemetry(myHandler,
-    otel.WithOperationGetter(func(ctx context.Context, defaultOp string) string {
+handler := telemetry.WithCommandTelemetry(myHandler,
+    telemetry.WithOperationGetter(func(ctx context.Context, defaultOp string) string {
         if tenant := TenantFromContext(ctx); tenant != "" {
             return fmt.Sprintf("%s [%s]", defaultOp, tenant)
         }
@@ -97,8 +97,8 @@ handler := otel.WithCommandTelemetry(myHandler,
 )
 
 // Extract dynamic attributes from context
-handler := otel.WithCommandTelemetry(myHandler,
-    otel.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
+handler := telemetry.WithCommandTelemetry(myHandler,
+    telemetry.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
         return []attribute.KeyValue{
             attribute.String("tenant.id", TenantFromContext(ctx)),
             attribute.String("user.id", UserFromContext(ctx)),

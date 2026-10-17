@@ -5,7 +5,7 @@ Wrap command handlers, query handlers, event handlers, and the event store with 
 ## Prerequisites
 
 ```bash
-go get github.com/terraskye/eventsourcing/otel
+go get github.com/terraskye/eventsourcing/telemetry
 go get go.opentelemetry.io/otel
 ```
 
@@ -13,15 +13,15 @@ go get go.opentelemetry.io/otel
 
 ```go
 import (
-    "github.com/terraskye/eventsourcing/otel"
-    oteltrace "go.opentelemetry.io/otel"
+    "github.com/terraskye/eventsourcing/telemetry"
+    "go.opentelemetry.io/otel"
 )
 
-tracer := oteltrace.Tracer("my-service")
+tracer := otel.Tracer("my-service")
 
 // Assuming createTaskHandler is eventsourcing.CommandHandler[CreateTask]
-tracedHandler := otel.TraceCommandHandler(tracer, createTaskHandler,
-    otel.WithOperation("CreateTask"),
+tracedHandler := telemetry.TraceCommandHandler(tracer, createTaskHandler,
+    telemetry.WithOperation("CreateTask"),
 )
 ```
 
@@ -30,16 +30,16 @@ Each command execution creates a span named `"CreateTask"` under the current tra
 ## Wrap a query handler
 
 ```go
-tracedQuery := otel.TraceQueryHandler(tracer, queryHandler,
-    otel.WithOperation("ListTasks"),
+tracedQuery := telemetry.TraceQueryHandler(tracer, queryHandler,
+    telemetry.WithOperation("ListTasks"),
 )
 ```
 
 ## Wrap the event store
 
 ```go
-tracedStore := otel.TraceEventStore(tracer, store,
-    otel.WithOperation("EventStore"),
+tracedStore := telemetry.TraceEventStore(tracer, store,
+    telemetry.WithOperation("EventStore"),
 )
 ```
 
@@ -48,8 +48,8 @@ Pass `tracedStore` to your command/query handlers instead of the raw store.
 ## Wrap an event handler
 
 ```go
-tracedEventHandler := otel.TraceEventHandler(tracer, projector.EventHandlers(),
-    otel.WithOperation("TaskListProjector"),
+tracedEventHandler := telemetry.TraceEventHandler(tracer, projector.EventHandlers(),
+    telemetry.WithOperation("TaskListProjector"),
 )
 bus.Subscribe(ctx, "task-list", tracedEventHandler)
 ```
@@ -61,10 +61,10 @@ Use `WithAttributes` for static attributes, or `WithAttributeGetter` for dynamic
 ```go
 import "go.opentelemetry.io/otel/attribute"
 
-tracedHandler := otel.TraceCommandHandler(tracer, handler,
-    otel.WithOperation("CreateTask"),
-    otel.WithAttributes(attribute.String("service.version", "1.0.0")),
-    otel.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
+tracedHandler := telemetry.TraceCommandHandler(tracer, handler,
+    telemetry.WithOperation("CreateTask"),
+    telemetry.WithAttributes(attribute.String("service.version", "1.0.0")),
+    telemetry.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
         if tenantID, ok := ctx.Value("tenant_id").(string); ok {
             return []attribute.KeyValue{attribute.String("tenant.id", tenantID)}
         }
@@ -78,7 +78,7 @@ tracedHandler := otel.TraceCommandHandler(tracer, handler,
 Use `WithOperationGetter` to set the span name from context at runtime:
 
 ```go
-otel.WithOperationGetter(func(ctx context.Context, operation string) string {
+telemetry.WithOperationGetter(func(ctx context.Context, operation string) string {
     if userID, ok := ctx.Value("user_id").(string); ok {
         return operation + ":" + userID
     }
@@ -86,12 +86,12 @@ otel.WithOperationGetter(func(ctx context.Context, operation string) string {
 })
 ```
 
-## Available otel wrappers
+## Available telemetry wrappers
 
 | Function | Wraps |
 |---|---|
-| `otel.TraceCommandHandler` | `CommandHandler[C]` |
-| `otel.TraceQueryHandler` | `QueryHandler[T, R]` |
-| `otel.TraceEventStore` | `EventStore` |
-| `otel.TraceEventHandler` | `EventHandler` |
-| `otel.TraceEventBus` | `EventBus` |
+| `telemetry.TraceCommandHandler` | `CommandHandler[C]` |
+| `telemetry.TraceQueryHandler` | `QueryHandler[T, R]` |
+| `telemetry.TraceEventStore` | `EventStore` |
+| `telemetry.TraceEventHandler` | `EventHandler` |
+| `telemetry.TraceEventBus` | `EventBus` |
