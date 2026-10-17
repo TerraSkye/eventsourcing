@@ -167,7 +167,7 @@ func (r *Runner) Name() string { return r.p.Name }
 
 // Run processes events until ctx is done, then returns ctx.Err(). It
 // returns early only when it cannot start: when reading the head of the log
-// or [Store.Init] fails, with that error.
+// or [Store.Declare] fails, with that error.
 //
 // Failures while processing never make Run return. When a batch fails the
 // runner reports [Stalled], backs off and retries from its last committed
@@ -181,14 +181,14 @@ func (r *Runner) Name() string { return r.p.Name }
 // Call Run once per Runner. On return it has released every claim it held.
 func (r *Runner) Run(ctx context.Context) error {
 	// Events already in the log when the projection is first created count
-	// as replayed; see IsReplaying. Init only uses head for segments it
+	// as replayed; see IsReplaying. Declare only uses head for segments it
 	// creates, so a restart keeps the boundary of the first start.
 	head, err := r.reader.Head(ctx)
 	if err != nil {
 		return fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
 	}
-	if err := r.store.Init(ctx, r.p.Name, r.segments, head); err != nil {
-		return fmt.Errorf("projection %q: init: %w", r.p.Name, err)
+	if err := r.store.Declare(ctx, r.p.Name, r.segments, head); err != nil {
+		return fmt.Errorf("projection %q: declare segments: %w", r.p.Name, err)
 	}
 
 	// One loop per segment. The loops compete for the claims with the

@@ -14,7 +14,7 @@ var (
 	// owner continue.
 	ErrClaimLost = errors.New("projection: claim lost")
 
-	// ErrSegmentsChanged is returned by [Store.Init] when the projection
+	// ErrSegmentsChanged is returned by [Store.Declare] when the projection
 	// exists with a different segment count. Events would map to different
 	// segments than the stored checkpoints were written for, so changing the
 	// count takes a new projection name.
@@ -33,7 +33,7 @@ type Checkpoint struct {
 	Version int
 
 	// ReplayUntil is the position up to which events count as replayed; see
-	// [IsReplaying]. It is set when [Store.Init] creates the segment (to the
+	// [IsReplaying]. It is set when [Store.Declare] creates the segment (to the
 	// head of the log at that moment) and on every rebuild (to the position
 	// the segment had reached before it).
 	ReplayUntil uint64
@@ -171,13 +171,13 @@ type Lease struct {
 // Implementations must be safe for concurrent use, and are checked against
 // this contract by [projectiontest.StoreAcceptanceTest].
 type Store interface {
-	// Init declares that the projection name has segments segments, creating
-	// them on first use with a zero checkpoint whose ReplayUntil is
-	// replayUntil. Every other call for name assumes Init has been called
-	// for it. Calling Init again with the same count changes nothing, not
+	// Declare states that the projection name has segments segments,
+	// creating them on first use with a zero checkpoint whose ReplayUntil is
+	// replayUntil. Every other call for name assumes Declare has been called
+	// for it. Calling Declare again with the same count changes nothing, not
 	// even ReplayUntil; with a different count it returns
 	// [ErrSegmentsChanged].
-	Init(ctx context.Context, name string, segments int, replayUntil uint64) error
+	Declare(ctx context.Context, name string, segments int, replayUntil uint64) error
 
 	// Claim takes the segment for l.Owner. When l is the segment's current
 	// claim (same Owner and Epoch), Claim refreshes it and keeps its epoch.

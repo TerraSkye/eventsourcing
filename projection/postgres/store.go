@@ -111,16 +111,16 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-// Init implements [projection.Store]: it creates the segment rows for name
+// Declare implements [projection.Store]: it creates the segment rows for name
 // on first use, and verifies the count has not changed since.
-func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (s *Store) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	// Count existing rows; if none, insert; if some, verify the count.
 	var count int
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM projection_segments WHERE name = $1`, name,
 	).Scan(&count)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: init %q: count segments: %w", name, err)
+		return fmt.Errorf("projection/postgres: declare %q: count segments: %w", name, err)
 	}
 	if count == 0 {
 		return s.insertSegments(ctx, name, segments, replayUntil)
@@ -144,7 +144,7 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int, r
 	defer br.Close()
 	for i := 0; i < segments; i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("projection/postgres: init %q segment %d: %w", name, i, err)
+			return fmt.Errorf("projection/postgres: declare %q segment %d: %w", name, i, err)
 		}
 	}
 	return nil

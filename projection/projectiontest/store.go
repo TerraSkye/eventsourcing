@@ -66,12 +66,12 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	t.Helper()
 
 	s := &storeAcceptance{store: store, leases: make(map[leaseKey]projection.Lease)}
-	s.group(t, "Init", map[string]func(*testing.T){
-		"CreatesSegments":     s.initCreatesSegments,
-		"Idempotent":          s.initIdempotent,
-		"SegmentsChanged":     s.initSegmentsChanged,
-		"KeepsStoredProgress": s.initKeepsStoredProgress,
-		"SetsReplayUntil":     s.initSetsReplayUntil,
+	s.group(t, "Declare", map[string]func(*testing.T){
+		"CreatesSegments":     s.declareCreatesSegments,
+		"Idempotent":          s.declareIdempotent,
+		"SegmentsChanged":     s.declareSegmentsChanged,
+		"KeepsStoredProgress": s.declareKeepsStoredProgress,
+		"SetsReplayUntil":     s.declareSetsReplayUntil,
 	})
 	s.group(t, "Claim", map[string]func(*testing.T){
 		"Fresh":               s.claimFresh,
@@ -141,9 +141,9 @@ func (s *storeAcceptance) group(t *testing.T, name string, tests map[string]func
 	})
 }
 
-// --- Init ---
+// --- Declare ---
 
-func (s *storeAcceptance) initCreatesSegments(t *testing.T) {
+func (s *storeAcceptance) declareCreatesSegments(t *testing.T) {
 	name := s.newProjection(t, 3)
 	sts := s.statuses(t, name)
 	if len(sts) != 3 {
@@ -159,49 +159,49 @@ func (s *storeAcceptance) initCreatesSegments(t *testing.T) {
 	}
 }
 
-func (s *storeAcceptance) initIdempotent(t *testing.T) {
+func (s *storeAcceptance) declareIdempotent(t *testing.T) {
 	name := s.newProjection(t, 2)
-	if err := s.store.Init(t.Context(), name, 2, 0); err != nil {
-		t.Fatalf("second Init with the same segments: %v", err)
+	if err := s.store.Declare(t.Context(), name, 2, 0); err != nil {
+		t.Fatalf("second Declare with the same segments: %v", err)
 	}
 	if n := len(s.statuses(t, name)); n != 2 {
-		t.Fatalf("LoadStatuses returned %d statuses after a repeated Init, want 2", n)
+		t.Fatalf("LoadStatuses returned %d statuses after a repeated Declare, want 2", n)
 	}
 }
 
-func (s *storeAcceptance) initSegmentsChanged(t *testing.T) {
+func (s *storeAcceptance) declareSegmentsChanged(t *testing.T) {
 	name := s.newProjection(t, 2)
-	if err := s.store.Init(t.Context(), name, 3, 0); !errors.Is(err, projection.ErrSegmentsChanged) {
-		t.Fatalf("Init with a different segment count: got %v, want ErrSegmentsChanged", err)
+	if err := s.store.Declare(t.Context(), name, 3, 0); !errors.Is(err, projection.ErrSegmentsChanged) {
+		t.Fatalf("Declare with a different segment count: got %v, want ErrSegmentsChanged", err)
 	}
 }
 
-func (s *storeAcceptance) initKeepsStoredProgress(t *testing.T) {
+func (s *storeAcceptance) declareKeepsStoredProgress(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	cp := projection.Checkpoint{Position: 4, Version: 1, ReplayUntil: 2}
 	s.commit(t, name, 0, owner, cp)
 
-	if err := s.store.Init(t.Context(), name, 1, 0); err != nil {
-		t.Fatalf("second Init: %v", err)
+	if err := s.store.Declare(t.Context(), name, 1, 0); err != nil {
+		t.Fatalf("second Declare: %v", err)
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
-		t.Fatalf("checkpoint after a repeated Init: got %+v, want %+v", got, cp)
+		t.Fatalf("checkpoint after a repeated Declare: got %+v, want %+v", got, cp)
 	}
 }
 
-func (s *storeAcceptance) initSetsReplayUntil(t *testing.T) {
+func (s *storeAcceptance) declareSetsReplayUntil(t *testing.T) {
 	name := "projectiontest-" + uuid.NewString()
-	if err := s.store.Init(t.Context(), name, 2, 9); err != nil {
-		t.Fatalf("Init(2, replayUntil 9): %v", err)
+	if err := s.store.Declare(t.Context(), name, 2, 9); err != nil {
+		t.Fatalf("Declare(2, replayUntil 9): %v", err)
 	}
-	if err := s.store.Init(t.Context(), name, 2, 12); err != nil {
-		t.Fatalf("second Init(2, replayUntil 12): %v", err)
+	if err := s.store.Declare(t.Context(), name, 2, 12); err != nil {
+		t.Fatalf("second Declare(2, replayUntil 12): %v", err)
 	}
 	for seg := range 2 {
 		want := projection.Checkpoint{ReplayUntil: 9}
 		if got := s.claim(t, name, seg, owner, longTTL); got != want {
-			t.Errorf("Claim of segment %d = %+v, want %+v from the first Init", seg, got, want)
+			t.Errorf("Claim of segment %d = %+v, want %+v from the first Declare", seg, got, want)
 		}
 	}
 }
@@ -682,8 +682,8 @@ func nop(context.Context) error { return nil }
 func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 	t.Helper()
 	name := "projectiontest-" + uuid.NewString()
-	if err := s.store.Init(t.Context(), name, segments, 0); err != nil {
-		t.Fatalf("Init(%d): %v", segments, err)
+	if err := s.store.Declare(t.Context(), name, segments, 0); err != nil {
+		t.Fatalf("Declare(%d): %v", segments, err)
 	}
 	return name
 }
