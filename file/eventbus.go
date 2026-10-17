@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -28,7 +27,7 @@ type subscriber struct {
 	cancel  context.CancelFunc
 }
 
-var _ eventsourcing.EventBus = (*FileEventBus)(nil)
+var _ eventsourcing.EventBus = (*EventBus)(nil)
 
 // fileSubscriberOptions accumulates the [eventsourcing.SubscriberOption]
 // values passed to Subscribe.
@@ -39,7 +38,7 @@ type fileSubscriberOptions struct {
 // WithFilterEvents returns an [eventsourcing.SubscriberOption] that limits
 // delivery to events whose type is one of events. Without this option, a
 // subscriber receives every dispatched event. It has no effect if applied
-// to a bus other than this package's [FileEventBus].
+// to a bus other than this package's [EventBus].
 func WithFilterEvents(events ...string) eventsourcing.SubscriberOption {
 	return func(cfg any) {
 		if c, ok := cfg.(*fileSubscriberOptions); ok {
@@ -58,7 +57,7 @@ func WithFilterEvents(events ...string) eventsourcing.SubscriberOption {
 // soon as it arrives.
 const sweepInterval = 250 * time.Millisecond
 
-// FileEventBus is a file-backed [eventsourcing.EventBus]. Each dispatched
+// EventBus is a file-backed [eventsourcing.EventBus]. Each dispatched
 // event is written as one JSON file per subscriber directory; a subscriber
 // watches its directory with fsnotify and deletes each file once its
 // handler successfully processes it. Existing files are replayed on
@@ -69,7 +68,7 @@ const sweepInterval = 250 * time.Millisecond
 // deleted, and reprocessing happens on the next filesystem event for that
 // directory or the next time the subscriber is started — there is no
 // active retry loop in between.
-type FileEventBus struct {
+type EventBus struct {
 	mu          sync.RWMutex
 	subs        map[string]*subscriber
 	root        string
@@ -84,15 +83,15 @@ type FileEventBus struct {
 	seq atomic.Uint64
 }
 
-// NewFileEventBus constructs a [FileEventBus] backed by root, creating the
+// NewEventBus constructs a [EventBus] backed by root, creating the
 // directory (and any missing parents) if it does not already exist. It
 // returns an error if the directory cannot be created.
-func NewFileEventBus(root string) (*FileEventBus, error) {
+func NewEventBus(root string) (*EventBus, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
 
-	return &FileEventBus{
+	return &EventBus{
 		root: root,
 		subs: make(map[string]*subscriber),
 		errs: make(chan error, 64),
@@ -104,7 +103,7 @@ func NewFileEventBus(root string) (*FileEventBus, error) {
 // before Subscribe: middlewares added after a given subscriber is
 // registered do not apply to that subscriber. Use and Subscribe are both
 // safe to call concurrently.
-func (b *FileEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
+func (b *EventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.middlewares = append(b.middlewares, middlewares...)
@@ -119,7 +118,7 @@ func (b *FileEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) 
 // created. The subscription is removed automatically when ctx is canceled,
 // or when the bus is closed — neither leaves a goroutine behind, even if
 // ctx is long-lived (e.g. context.Background()).
-func (b *FileEventBus) Subscribe(
+func (b *EventBus) Subscribe(
 	ctx context.Context,
 	name string,
 	handler eventsourcing.EventHandler,
@@ -201,7 +200,7 @@ func (b *FileEventBus) Subscribe(
 
 // Errors returns the channel on which asynchronous handler errors are
 // delivered, as required by [eventsourcing.EventBus].
-func (b *FileEventBus) Errors() <-chan error {
+func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
 
@@ -212,7 +211,7 @@ func (b *FileEventBus) Errors() <-chan error {
 // only if env cannot be marshaled to JSON; a write failure for an
 // individual subscriber's directory is skipped silently and not reported
 // to the caller. Dispatch is a no-op once the bus has been closed.
-func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
+func (b *EventBus) Dispatch(env *eventsourcing.Envelope) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -280,7 +279,7 @@ func (b *FileEventBus) Dispatch(env *eventsourcing.Envelope) error {
 // context.WithoutCancel(ctx) — carrying over any values set on ctx (e.g. by
 // the caller of Subscribe) without inheriting its cancellation — so it
 // completes rather than being cut short by a shutdown racing its execution.
-func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir string, watcher *fsnotify.Watcher) {
+func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber, dir string, watcher *fsnotify.Watcher) {
 	defer b.wg.Done()
 	defer watcher.Close()
 
@@ -356,7 +355,7 @@ func (b *FileEventBus) runSubscriber(ctx context.Context, s *subscriber, dir str
 // nil. On any error the file is left in place for the next event or
 // subscriber restart to retry; a decode error is also reported on Errors()
 // so it isn't entirely silent.
-func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path string) {
+func (b *EventBus) processFile(ctx context.Context, s *subscriber, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -404,7 +403,7 @@ func (b *FileEventBus) processFile(ctx context.Context, s *subscriber, path stri
 
 // sendErr sends err on the Errors channel, dropping it if the channel's
 // buffer is full rather than blocking the caller.
-func (b *FileEventBus) sendErr(err error) {
+func (b *EventBus) sendErr(err error) {
 	select {
 	case b.errs <- err:
 	default:
@@ -413,7 +412,7 @@ func (b *FileEventBus) sendErr(err error) {
 
 // removeSubscriber cancels and unregisters the named subscriber. It is a
 // no-op if name is not registered.
-func (b *FileEventBus) removeSubscriber(name string) {
+func (b *EventBus) removeSubscriber(name string) {
 	b.mu.Lock()
 	s, ok := b.subs[name]
 	if ok {
@@ -432,7 +431,7 @@ func (b *FileEventBus) removeSubscriber(name string) {
 // completion (see runSubscriber); Dispatch and Subscribe already reject new
 // work once the bus is closed, so nothing new is accepted in the meantime.
 // Calling Close more than once is a no-op.
-func (b *FileEventBus) Close() error {
+func (b *EventBus) Close() error {
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -448,22 +447,4 @@ func (b *FileEventBus) Close() error {
 	b.wg.Wait()
 	close(b.errs)
 	return nil
-}
-
-// storedEvent is the on-disk JSON representation of a dispatched
-// [eventsourcing.Envelope]. Envelope.Event is a bare interface with no
-// custom (un)marshaller, so it cannot round-trip through encoding/json on
-// its own; storedEvent keeps the event payload as raw JSON alongside an
-// EventType discriminator, which unmarshalStoredEvent uses to reconstruct
-// the concrete type via [eventsourcing.NewEventByName] — the same scheme
-// eventstore/file uses for the same reason.
-type storedEvent struct {
-	EventID        uuid.UUID       `json:"event_id"`
-	StreamID       string          `json:"stream_id"`
-	Metadata       map[string]any  `json:"metadata"`
-	EventType      string          `json:"event_type"`
-	Data           json.RawMessage `json:"data"`
-	Version        uint64          `json:"version"`
-	GlobalPosition uint64          `json:"global_version"` // JSON name predates the rename; kept for files on disk
-	OccurredAt     time.Time       `json:"occurred_at"`
 }

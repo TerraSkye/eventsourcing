@@ -33,9 +33,9 @@ func TestDispatch_SimultaneousCallsEachWriteTheirOwnFile(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	bus, err := NewFileEventBus(root)
+	bus, err := NewEventBus(root)
 	if err != nil {
-		t.Fatalf("NewFileEventBus: %v", err)
+		t.Fatalf("NewEventBus: %v", err)
 	}
 	defer bus.Close()
 
