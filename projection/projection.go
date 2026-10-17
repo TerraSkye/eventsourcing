@@ -192,8 +192,9 @@ type Projection struct {
 	OnError ErrorPolicy
 
 	// Owner identifies this instance to the store, so other instances see
-	// who holds a segment. It must be unique per Runner: a Claim by an
-	// Owner that already holds the segment succeeds. Defaults to
+	// who holds a segment. Claims are fenced by [Lease.Epoch], so two
+	// runners under the same Owner, such as a process restarted under a
+	// fixed pod name, still never hold a segment at once. Defaults to
 	// "hostname/pid/random", unique per Runner.
 	Owner string
 

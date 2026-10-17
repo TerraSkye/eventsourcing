@@ -29,19 +29,18 @@ const releaseTimeout = 2 * time.Second
 //  5. on ctx.Done, releases the claim so another instance can take over
 //     at once rather than waiting the claim TTL out.
 func (r *Runner) runSegment(ctx context.Context, seg int) {
-	l := r.lease(seg)
 	defer func() {
 		// ctx is done by now; release under a context that is not.
 		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 		defer cancel()
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
-		_ = r.store.Release(relCtx, l)
+		_ = r.store.Release(relCtx, r.lease(seg))
 	}()
 
 	retry := newRetryBackOff()
 	for ctx.Err() == nil {
-		cp, ok, err := r.store.Claim(ctx, l, r.p.ClaimTTL)
+		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
 			r.setPhase(seg, Stalled, err.Error())
 			sleepCtx(ctx, retry.NextBackOff())
@@ -73,8 +72,6 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 // when the claim is lost, ctx is done, or a batch fails; it never returns
 // nil.
 func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
-	l := r.lease(seg)
-
 	// Rebuild if the stored version differs from the configured one and
 	// there is already something to wipe. A fresh segment (nothing
 	// processed yet) just picks up the configured version on its first
@@ -156,7 +153,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			// Nothing to persist; publish the phase so LoadStatuses sees it.
 			// A lost claim drops the segment; any other failure only delays
 			// what other instances see until the next commit.
-			if err := r.store.SaveStatus(ctx, l, status); errors.Is(err, ErrClaimLost) {
+			if err := r.store.SaveStatus(ctx, r.lease(seg), status); errors.Is(err, ErrClaimLost) {
 				return err
 			}
 			r.setStatus(seg, status)
@@ -168,12 +165,12 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 	}
 }
 
-// reclaim refreshes the claim on l after a reset and returns the segment's
-// new checkpoint.
-func (r *Runner) reclaim(ctx context.Context, l Lease) (Checkpoint, error) {
-	cp, ok, err := r.store.Claim(ctx, l, r.p.ClaimTTL)
+// reclaim refreshes the claim on seg after a reset and returns the
+// segment's new checkpoint.
+func (r *Runner) reclaim(ctx context.Context, seg int) (Checkpoint, error) {
+	cp, ok, err := r.claim(ctx, seg)
 	if err != nil {
-		return Checkpoint{}, fmt.Errorf("projection %q: reclaim segment %d: %w", r.p.Name, l.Segment, err)
+		return Checkpoint{}, fmt.Errorf("projection %q: reclaim segment %d: %w", r.p.Name, seg, err)
 	}
 	if !ok {
 		return Checkpoint{}, ErrClaimLost
@@ -186,11 +183,10 @@ func (r *Runner) reclaim(ctx context.Context, l Lease) (Checkpoint, error) {
 // position 0, so a [Runner.WaitUntil] after a rebuild waits for the replay
 // rather than seeing the position reached before it.
 func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
-	l := r.lease(seg)
-	if err := r.store.Reset(ctx, l, r.p.Version, r.p.Reset); err != nil {
+	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
-	cp, err := r.reclaim(ctx, l)
+	cp, err := r.reclaim(ctx, seg)
 	if err != nil {
 		return Checkpoint{}, err
 	}

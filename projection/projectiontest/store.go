@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,15 @@ var errWrite = errors.New("projectiontest: fn failed")
 
 type storeAcceptance struct {
 	store projection.Store
+
+	mu     sync.Mutex
+	leases map[leaseKey]projection.Lease // the last Lease Claim granted each owner
+}
+
+type leaseKey struct {
+	name    string
+	segment int
+	owner   string
 }
 
 // StoreAcceptanceTest runs the [projection.Store] contract against store as
@@ -55,7 +65,7 @@ type storeAcceptance struct {
 func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	t.Helper()
 
-	s := &storeAcceptance{store: store}
+	s := &storeAcceptance{store: store, leases: make(map[leaseKey]projection.Lease)}
 	s.group(t, "Init", map[string]func(*testing.T){
 		"CreatesSegments":     s.initCreatesSegments,
 		"Idempotent":          s.initIdempotent,
@@ -65,7 +75,9 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	})
 	s.group(t, "Claim", map[string]func(*testing.T){
 		"Fresh":               s.claimFresh,
-		"SameOwner":           s.claimSameOwner,
+		"Refresh":             s.claimRefresh,
+		"SameOwnerNewProcess": s.claimSameOwnerNewProcess,
+		"TakeoverRaisesEpoch": s.claimTakeoverRaisesEpoch,
 		"HeldByOther":         s.claimHeldByOther,
 		"Expired":             s.claimExpired,
 		"SegmentsIndependent": s.claimSegmentsIndependent,
@@ -80,6 +92,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"NotOwner":           s.commitNotOwner,
 		"AfterRelease":       s.commitAfterRelease,
 		"AfterTakeover":      s.commitAfterTakeover,
+		"StaleEpoch":         s.commitStaleEpoch,
 		"RefreshesHeartbeat": s.commitRefreshesHeartbeat,
 	})
 	s.group(t, "Reset", map[string]func(*testing.T){
@@ -87,17 +100,20 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"RunsWipeOnce":        s.resetRunsWipeOnce,
 		"WipeErrorKeepsState": s.resetWipeErrorKeepsState,
 		"NotOwner":            s.resetNotOwner,
+		"StaleEpoch":          s.resetStaleEpoch,
 	})
 	s.group(t, "Release", map[string]func(*testing.T){
 		"LetsOtherClaim": s.releaseLetsOtherClaim,
 		"ClearsOwner":    s.releaseClearsOwner,
 		"MarksStandby":   s.releaseMarksStandby,
 		"NotOwnerNoop":   s.releaseNotOwnerNoop,
+		"StaleEpochNoop": s.releaseStaleEpochNoop,
 	})
 	s.group(t, "SaveStatus", map[string]func(*testing.T){
 		"Publishes":       s.saveStatusPublishes,
 		"KeepsCheckpoint": s.saveStatusKeepsCheckpoint,
 		"NotOwnerRefused": s.saveStatusNotOwnerRefused,
+		"StaleEpoch":      s.saveStatusStaleEpoch,
 	})
 	s.group(t, "LoadStatuses", map[string]func(*testing.T){
 		"UnknownName": s.loadStatusesUnknownName,
@@ -199,10 +215,47 @@ func (s *storeAcceptance) claimFresh(t *testing.T) {
 	}
 }
 
-func (s *storeAcceptance) claimSameOwner(t *testing.T) {
+func (s *storeAcceptance) claimRefresh(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
+	first := s.lease(name, 0, owner)
 	s.claim(t, name, 0, owner, longTTL)
+	if got := s.lease(name, 0, owner); got != first {
+		t.Fatalf("Lease after refreshing the claim = %+v, want %+v unchanged", got, first)
+	}
+	if first.Epoch == 0 {
+		t.Fatalf("Claim granted Epoch 0, want a non-zero epoch")
+	}
+}
+
+// claimSameOwnerNewProcess covers a second process under the same Owner,
+// such as a restart under a fixed pod name: it does not hold the claim
+// the first process got, so it waits like any other instance.
+func (s *storeAcceptance) claimSameOwnerNewProcess(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	_, _, ok, err := s.store.Claim(t.Context(), newProcess(name), longTTL)
+	if err != nil {
+		t.Fatalf("Claim by a new process under the same Owner: %v", err)
+	}
+	if ok {
+		t.Fatal("Claim by a new process under the same Owner was granted while the first holds the segment, want it refused")
+	}
+}
+
+func (s *storeAcceptance) claimTakeoverRaisesEpoch(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	first := s.lease(name, 0, owner).Epoch
+	s.release(t, name, 0, owner)
+	s.claim(t, name, 0, other, shortTTL)
+	second := s.lease(name, 0, other).Epoch
+	time.Sleep(2 * shortTTL)
+	s.claim(t, name, 0, owner, shortTTL)
+	third := s.lease(name, 0, owner).Epoch
+	if !(first < second && second < third) {
+		t.Fatalf("epochs after a release and an expiry: %d, %d, %d; want each higher than the last", first, second, third)
+	}
 }
 
 func (s *storeAcceptance) claimHeldByOther(t *testing.T) {
@@ -263,7 +316,7 @@ func (s *storeAcceptance) commitStoresStatus(t *testing.T) {
 	s.claim(t, name, 0, owner, longTTL)
 	cp := projection.Checkpoint{Position: 10, Version: 2}
 	st := projection.Status{Phase: projection.Live, Position: 10, Head: 12, Version: 2, Owner: owner}
-	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, cp, st, nop); err != nil {
+	if err := s.store.Commit(t.Context(), s.lease(name, 0, owner), cp, st, nop); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 
@@ -277,7 +330,7 @@ func (s *storeAcceptance) commitRunsFnOnce(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	calls := 0
-	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
+	err := s.store.Commit(t.Context(), s.lease(name, 0, owner), projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
 		func(ctx context.Context) error {
 			calls++
 			if ctx == nil {
@@ -299,7 +352,7 @@ func (s *storeAcceptance) commitFnErrorKeepsState(t *testing.T) {
 	cp := projection.Checkpoint{Position: 3, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner},
+	err := s.store.Commit(t.Context(), s.lease(name, 0, owner),
 		projection.Checkpoint{Position: 9, Version: 1},
 		projection.Status{Phase: projection.Live, Position: 9, Owner: owner},
 		func(context.Context) error { return errWrite })
@@ -342,6 +395,39 @@ func (s *storeAcceptance) commitAfterTakeover(t *testing.T) {
 	}
 }
 
+// staleLease claims the segment as owner, lets the claim expire, and has a
+// new process under the same Owner take it over. It returns the first
+// claim's Lease, now stale, and the current one.
+func (s *storeAcceptance) staleLease(t *testing.T, name string) (stale, current projection.Lease) {
+	t.Helper()
+	s.claim(t, name, 0, owner, shortTTL)
+	stale = s.lease(name, 0, owner)
+	time.Sleep(2 * shortTTL)
+	current, _, ok, err := s.store.Claim(t.Context(), newProcess(name), shortTTL)
+	if err != nil || !ok {
+		t.Fatalf("Claim by a new process under the same Owner after expiry = %v, %v; want true, nil", ok, err)
+	}
+	s.setLease(current)
+	return stale, current
+}
+
+func (s *storeAcceptance) commitStaleEpoch(t *testing.T) {
+	name := s.newProjection(t, 1)
+	stale, current := s.staleLease(t, name)
+
+	cp := projection.Checkpoint{Position: 50, Version: 1}
+	st := projection.Status{Phase: projection.Live, Position: 50, Owner: owner}
+	if err := s.store.Commit(t.Context(), stale, cp, st, nop); !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("Commit under a stale epoch: got %v, want ErrClaimLost", err)
+	}
+	if got := s.claim(t, name, 0, owner, longTTL); got != (projection.Checkpoint{}) {
+		t.Fatalf("checkpoint after a stale-epoch Commit: got %+v, want it unchanged", got)
+	}
+	if err := s.store.Commit(t.Context(), current, cp, st, nop); err != nil {
+		t.Fatalf("Commit under the current epoch: %v", err)
+	}
+}
+
 func (s *storeAcceptance) commitRefreshesHeartbeat(t *testing.T) {
 	name := s.newProjection(t, 1)
 	ttl := 4 * shortTTL
@@ -361,7 +447,7 @@ func (s *storeAcceptance) resetMovesCheckpoint(t *testing.T) {
 	s.claim(t, name, 0, owner, longTTL)
 	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, ReplayUntil: 2})
 
-	if err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 2, nop); err != nil {
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
 	want := projection.Checkpoint{Position: 0, Version: 2, ReplayUntil: 8}
@@ -377,7 +463,7 @@ func (s *storeAcceptance) resetRunsWipeOnce(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	calls := 0
-	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 1, func(context.Context) error {
+	err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, func(context.Context) error {
 		calls++
 		return nil
 	})
@@ -395,7 +481,7 @@ func (s *storeAcceptance) resetWipeErrorKeepsState(t *testing.T) {
 	cp := projection.Checkpoint{Position: 5, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, 2, func(context.Context) error { return errWrite })
+	err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, func(context.Context) error { return errWrite })
 	if !errors.Is(err, errWrite) {
 		t.Fatalf("Reset with a failing wipe: got %v, want wipe's error", err)
 	}
@@ -410,12 +496,27 @@ func (s *storeAcceptance) resetNotOwner(t *testing.T) {
 	cp := projection.Checkpoint{Position: 5, Version: 1}
 	s.commit(t, name, 0, owner, cp)
 
-	err := s.store.Reset(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, 2, nop)
+	err := s.store.Reset(t.Context(), s.lease(name, 0, other), 2, nop)
 	if !errors.Is(err, projection.ErrClaimLost) {
 		t.Fatalf("Reset by a non-owner: got %v, want ErrClaimLost", err)
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
 		t.Fatalf("checkpoint after a non-owner Reset: got %+v, want %+v", got, cp)
+	}
+}
+
+func (s *storeAcceptance) resetStaleEpoch(t *testing.T) {
+	name := s.newProjection(t, 1)
+	stale, _ := s.staleLease(t, name)
+	cp := projection.Checkpoint{Position: 5, Version: 1}
+	s.commit(t, name, 0, owner, cp)
+
+	err := s.store.Reset(t.Context(), stale, 2, nop)
+	if !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("Reset under a stale epoch: got %v, want ErrClaimLost", err)
+	}
+	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
+		t.Fatalf("checkpoint after a stale-epoch Reset: got %+v, want %+v", got, cp)
 	}
 }
 
@@ -457,13 +558,22 @@ func (s *storeAcceptance) releaseNotOwnerNoop(t *testing.T) {
 	}
 }
 
+func (s *storeAcceptance) releaseStaleEpochNoop(t *testing.T) {
+	name := s.newProjection(t, 1)
+	stale, _ := s.staleLease(t, name)
+	if err := s.store.Release(t.Context(), stale); err != nil {
+		t.Fatalf("Release under a stale epoch: %v", err)
+	}
+	s.claimFails(t, name, 0, other, longTTL)
+}
+
 // --- SaveStatus ---
 
 func (s *storeAcceptance) saveStatusPublishes(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), s.lease(name, 0, owner), st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	got := s.statuses(t, name)[0]
@@ -472,7 +582,7 @@ func (s *storeAcceptance) saveStatusPublishes(t *testing.T) {
 	}
 
 	st = projection.Status{Phase: projection.Live, Head: 9, Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), s.lease(name, 0, owner), st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	if got := s.statuses(t, name)[0]; got.Phase != projection.Live || got.LastError != "" {
@@ -489,7 +599,7 @@ func (s *storeAcceptance) saveStatusKeepsCheckpoint(t *testing.T) {
 	// A status whose Position and Version disagree with the checkpoint:
 	// SaveStatus publishes phase, head and error, never progress.
 	st := projection.Status{Phase: projection.Live, Position: 99, Version: 99, Head: 7, Owner: owner}
-	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, st); err != nil {
+	if err := s.store.SaveStatus(t.Context(), s.lease(name, 0, owner), st); err != nil {
 		t.Fatalf("SaveStatus: %v", err)
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
@@ -504,12 +614,24 @@ func (s *storeAcceptance) saveStatusNotOwnerRefused(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
 	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: other}
-	if err := s.store.SaveStatus(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: other}, st); !errors.Is(err, projection.ErrClaimLost) {
+	if err := s.store.SaveStatus(t.Context(), s.lease(name, 0, other), st); !errors.Is(err, projection.ErrClaimLost) {
 		t.Errorf("SaveStatus by a non-owner = %v, want ErrClaimLost", err)
 	}
 	got := s.statuses(t, name)[0]
 	if got.Phase == projection.Stalled || got.LastError != "" || got.Owner != owner {
 		t.Fatalf("status after a non-owner SaveStatus: got %+v, want it unchanged", got)
+	}
+}
+
+func (s *storeAcceptance) saveStatusStaleEpoch(t *testing.T) {
+	name := s.newProjection(t, 1)
+	stale, _ := s.staleLease(t, name)
+	st := projection.Status{Phase: projection.Stalled, Head: 9, LastError: "boom", Owner: owner}
+	if err := s.store.SaveStatus(t.Context(), stale, st); !errors.Is(err, projection.ErrClaimLost) {
+		t.Errorf("SaveStatus under a stale epoch = %v, want ErrClaimLost", err)
+	}
+	if got := s.statuses(t, name)[0]; got.Phase == projection.Stalled || got.LastError != "" {
+		t.Fatalf("status after a stale-epoch SaveStatus: got %+v, want it unchanged", got)
 	}
 }
 
@@ -543,9 +665,9 @@ func (s *storeAcceptance) deadLetterInsideCommit(t *testing.T) {
 	dls := s.store.(projection.DeadLetterStore)
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: 0, Owner: owner}, projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
+	err := s.store.Commit(t.Context(), s.lease(name, 0, owner), projection.Checkpoint{Position: 1}, projection.Status{Phase: projection.Live, Position: 1, Owner: owner},
 		func(ctx context.Context) error {
-			return dls.SaveDeadLetter(ctx, projection.Lease{Name: name, Segment: 0, Owner: owner}, 1, "projectiontest.Event", errWrite)
+			return dls.SaveDeadLetter(ctx, s.lease(name, 0, owner), 1, "projectiontest.Event", errWrite)
 		})
 	if err != nil {
 		t.Fatalf("Commit with SaveDeadLetter: %v", err)
@@ -566,23 +688,45 @@ func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 	return name
 }
 
-// claim claims segment for who and fails the test if it is not granted.
+// lease returns the last Lease Claim granted who on segment, or a Lease
+// with Epoch 0 when who never claimed it.
+func (s *storeAcceptance) lease(name string, segment int, who string) projection.Lease {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.leases[leaseKey{name, segment, who}]; ok {
+		return l
+	}
+	return projection.Lease{Name: name, Segment: segment, Owner: who}
+}
+
+func (s *storeAcceptance) setLease(l projection.Lease) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.leases[leaseKey{l.Name, l.Segment, l.Owner}] = l
+}
+
+// claim claims segment for who, under the Lease who last got, and fails
+// the test if it is not granted.
 func (s *storeAcceptance) claim(t *testing.T, name string, segment int, who string, ttl time.Duration) projection.Checkpoint {
 	t.Helper()
-	cp, ok, err := s.store.Claim(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, ttl)
+	l, cp, ok, err := s.store.Claim(t.Context(), s.lease(name, segment, who), ttl)
 	if err != nil {
 		t.Fatalf("Claim(%d, %s): %v", segment, who, err)
 	}
 	if !ok {
 		t.Fatalf("Claim(%d, %s) was refused, want it granted", segment, who)
 	}
+	if l.Name != name || l.Segment != segment || l.Owner != who {
+		t.Fatalf("Claim(%d, %s) returned Lease %+v, want the same Name, Segment and Owner", segment, who, l)
+	}
+	s.setLease(l)
 	return cp
 }
 
 // claimFails fails the test if segment can be claimed by who.
 func (s *storeAcceptance) claimFails(t *testing.T, name string, segment int, who string, ttl time.Duration) {
 	t.Helper()
-	_, ok, err := s.store.Claim(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, ttl)
+	_, _, ok, err := s.store.Claim(t.Context(), s.lease(name, segment, who), ttl)
 	if err != nil {
 		t.Fatalf("Claim(%d, %s): %v", segment, who, err)
 	}
@@ -595,7 +739,7 @@ func (s *storeAcceptance) claimFails(t *testing.T, name string, segment int, who
 func (s *storeAcceptance) commit(t *testing.T, name string, segment int, who string, cp projection.Checkpoint) {
 	t.Helper()
 	st := projection.Status{Phase: projection.Live, Position: cp.Position, Head: cp.Position, Version: cp.Version, Owner: who, Segment: segment}
-	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, cp, st, nop); err != nil {
+	if err := s.store.Commit(t.Context(), s.lease(name, segment, who), cp, st, nop); err != nil {
 		t.Fatalf("Commit(%d, %s): %v", segment, who, err)
 	}
 }
@@ -605,14 +749,14 @@ func (s *storeAcceptance) commitLost(t *testing.T, name string, segment int, who
 	t.Helper()
 	cp := projection.Checkpoint{Position: 50, Version: 1}
 	st := projection.Status{Phase: projection.Live, Position: 50, Owner: who, Segment: segment}
-	if err := s.store.Commit(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}, cp, st, nop); !errors.Is(err, projection.ErrClaimLost) {
+	if err := s.store.Commit(t.Context(), s.lease(name, segment, who), cp, st, nop); !errors.Is(err, projection.ErrClaimLost) {
 		t.Fatalf("Commit(%d, %s): got %v, want ErrClaimLost", segment, who, err)
 	}
 }
 
 func (s *storeAcceptance) release(t *testing.T, name string, segment int, who string) {
 	t.Helper()
-	if err := s.store.Release(t.Context(), projection.Lease{Name: name, Segment: segment, Owner: who}); err != nil {
+	if err := s.store.Release(t.Context(), s.lease(name, segment, who)); err != nil {
 		t.Fatalf("Release(%d, %s): %v", segment, who, err)
 	}
 }
@@ -624,4 +768,10 @@ func (s *storeAcceptance) statuses(t *testing.T, name string) []projection.Statu
 		t.Fatalf("LoadStatuses: %v", err)
 	}
 	return sts
+}
+
+// newProcess returns the Lease a new process under owner starts with: it
+// has not claimed segment 0 of name yet, so its Epoch is 0.
+func newProcess(name string) projection.Lease {
+	return projection.Lease{Name: name, Segment: 0, Owner: owner}
 }

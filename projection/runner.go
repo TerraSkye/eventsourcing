@@ -60,6 +60,10 @@ type Runner struct {
 type segmentState struct {
 	status Status
 
+	// lease is this instance's claim on the segment: the Lease Store.Claim
+	// last granted, or one with Epoch 0 before the first claim.
+	lease Lease
+
 	// active reports that this instance holds the segment's claim and is
 	// processing it.
 	active bool
@@ -136,16 +140,18 @@ func NewRunner(p Projection, reader eventsourcing.GlobalReader, store Store) *Ru
 		changed:  make(chan struct{}),
 	}
 	for i := range r.segs {
-		r.segs[i] = &segmentState{status: Status{Phase: Starting, Version: p.Version, Segment: i}}
+		r.segs[i] = &segmentState{
+			status: Status{Phase: Starting, Version: p.Version, Segment: i},
+			lease:  Lease{Name: p.Name, Segment: i, Owner: p.Owner},
+		}
 	}
 	return r
 }
 
 // defaultOwner returns "hostname/pid/random", with "unknown" for a hostname
-// that cannot be read. The random part keeps two runners in one process
-// apart, and a restarted process apart from the claims of the one before
-// it: in containers the pid is usually the same after a restart, and Claim
-// hands a segment back to the owner that already holds it.
+// that cannot be read. The random part tells apart, in LoadStatuses, two
+// runners in one process and a restarted process from the one before it,
+// which in a container usually had the same pid.
 func defaultOwner() string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
@@ -296,9 +302,24 @@ func (r *Runner) notifyWatchers() {
 // [Projection.OnError] since the Runner was created.
 func (r *Runner) Skipped() int64 { return r.skipped.Load() }
 
-// lease returns the [Lease] this runner uses for seg.
+// lease returns this runner's [Lease] on seg.
 func (r *Runner) lease(seg int) Lease {
-	return Lease{Name: r.p.Name, Segment: seg, Owner: r.p.Owner}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.segs[seg].lease
+}
+
+// claim calls [Store.Claim] for seg under this runner's lease and, when
+// granted, keeps the Lease it returns for every later call on seg.
+func (r *Runner) claim(ctx context.Context, seg int) (Checkpoint, bool, error) {
+	l, cp, ok, err := r.store.Claim(ctx, r.lease(seg), r.p.ClaimTTL)
+	if err != nil || !ok {
+		return Checkpoint{}, false, err
+	}
+	r.mu.Lock()
+	r.segs[seg].lease = l
+	r.mu.Unlock()
+	return cp, true, nil
 }
 
 // readOptions builds the ReadOptions passed to the global reader on each

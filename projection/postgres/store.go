@@ -37,7 +37,8 @@ import (
 // your migrations, or once at startup.
 //
 // projection_segments holds one row per segment of each projection: its
-// checkpoint, the owner currently claiming it with its heartbeat, the
+// checkpoint, the owner currently claiming it with the claim's epoch and
+// heartbeat, the
 // projection version and replay boundary, and the status columns other
 // instances read with LoadStatuses. A single-segment projection uses
 // segment 0.
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS projection_segments (
     head          BIGINT      NOT NULL DEFAULT 0,
     last_error    TEXT,
     owner         TEXT,
+    epoch         BIGINT      NOT NULL DEFAULT 0,
     heartbeat     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (name, segment)
 );
@@ -149,23 +151,30 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int, r
 }
 
 // Claim implements [projection.Store].
-func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Checkpoint, bool, error) {
+//
+// A refresh of the current claim keeps its epoch; a takeover raises it.
+// On the right-hand side of SET, owner and epoch are the row's values
+// before the update.
+func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	var cp projection.Checkpoint
 	err := s.db.QueryRow(ctx, `
 		UPDATE projection_segments
-		SET owner = $3, heartbeat = clock_timestamp()
+		SET owner = $3, heartbeat = clock_timestamp(),
+		    epoch = CASE WHEN owner = $3 AND epoch = $5 THEN epoch ELSE epoch + 1 END
 		WHERE name = $1 AND segment = $2
-		  AND (owner IS NULL OR owner = $3 OR heartbeat < clock_timestamp() - make_interval(secs => $4))
-		RETURNING position, version, replay_until`,
-		l.Name, l.Segment, l.Owner, ttl.Seconds(),
-	).Scan(&cp.Position, &cp.Version, &cp.ReplayUntil)
+		  AND ((owner = $3 AND epoch = $5)
+		       OR owner IS NULL
+		       OR heartbeat < clock_timestamp() - make_interval(secs => $4))
+		RETURNING epoch, position, version, replay_until`,
+		l.Name, l.Segment, l.Owner, ttl.Seconds(), l.Epoch,
+	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return projection.Checkpoint{}, false, nil
+		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
 	if err != nil {
-		return projection.Checkpoint{}, false, fmt.Errorf("projection/postgres: claim %q segment %d: %w", l.Name, l.Segment, err)
+		return projection.Lease{}, projection.Checkpoint{}, false, fmt.Errorf("projection/postgres: claim %q segment %d: %w", l.Name, l.Segment, err)
 	}
-	return cp, true, nil
+	return l, cp, true, nil
 }
 
 // Commit implements [projection.Store]. It runs fn in a transaction that
@@ -187,11 +196,11 @@ func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Ch
 			UPDATE projection_segments
 			SET position = $3, version = $4, replay_until = $5,
 			    phase = $6, head = $7, last_error = $8, heartbeat = clock_timestamp()
-			WHERE name = $1 AND segment = $2 AND owner = $9`,
+			WHERE name = $1 AND segment = $2 AND owner = $9 AND epoch = $10`,
 			l.Name, l.Segment,
 			cp.Position, cp.Version, cp.ReplayUntil,
 			status.Phase.String(), status.Head, lastErr,
-			l.Owner,
+			l.Owner, l.Epoch,
 		)
 		if err != nil {
 			return fmt.Errorf("projection/postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
@@ -216,8 +225,8 @@ func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, w
 			SET position = 0, version = $3, replay_until = $4,
 			    phase = 'starting', head = 0, last_error = NULL,
 			    heartbeat = clock_timestamp()
-			WHERE name = $1 AND segment = $2 AND owner = $5`,
-			l.Name, l.Segment, newVersion, oldPos, l.Owner,
+			WHERE name = $1 AND segment = $2 AND owner = $5 AND epoch = $6`,
+			l.Name, l.Segment, newVersion, oldPos, l.Owner, l.Epoch,
 		)
 		if err != nil {
 			return fmt.Errorf("projection/postgres: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
@@ -227,25 +236,26 @@ func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, w
 }
 
 // lockOwned locks l's segment row for the rest of tx and returns its
-// position, or returns [projection.ErrClaimLost] when l.Owner does not
-// hold the segment.
+// position, or returns [projection.ErrClaimLost] when l is not the
+// segment's current claim.
 func lockOwned(ctx context.Context, tx pgx.Tx, l projection.Lease) (uint64, error) {
 	var (
 		owner    *string
+		epoch    uint64
 		position uint64
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT owner, position FROM projection_segments
+		`SELECT owner, epoch, position FROM projection_segments
 		 WHERE name = $1 AND segment = $2 FOR UPDATE`,
 		l.Name, l.Segment,
-	).Scan(&owner, &position)
+	).Scan(&owner, &epoch, &position)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, projection.ErrClaimLost
 	}
 	if err != nil {
 		return 0, fmt.Errorf("projection/postgres: lock %q segment %d: %w", l.Name, l.Segment, err)
 	}
-	if owner == nil || *owner != l.Owner {
+	if owner == nil || *owner != l.Owner || epoch != l.Epoch {
 		return 0, projection.ErrClaimLost
 	}
 	return position, nil
@@ -256,8 +266,8 @@ func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 	_, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET owner = NULL, phase = 'standby'
-		WHERE name = $1 AND segment = $2 AND owner = $3`,
-		l.Name, l.Segment, l.Owner,
+		WHERE name = $1 AND segment = $2 AND owner = $3 AND epoch = $4`,
+		l.Name, l.Segment, l.Owner, l.Epoch,
 	)
 	if err != nil {
 		return fmt.Errorf("projection/postgres: release %q segment %d: %w", l.Name, l.Segment, err)
@@ -274,8 +284,8 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 	tag, err := s.db.Exec(ctx, `
 		UPDATE projection_segments
 		SET phase = $3, head = $4, last_error = $5, heartbeat = clock_timestamp()
-		WHERE name = $1 AND segment = $2 AND owner = $6`,
-		l.Name, l.Segment, status.Phase.String(), status.Head, lastErr, l.Owner,
+		WHERE name = $1 AND segment = $2 AND owner = $6 AND epoch = $7`,
+		l.Name, l.Segment, status.Phase.String(), status.Head, lastErr, l.Owner, l.Epoch,
 	)
 	if err != nil {
 		return fmt.Errorf("projection/postgres: save status of %q segment %d: %w", l.Name, l.Segment, err)

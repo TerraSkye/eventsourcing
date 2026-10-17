@@ -48,6 +48,7 @@ type memoryRow struct {
 	cp        projection.Checkpoint
 	status    projection.Status
 	owner     string
+	epoch     uint64
 	heartbeat time.Time
 }
 
@@ -83,32 +84,35 @@ func (s *Store) row(l projection.Lease) *memoryRow {
 	return p.rows[l.Segment]
 }
 
-// owned returns the row for l's segment if l.Owner holds it, or nil.
+// owned returns the row for l's segment if l is its current claim, or nil.
 // s.mu must be held.
 func (s *Store) owned(l projection.Lease) *memoryRow {
 	row := s.row(l)
-	if row == nil || row.owner != l.Owner {
+	if row == nil || row.owner == "" || row.owner != l.Owner || row.epoch != l.Epoch {
 		return nil
 	}
 	return row
 }
 
 // Claim implements [projection.Store].
-func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Checkpoint, bool, error) {
+func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row := s.row(l)
 	if row == nil {
-		return projection.Checkpoint{}, false, nil
+		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
-	free := row.owner == "" || row.owner == l.Owner || time.Since(row.heartbeat) > ttl
-	if !free {
-		return projection.Checkpoint{}, false, nil
+	if s.owned(l) == nil {
+		if row.owner != "" && time.Since(row.heartbeat) <= ttl {
+			return projection.Lease{}, projection.Checkpoint{}, false, nil
+		}
+		row.epoch++
 	}
 	row.owner = l.Owner
 	row.heartbeat = time.Now()
 	row.status.Owner = l.Owner
-	return row.cp, true, nil
+	l.Epoch = row.epoch
+	return l, row.cp, true, nil
 }
 
 // Commit implements [projection.Store]. It cannot roll back fn's writes;
