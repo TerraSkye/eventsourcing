@@ -26,7 +26,7 @@ A task management system with:
 | [2](./02-first-query.md) | Your first query | Queries, live read models | 15 min |
 | [3](./03-business-rules.md) | Business rules | State, the decide/evolve pattern | 20 min |
 | [4](./04-projections.md) | Projections | Projection runner, checkpoints | 25 min |
-| [5](./05-background-processing.md) | Background processing | Processors, sagas | 15 min |
+| [5](./05-background-processing.md) | Background processing | Automations, todo lists | 20 min |
 
 **Total time**: ~1.5 hours hands-on
 

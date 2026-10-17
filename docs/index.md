@@ -16,7 +16,7 @@ Step-by-step guides to learn event sourcing by building a real application.
 - [Part 2: Your First Query](./tutorials/02-first-query.md) — queries and live read models
 - [Part 3: Business Rules](./tutorials/03-business-rules.md) — state, validation, and the decide/evolve pattern
 - [Part 4: Projections](./tutorials/04-projections.md) — read models kept up to date by the projection runner
-- [Part 5: Background Processing](./tutorials/05-background-processing.md) — processors and sagas
+- [Part 5: Background Processing](./tutorials/05-background-processing.md) — automations that work off a todo list
 
 ---
 
