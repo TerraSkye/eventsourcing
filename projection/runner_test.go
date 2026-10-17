@@ -418,6 +418,44 @@ func (*nopReader) ReadAll(context.Context, uint64, eventsourcing.ReadOptions) (e
 }
 func (*nopReader) Head(context.Context) (uint64, error) { return 0, nil }
 
+// TestRunner_DefaultOwnerIsUniquePerRunner covers that two runners in one
+// process, both on the default Owner, do not share a claim: a second runner
+// started while the first holds the segment stays in Standby.
+func TestRunner_DefaultOwnerIsUniquePerRunner(t *testing.T) {
+	es := &testStore{}
+	last := save(t, es, 3)
+	store := memory.NewStore()
+
+	newDefaultOwnerRunner := func(c *counter) *projection.Runner {
+		return projection.NewRunner(projection.Projection{
+			Name:         "test",
+			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+			Events:       counterEvents,
+			PollInterval: 10 * time.Millisecond,
+			ClaimTTL:     time.Second,
+		}, es, store)
+	}
+	c1, c2 := newCounter(), newCounter()
+	r1, r2 := newDefaultOwnerRunner(c1), newDefaultOwnerRunner(c2)
+
+	defer runRunner(t, r1)()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r1.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+
+	defer runRunner(t, r2)()
+	time.Sleep(100 * time.Millisecond) // several claim attempts by r2
+
+	if st := r2.Status(); st.Phase != projection.Standby {
+		t.Fatalf("second runner Status() = %s owned by %q, want %s while the first holds the segment", st.Phase, st.Owner, projection.Standby)
+	}
+	if st := r1.Status(); st.Owner == "" || st.Owner == r2.Status().Owner {
+		t.Fatalf("first runner Owner = %q, want a non-empty owner distinct from the second's", st.Owner)
+	}
+}
+
 // TestRunner_RebuildCallerContextDoesNotStopRun covers that a Rebuild whose
 // own ctx ends mid-reset fails that Rebuild only; Run keeps going until its
 // own ctx is done.
