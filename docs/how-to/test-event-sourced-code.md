@@ -60,12 +60,12 @@ import (
     "testing"
 
     "github.com/google/uuid"
-    memstore "github.com/terraskye/eventsourcing/eventstore/memory"
+    "github.com/terraskye/eventsourcing/memory"
     "your-module/slices/createtask"
 )
 
 func TestCreateTask_Success(t *testing.T) {
-    store := memstore.NewMemoryStore(10)
+    store := memory.NewEventStore(10)
     defer store.Close()
 
     handler := createtask.NewHandler(store)
@@ -88,7 +88,7 @@ func TestCreateTask_Success(t *testing.T) {
 }
 
 func TestCreateTask_DuplicateID(t *testing.T) {
-    store := memstore.NewMemoryStore(10)
+    store := memory.NewEventStore(10)
     defer store.Close()
 
     handler := createtask.NewHandler(store)
@@ -118,7 +118,7 @@ import (
 )
 
 func TestCompleteTask_NotExist(t *testing.T) {
-    store := memstore.NewMemoryStore(10)
+    store := memory.NewEventStore(10)
     defer store.Close()
 
     handler := completetask.NewHandler(store)
@@ -137,7 +137,7 @@ func TestCompleteTask_NotExist(t *testing.T) {
 
 ```go
 func TestListTasks_Empty(t *testing.T) {
-    store := memstore.NewMemoryStore(10)
+    store := memory.NewEventStore(10)
     defer store.Close()
 
     qh := listtasks.NewQueryHandler(store)
@@ -152,7 +152,7 @@ func TestListTasks_Empty(t *testing.T) {
 }
 
 func TestListTasks_AfterCreation(t *testing.T) {
-    store := memstore.NewMemoryStore(10)
+    store := memory.NewEventStore(10)
     defer store.Close()
 
     // Create a task via command handler (exercises real store writes)
@@ -179,7 +179,7 @@ func TestListTasks_AfterCreation(t *testing.T) {
 ```go
 import (
     "context"
-    membus "github.com/terraskye/eventsourcing/eventbus/memory"
+    "github.com/terraskye/eventsourcing/memory"
 )
 
 func TestProjector_OnTaskCreated(t *testing.T) {
@@ -203,7 +203,7 @@ func TestProjector_OnTaskCreated(t *testing.T) {
 ## Tips
 
 - **Test `decide` and `evolve` in isolation** — they are pure functions and require no infrastructure.
-- **Use `memstore.NewMemoryStore`** for integration tests that need a real store.
-- **Use `membus.NewEventBus`** for tests that involve event bus subscriptions.
+- **Use `memory.NewEventStore`** for integration tests that need a real store.
+- **Use `memory.NewEventBus`** for tests that involve event bus subscriptions.
 - **Close stores and buses** with `defer store.Close()` / `defer bus.Close()` to avoid goroutine leaks in tests.
 - **Avoid global state** — the event registry uses package-level globals; register events in `TestMain` if needed.

@@ -386,7 +386,7 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 }
 
 // TestLoadStreamFrom_RevisionExcludesAlreadySeenEvent documents a bug: unlike
-// [eventstore/memory.MemoryStore] and [eventstore/postgres]'s implementation
+// [memory.EventStore] and [eventstore/postgres]'s implementation
 // of the same [cqrs.EventStore] interface, FilesStore.LoadStreamFrom treats
 // Revision(N) as an INCLUSIVE start position (returns the event whose
 // Version equals N again) instead of an EXCLUSIVE one (only events with

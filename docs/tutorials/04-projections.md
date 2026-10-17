@@ -177,9 +177,8 @@ import (
     "log"
 
     "github.com/gin-gonic/gin"
-    memstore "github.com/terraskye/eventsourcing/eventstore/memory"
+    "github.com/terraskye/eventsourcing/memory"
     "github.com/terraskye/eventsourcing/projection"
-    projmem "github.com/terraskye/eventsourcing/projection/memory"
 
     "task-management/slices/completetask"
     "task-management/slices/createtask"
@@ -189,12 +188,12 @@ import (
 func main() {
     ctx := context.Background()
 
-    store := memstore.NewMemoryStore(100)
+    store := memory.NewEventStore(100)
     defer store.Close()
 
     // The read model, and the runner that keeps it up to date.
     list := tasklist.NewTaskList()
-    taskList := projection.NewRunner(tasklist.NewProjection(list), store, projmem.NewStore())
+    taskList := projection.NewRunner(tasklist.NewProjection(list), store, memory.NewProjectionStore())
 
     go func() {
         if err := taskList.Run(ctx); err != nil && ctx.Err() == nil {
@@ -221,14 +220,14 @@ func main() {
 
 - The **projection** from Step 3.
 - The **event store** to read from. The memory store implements `eventsourcing.GlobalReader`.
-- A **projection store** to keep the checkpoint in. `projmem.NewStore()` keeps it in memory, which fits a read model that also lives in memory: both start empty on every run, and the runner rebuilds the task list from the start of the log.
+- A **projection store** to keep the checkpoint in. `memory.NewProjectionStore()` keeps it in memory, which fits a read model that also lives in memory: both start empty on every run, and the runner rebuilds the task list from the start of the log.
 
 `main.go` decides how the projection runs; the slice decides what it does. Because `Definition` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
 
 ```go
 p := tasklist.NewProjection(list)
 p.Handler = logging.WithEventLogging(logger, p.Handler)
-taskList := projection.NewRunner(p, store, projmem.NewStore())
+taskList := projection.NewRunner(p, store, memory.NewProjectionStore())
 ```
 
 ## Step 6: Test it

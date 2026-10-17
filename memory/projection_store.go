@@ -1,4 +1,3 @@
-// Package memory is an in-memory [projection.Store].
 package memory
 
 import (
@@ -9,8 +8,8 @@ import (
 	"github.com/terraskye/eventsourcing/projection"
 )
 
-// Store is a [projection.Store] that keeps everything in memory. Create one
-// with [NewStore].
+// ProjectionStore is a [projection.Store] that keeps everything in memory. Create one
+// with [NewProjectionStore].
 //
 // It is intended for tests, single-process in-memory read models, and the
 // documentation examples. It cannot roll back fn's writes on Commit (there
@@ -27,16 +26,16 @@ import (
 // It implements [projection.Store] fully, including Claim/Release fencing,
 // so segmented projections and multiple goroutine instances of a runner can
 // be exercised against it.
-type Store struct {
+type ProjectionStore struct {
 	mu          sync.Mutex
 	projections map[string]*memoryProjection
 }
 
-var _ projection.Store = (*Store)(nil)
+var _ projection.Store = (*ProjectionStore)(nil)
 
-// NewStore returns an empty [Store].
-func NewStore() *Store {
-	return &Store{projections: make(map[string]*memoryProjection)}
+// NewProjectionStore returns an empty [ProjectionStore].
+func NewProjectionStore() *ProjectionStore {
+	return &ProjectionStore{projections: make(map[string]*memoryProjection)}
 }
 
 type memoryProjection struct {
@@ -53,7 +52,7 @@ type memoryRow struct {
 }
 
 // Declare implements [projection.Store].
-func (s *Store) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (s *ProjectionStore) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.projections[name]
@@ -76,7 +75,7 @@ func (s *Store) Declare(ctx context.Context, name string, segments int, replayUn
 
 // row returns the row for l's segment, or nil if Declare has not created it.
 // s.mu must be held.
-func (s *Store) row(l projection.Lease) *memoryRow {
+func (s *ProjectionStore) row(l projection.Lease) *memoryRow {
 	p, ok := s.projections[l.Name]
 	if !ok {
 		return nil
@@ -86,7 +85,7 @@ func (s *Store) row(l projection.Lease) *memoryRow {
 
 // owned returns the row for l's segment if l is its current claim, or nil.
 // s.mu must be held.
-func (s *Store) owned(l projection.Lease) *memoryRow {
+func (s *ProjectionStore) owned(l projection.Lease) *memoryRow {
 	row := s.row(l)
 	if row == nil || row.owner == "" || row.owner != l.Owner || row.epoch != l.Epoch {
 		return nil
@@ -95,7 +94,7 @@ func (s *Store) owned(l projection.Lease) *memoryRow {
 }
 
 // Claim implements [projection.Store].
-func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row := s.row(l)
@@ -116,8 +115,8 @@ func (s *Store) Claim(ctx context.Context, l projection.Lease, ttl time.Duration
 }
 
 // Commit implements [projection.Store]. It cannot roll back fn's writes;
-// see [Store].
-func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+// see [ProjectionStore].
+func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
 	// Check ownership before fn, so a handler never writes against a lost
 	// claim, and again after fn, so a reclaim during fn is still reported.
 	s.mu.Lock()
@@ -144,8 +143,8 @@ func (s *Store) Commit(ctx context.Context, l projection.Lease, cp projection.Ch
 }
 
 // Reset implements [projection.Store]. It cannot roll back wipe's writes;
-// see [Store].
-func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
+// see [ProjectionStore].
+func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	s.mu.Lock()
 	row := s.owned(l)
 	if row == nil {
@@ -173,7 +172,7 @@ func (s *Store) Reset(ctx context.Context, l projection.Lease, newVersion int, w
 }
 
 // Release implements [projection.Store].
-func (s *Store) Release(ctx context.Context, l projection.Lease) error {
+func (s *ProjectionStore) Release(ctx context.Context, l projection.Lease) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row := s.owned(l)
@@ -187,7 +186,7 @@ func (s *Store) Release(ctx context.Context, l projection.Lease) error {
 }
 
 // SaveStatus implements [projection.Store].
-func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
+func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row := s.owned(l)
@@ -204,7 +203,7 @@ func (s *Store) SaveStatus(ctx context.Context, l projection.Lease, status proje
 }
 
 // LoadStatuses implements [projection.Store].
-func (s *Store) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
+func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.projections[name]

@@ -64,7 +64,7 @@ Create the project:
 mkdir task-management && cd task-management
 go mod init task-management
 go get github.com/terraskye/eventsourcing
-go get github.com/terraskye/eventsourcing/eventstore/memory
+go get github.com/terraskye/eventsourcing/memory
 go get github.com/gin-gonic/gin
 go get github.com/google/uuid
 ```

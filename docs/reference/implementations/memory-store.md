@@ -5,13 +5,13 @@ An in-memory implementation of `EventStore`. Suitable for testing and prototypin
 ## Package
 
 ```
-github.com/terraskye/eventsourcing/eventstore/memory
+github.com/terraskye/eventsourcing/memory
 ```
 
 ## Constructor
 
 ```go
-func NewMemoryStore(buffer int64) *MemoryStore
+func NewEventStore(buffer int64) *EventStore
 ```
 
 | Parameter | Description |
@@ -19,14 +19,14 @@ func NewMemoryStore(buffer int64) *MemoryStore
 | `buffer` | Size of the internal `Events()` channel buffer. |
 
 ```go
-store := memory.NewMemoryStore(100)
+store := memory.NewEventStore(100)
 defer store.Close()
 ```
 
 ## Events channel
 
 ```go
-func (m *MemoryStore) Events() <-chan *eventsourcing.Envelope
+func (m *EventStore) Events() <-chan *eventsourcing.Envelope
 ```
 
 Returns a channel that receives every saved event. Use this to feed events into the event bus:

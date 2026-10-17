@@ -13,7 +13,7 @@ import (
 	"time"
 
 	cqrs "github.com/terraskye/eventsourcing"
-	"github.com/terraskye/eventsourcing/eventbus/memory"
+	"github.com/terraskye/eventsourcing/memory"
 )
 
 type blockingEvent struct{}

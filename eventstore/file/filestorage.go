@@ -518,7 +518,7 @@ func readEventFile(path string) (*cqrs.Envelope, error) {
 //
 // A Revision(N) start position means "N events already seen", so it is
 // exclusive: only versions above N are returned, matching
-// [eventstore/memory.MemoryStore] and the Postgres implementation of the
+// [memory.EventStore] and the Postgres implementation of the
 // same method. Every other StreamState reads the directory whole.
 func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
 	// A stream's directory is only created lazily, on its first successful
