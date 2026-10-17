@@ -4,5 +4,6 @@ use (
 	.
 	./kurrentdb
 	./postgres
+	./sqlite
 	./telemetry
 )
