@@ -52,8 +52,8 @@ type memoryRow struct {
 	heartbeat time.Time
 }
 
-// Init implements [projection.Store].
-func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
+// Declare implements [projection.Store].
+func (s *Store) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.projections[name]
@@ -74,7 +74,7 @@ func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil
 	return nil
 }
 
-// row returns the row for l's segment, or nil if Init has not created it.
+// row returns the row for l's segment, or nil if Declare has not created it.
 // s.mu must be held.
 func (s *Store) row(l projection.Lease) *memoryRow {
 	p, ok := s.projections[l.Name]
