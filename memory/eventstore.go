@@ -9,8 +9,6 @@ import (
 	"sync"
 
 	"github.com/terraskye/eventsourcing"
-
-	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -23,7 +21,6 @@ var (
 // single process's memory, so its contents do not survive a restart and it
 // cannot be shared across processes. It is safe for concurrent use.
 type EventStore struct {
-	tracer trace.Tracer
 	mu     sync.RWMutex
 	closed bool
 	bus    chan *eventsourcing.Envelope
