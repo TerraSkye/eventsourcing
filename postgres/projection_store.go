@@ -101,9 +101,9 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 		  AND ((owner = $3 AND epoch = $5)
 		       OR owner IS NULL
 		       OR heartbeat < clock_timestamp() - make_interval(secs => $4))
-		RETURNING epoch, position, version, replay_until`,
+		RETURNING epoch, position, version, replay_until, fingerprint`,
 		l.Name, l.Segment, l.Owner, ttl.Seconds(), l.Epoch,
-	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil)
+	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil, &cp.Fingerprint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
@@ -130,13 +130,13 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET position = $3, version = $4, replay_until = $5,
+			SET position = $3, version = $4, replay_until = $5, fingerprint = $11,
 			    phase = $6, head = $7, last_error = $8, heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $9 AND epoch = $10`,
 			l.Name, l.Segment,
 			cp.Position, cp.Version, cp.ReplayUntil,
 			status.Phase.String(), status.Head, lastErr,
-			l.Owner, l.Epoch,
+			l.Owner, l.Epoch, cp.Fingerprint,
 		)
 		if err != nil {
 			return fmt.Errorf("postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
@@ -158,7 +158,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = $3, replay_until = $4,
+			SET position = 0, version = $3, replay_until = $4, fingerprint = '',
 			    phase = 'starting', head = 0, last_error = NULL,
 			    heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $5 AND epoch = $6`,

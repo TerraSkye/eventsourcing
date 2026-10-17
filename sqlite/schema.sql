@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS projection_segments (
     position     INTEGER NOT NULL DEFAULT 0,
     version      INTEGER NOT NULL DEFAULT 0,
     replay_until INTEGER NOT NULL DEFAULT 0,
+    fingerprint  TEXT    NOT NULL DEFAULT '',
     phase        TEXT    NOT NULL DEFAULT 'starting',
     head         INTEGER NOT NULL DEFAULT 0,
     last_error   TEXT,

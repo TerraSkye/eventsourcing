@@ -72,14 +72,21 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 // when the claim is lost, ctx is done, or a batch fails; it never returns
 // nil.
 func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
-	// Rebuild if the stored version differs from the configured one and
-	// there is already something to wipe. A fresh segment (nothing
-	// processed yet) just picks up the configured version on its first
-	// commit.
-	if r.p.Version != 0 && cp.Version != r.p.Version && cp.Position > 0 {
-		var err error
-		if cp, err = r.rebuild(ctx, seg); err != nil {
-			return err
+	// Rebuild if the stored version or EventTypes differ from the
+	// configured ones and there is already something to wipe. A fresh
+	// segment (nothing processed yet) just picks both up on its first
+	// commit, and an empty stored fingerprint is not a change.
+	if cp.Position > 0 {
+		versionChanged := r.p.Version != 0 && cp.Version != r.p.Version
+		typesChanged := cp.Fingerprint != "" && cp.Fingerprint != r.fingerprint
+		switch {
+		case versionChanged || typesChanged && r.p.Reset != nil && r.segments == 1:
+			var err error
+			if cp, err = r.rebuild(ctx, seg); err != nil {
+				return err
+			}
+		case typesChanged:
+			return fmt.Errorf("projection %q segment %d: %w", r.p.Name, seg, ErrEventTypesChanged)
 		}
 	}
 
@@ -122,6 +129,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			Position:    next,
 			Version:     r.p.Version,
 			ReplayUntil: cp.ReplayUntil,
+			Fingerprint: r.fingerprint,
 		}
 		phase := CatchingUp
 		if res.AtEnd {

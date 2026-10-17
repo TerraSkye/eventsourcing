@@ -280,7 +280,7 @@ func (s *storeAcceptance) claimSegmentsIndependent(t *testing.T) {
 func (s *storeAcceptance) claimReturnsCheckpoint(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	cp := projection.Checkpoint{Position: 7, Version: 3, ReplayUntil: 5}
+	cp := projection.Checkpoint{Position: 7, Version: 3, ReplayUntil: 5, Fingerprint: "fp-claim"}
 	s.commit(t, name, 0, owner, cp)
 	s.release(t, name, 0, owner)
 
@@ -303,7 +303,7 @@ func (s *storeAcceptance) claimSetsOwner(t *testing.T) {
 func (s *storeAcceptance) commitStoresCheckpoint(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	cp := projection.Checkpoint{Position: 10, Version: 2, ReplayUntil: 6}
+	cp := projection.Checkpoint{Position: 10, Version: 2, ReplayUntil: 6, Fingerprint: "fp-commit"}
 	s.commit(t, name, 0, owner, cp)
 
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
@@ -445,8 +445,10 @@ func (s *storeAcceptance) commitRefreshesHeartbeat(t *testing.T) {
 func (s *storeAcceptance) resetMovesCheckpoint(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
-	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, ReplayUntil: 2})
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, ReplayUntil: 2, Fingerprint: "fp-reset"})
 
+	// The reset checkpoint describes nothing applied yet, so its
+	// Fingerprint is empty until the next Commit.
 	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}

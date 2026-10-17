@@ -128,9 +128,12 @@
 //     has no Version: rebuild it under a new [Definition.Name].
 //   - Call [Runner.Rebuild] on the active instance.
 //
-// Adding an event type to [Definition.EventTypes] counts as a change: without
-// a Version bump, events of the new type stored before the change are
-// never applied.
+// Changing [Definition.EventTypes] counts as a change too. The checkpoint
+// records which types it was written for, so a runner started with a
+// different list rebuilds the projection when it has a Reset, and
+// otherwise stalls with [ErrEventTypesChanged] rather than skip the
+// history of an added type. A segmented projection always stalls; run it
+// under a new Name.
 //
 // A rebuild in place empties the read model until the runner has caught
 // up. When that takes too long, build the new version under a new

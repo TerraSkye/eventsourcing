@@ -37,6 +37,11 @@ type Checkpoint struct {
 	// head of the log at that moment) and on every rebuild (to the position
 	// the segment had reached before it).
 	ReplayUntil uint64
+
+	// Fingerprint identifies the [Definition.EventTypes] the checkpoint was
+	// written for. Empty means unknown: a segment that has not committed
+	// since it was created or reset.
+	Fingerprint string
 }
 
 // Phase is where a segment of a projection is in its life cycle.
@@ -199,8 +204,8 @@ type Store interface {
 
 	// Reset runs wipe to empty the read model and, in the same unit of
 	// work, moves the segment's checkpoint back to Position 0 with
-	// Version newVersion and ReplayUntil set to the position it had
-	// reached. It is fenced like Commit.
+	// Version newVersion, ReplayUntil set to the position it had reached,
+	// and an empty Fingerprint. It is fenced like Commit.
 	Reset(ctx context.Context, l Lease, newVersion int, wipe func(ctx context.Context) error) error
 
 	// Release gives the segment up at once instead of waiting for its

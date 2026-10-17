@@ -67,7 +67,7 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 
 - `Name` keys the projection's checkpoint, so it must be unique and stable between releases.
 - `Handler` is any `eventsourcing.EventHandler`, the same type an event bus subscriber takes.
-- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
+- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place; the runner notices the change and rebuilds (see [Rebuild a projection](#rebuild-a-projection)).
 
 If you prefer one method per event type, group them and pass the group's filter:
 
@@ -202,8 +202,8 @@ func reset(ctx context.Context) error {
 
 On start, a runner whose stored version differs from `Version` runs `Reset` and the checkpoint move back to zero in one unit of work, then processes the log again. `runner.Rebuild(ctx)` does the same on demand.
 
-!!! warning "Adding an event type is a change too"
-    Bump `Version` when you add a name to `EventTypes`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
+!!! note "Changing `EventTypes` rebuilds too"
+    The checkpoint records which event types it was written for. When you add or remove a name in `EventTypes`, the runner rebuilds the projection with `Reset` on its next start, so the history of an added type is applied. A projection without `Reset`, or a segmented one, stops with `ErrEventTypesChanged` instead; give it a `Reset`, or run it under a new name.
 
 A rebuild in place empties the read model: queries see an empty table until the runner has caught up again. For a large log, build the new version next to the old one instead; see [Rebuild a projection without downtime](./rebuild-without-downtime.md).
 

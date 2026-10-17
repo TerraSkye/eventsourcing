@@ -145,8 +145,8 @@ type Definition struct {
 	// checkpoint. When the runner starts a segment and finds a stored
 	// version different from this one, the segment is rebuilt before
 	// processing new events. Bump the version whenever the projection
-	// starts writing the read model differently, including when EventTypes
-	// gains a type; see Reset.
+	// starts writing the read model differently; see Reset. A change to
+	// EventTypes is detected without a bump; see [ErrEventTypesChanged].
 	//
 	// A rebuild empties the read model until the runner has caught up
 	// again. For a large log, build the new version under a new Name
