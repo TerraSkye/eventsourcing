@@ -87,7 +87,9 @@ release may break the API; every break is listed under **Breaking**.
   `EventTypes` rebuilds it, or stalls it with `ErrEventTypesChanged`
   when it cannot rebuild. A skipped event parks its stream: later events
   of the stream are recorded as dead letters instead of applied, until
-  `Runner.ReplayStream` applies them in order.
+  `Runner.ReplayStream` applies them in order. The runner logs its
+  lifecycle (claims, releases, rebuilds, skipped events, stalls) to
+  `Definition.Logger`, `slog.Default()` unless set.
 - Package `sqlite`, its own module: an event store, an event bus and a
   projection store in one SQLite database on the pure-Go
   `modernc.org/sqlite` driver, for development, tests that need real

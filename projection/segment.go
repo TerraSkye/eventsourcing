@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -29,6 +30,7 @@ const releaseTimeout = 2 * time.Second
 //  5. on ctx.Done, releases the claim so another instance can take over
 //     at once rather than waiting the claim TTL out.
 func (r *Runner) runSegment(ctx context.Context, seg int) {
+	held := false // this instance holds the segment's claim
 	defer func() {
 		// ctx is done by now; release under a context that is not.
 		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
@@ -36,6 +38,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
 		_ = r.store.Release(relCtx, r.lease(seg))
+		if held {
+			r.log(relCtx, slog.LevelInfo, seg, r.position(seg), "projection segment released")
+		}
 	}()
 
 	retry := newRetryBackOff()
@@ -43,15 +48,25 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
 			r.setPhase(seg, Stalled, err.Error())
-			sleepCtx(ctx, retry.NextBackOff())
+			wait := retry.NextBackOff()
+			r.logStall(ctx, seg, err, wait)
+			sleepCtx(ctx, wait)
 			continue
 		}
 		if !ok {
+			if held {
+				r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
+				held = false
+			}
 			r.setPhase(seg, Standby, "")
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
 		retry.Reset()
+		if !held {
+			r.log(ctx, slog.LevelInfo, seg, cp.Position, "projection segment claimed")
+			held = true
+		}
 
 		r.setActive(seg, true)
 		err = r.work(ctx, seg, cp)
@@ -61,9 +76,13 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			return
 		case errors.Is(err, ErrClaimLost):
 			// Another instance took the segment; compete for it again.
+			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
+			held = false
 		default:
 			r.setPhase(seg, Stalled, err.Error())
-			sleepCtx(ctx, retry.NextBackOff())
+			wait := retry.NextBackOff()
+			r.logStall(ctx, seg, err, wait)
+			sleepCtx(ctx, wait)
 		}
 	}
 }
@@ -178,6 +197,10 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			r.setStatus(seg, status)
 		}
 
+		if res.AtEnd && r.segs[seg].rebuilding {
+			r.segs[seg].rebuilding = false
+			r.log(ctx, slog.LevelInfo, seg, next, "projection rebuild finished")
+		}
 		if res.AtEnd && !r.waitLive(ctx) {
 			return ctx.Err()
 		}
@@ -202,6 +225,7 @@ func (r *Runner) reclaim(ctx context.Context, seg int) (Checkpoint, error) {
 // position 0, so a [Runner.WaitUntil] after a rebuild waits for the replay
 // rather than seeing the position reached before it.
 func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
+	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
@@ -212,6 +236,7 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.mu.Lock()
 	head := r.segs[seg].status.Head
 	r.mu.Unlock()
+	r.segs[seg].rebuilding = true
 	r.setStatus(seg, Status{
 		Phase:    CatchingUp,
 		Position: cp.Position,
@@ -338,6 +363,8 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 		return err
 	}
 	r.skipped.Add(1)
+	r.log(ctx, slog.LevelWarn, seg, cp.Position, "projection event skipped",
+		slog.String("stream", env.StreamID), slog.String("event_type", eventType), slog.String("error", cause.Error()))
 	return nil
 }
 
