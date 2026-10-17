@@ -886,9 +886,9 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 }
 
 // Save copied each envelope into the store before assigning its
-// GlobalVersion, and assigned it to the caller's slice instead, so every
-// stored event read back with GlobalVersion 0.
-func TestSave_StoresGlobalVersion(t *testing.T) {
+// GlobalPosition, and assigned it to the caller's slice instead, so every
+// stored event read back with GlobalPosition 0.
+func TestSave_StoresGlobalPosition(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
 	ctx := context.Background()
@@ -910,8 +910,8 @@ func TestSave_StoresGlobalVersion(t *testing.T) {
 		t.Fatalf("ReadAll returned %d events, want 3", len(all))
 	}
 	for i, env := range all {
-		if want := uint64(i + 1); env.GlobalVersion != want {
-			t.Errorf("ReadAll event %d: GlobalVersion = %d, want %d", i, env.GlobalVersion, want)
+		if want := uint64(i + 1); env.GlobalPosition != want {
+			t.Errorf("ReadAll event %d: GlobalPosition = %d, want %d", i, env.GlobalPosition, want)
 		}
 	}
 
@@ -920,8 +920,8 @@ func TestSave_StoresGlobalVersion(t *testing.T) {
 		t.Fatalf("LoadStream: %v", err)
 	}
 	stream := collectAll(t, iter)
-	if len(stream) != 1 || stream[0].GlobalVersion != 3 {
-		t.Errorf("LoadStream(order-2) = %v, want one event with GlobalVersion 3", stream)
+	if len(stream) != 1 || stream[0].GlobalPosition != 3 {
+		t.Errorf("LoadStream(order-2) = %v, want one event with GlobalPosition 3", stream)
 	}
 }
 
@@ -950,8 +950,8 @@ func TestSave_EventsChannelDoesNotAliasCallerSlice(t *testing.T) {
 			if got := env.Event.(OrderCreated).OrderID; got != want {
 				t.Errorf("Events() envelope %d: OrderID = %q, want %q", i, got, want)
 			}
-			if wantGV := uint64(i + 1); env.GlobalVersion != wantGV {
-				t.Errorf("Events() envelope %d: GlobalVersion = %d, want %d", i, env.GlobalVersion, wantGV)
+			if wantGV := uint64(i + 1); env.GlobalPosition != wantGV {
+				t.Errorf("Events() envelope %d: GlobalPosition = %d, want %d", i, env.GlobalPosition, wantGV)
 			}
 		default:
 			t.Fatalf("expected an event on Events() for %q", want)

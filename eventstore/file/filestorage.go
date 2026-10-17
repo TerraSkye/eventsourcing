@@ -84,7 +84,7 @@ func NewFileStore(dir string) (*FilesStore, error) {
 		return nil, fmt.Errorf("watch %s: %w", allDir, err)
 	}
 
-	globalSeq, err := highestGlobalVersion(allDir)
+	globalSeq, err := highestGlobalPosition(allDir)
 	if err != nil {
 		watcher.Close()
 		return nil, fmt.Errorf("recover global sequence: %w", err)
@@ -103,9 +103,9 @@ func NewFileStore(dir string) (*FilesStore, error) {
 	return f, nil
 }
 
-// highestGlobalVersion returns the highest global version already recorded
+// highestGlobalPosition returns the highest global position already recorded
 // in allDir (named by eventFileName), or 0 if allDir is empty.
-func highestGlobalVersion(allDir string) (uint64, error) {
+func highestGlobalPosition(allDir string) (uint64, error) {
 	entries, err := os.ReadDir(allDir)
 	if err != nil {
 		return 0, err
@@ -113,7 +113,7 @@ func highestGlobalVersion(allDir string) (uint64, error) {
 
 	var highest uint64
 	for _, e := range entries {
-		if v, ok := parseGlobalVersion(e.Name()); ok && v > highest {
+		if v, ok := parseGlobalPosition(e.Name()); ok && v > highest {
 			highest = v
 		}
 	}
@@ -123,7 +123,7 @@ func highestGlobalVersion(allDir string) (uint64, error) {
 // watchGlobalSequence keeps f.globalSeq in sync with allDir for the life of
 // the store: whenever a new symlink appears there — from this store's own
 // Save or from a peer FilesStore instance writing into the same directory
-// concurrently — its encoded global version is folded into f.globalSeq if
+// concurrently — its encoded global position is folded into f.globalSeq if
 // higher, so the next Save (by either instance, once it also observes the
 // other's writes) resumes past it instead of reissuing it. It returns once
 // f.watcher is closed (see Close).
@@ -139,7 +139,7 @@ func (f *FilesStore) watchGlobalSequence() {
 			if ev.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
-			v, ok := parseGlobalVersion(filepath.Base(ev.Name))
+			v, ok := parseGlobalPosition(filepath.Base(ev.Name))
 			if !ok {
 				continue
 			}
@@ -157,10 +157,10 @@ func (f *FilesStore) watchGlobalSequence() {
 	}
 }
 
-// parseGlobalVersion extracts the global version encoded in a filename
+// parseGlobalPosition extracts the global position encoded in a filename
 // built by eventFileName, reporting ok=false if name doesn't match that
 // pattern.
-func parseGlobalVersion(name string) (uint64, bool) {
+func parseGlobalPosition(name string) (uint64, bool) {
 	name, ok := strings.CutSuffix(name, ".json")
 	if !ok {
 		return 0, false
@@ -177,7 +177,7 @@ func parseGlobalVersion(name string) (uint64, bool) {
 }
 
 // eventFileName names the file for an event at version v, in a stream
-// directory (v is its Version) or in allDir (v is its GlobalVersion). The
+// directory (v is its Version) or in allDir (v is its GlobalPosition). The
 // number is zero-padded to 20 digits, the width of the largest uint64, so
 // every name has the same width and os.ReadDir's lexical order is numeric
 // order — the order loadFromDir yields events in.
@@ -196,16 +196,16 @@ func (f *FilesStore) streamDir(id string) string {
 // [cqrs.ErrStreamNotFound], and a [cqrs.Revision] requires the stream's
 // current length to match exactly, returning a
 // [cqrs.StreamRevisionConflictError] on mismatch. Save
-// also returns a [cqrs.StreamRevisionConflictError] if the global version it
+// also returns a [cqrs.StreamRevisionConflictError] if the global position it
 // assigns an event collides with one a concurrent writer already claimed
 // (see watchGlobalSequence) — its ActualRevision is then the colliding
-// global version rather than a stream length, but the reaction is the same
+// global position rather than a stream length, but the reaction is the same
 // either way: retry the whole Save. All events must have the same
 // StreamID, or Save returns an error matching [cqrs.ErrInvalidEventBatch]
 // without appending anything.
 //
 // events is written as a single unit: if any event fails to marshal or
-// write, or its global version collides, every file and symlink already
+// write, or its global position collides, every file and symlink already
 // written for this call is removed before Save returns, rather than left
 // as a partial batch on disk. Only once every event has been durably
 // written does Save publish them on Events, so a subscriber never observes
@@ -288,7 +288,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	// written accumulates every path created for this call, in creation
 	// order, so a failure partway through can undo exactly what this call
 	// itself wrote — f.globalSeq is deliberately not rolled back alongside
-	// it: those global versions were momentarily visible on disk, so a peer
+	// it: those global positions were momentarily visible on disk, so a peer
 	// instance's watcher may already have observed them, and reissuing them
 	// on the next attempt would recreate the same conflict.
 	written := make([]string, 0, len(events)*2)
@@ -307,7 +307,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		default:
 		}
 		f.globalSeq++
-		events[i].GlobalVersion = f.globalSeq
+		events[i].GlobalPosition = f.globalSeq
 
 		fname := eventFileName(events[i].Version, events[i].Event.EventType())
 
@@ -320,14 +320,14 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		}
 
 		z := storedEvent{
-			EventID:       events[i].EventID,
-			StreamID:      events[i].StreamID,
-			Metadata:      events[i].Metadata,
-			EventType:     events[i].Event.EventType(),
-			Data:          eventData,
-			Version:       events[i].Version,
-			GlobalVersion: events[i].GlobalVersion,
-			OccurredAt:    events[i].OccurredAt,
+			EventID:        events[i].EventID,
+			StreamID:       events[i].StreamID,
+			Metadata:       events[i].Metadata,
+			EventType:      events[i].Event.EventType(),
+			Data:           eventData,
+			Version:        events[i].Version,
+			GlobalPosition: events[i].GlobalPosition,
+			OccurredAt:     events[i].OccurredAt,
 		}
 
 		serializedData, err := json.Marshal(z)
@@ -343,7 +343,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		written = append(written, path)
 
 		// symlink to all/
-		all := filepath.Join(f.baseDir, allDirName, eventFileName(events[i].GlobalVersion, events[i].Event.EventType()))
+		all := filepath.Join(f.baseDir, allDirName, eventFileName(events[i].GlobalPosition, events[i].Event.EventType()))
 
 		rel, _ := filepath.Rel(filepath.Join(f.baseDir, allDirName), path)
 
@@ -353,7 +353,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 				return cqrs.AppendResult{StreamID: streamID, Successful: false}, &cqrs.StreamRevisionConflictError{
 					Stream:           streamID,
 					ExpectedRevision: revision,
-					ActualRevision:   cqrs.Revision(events[i].GlobalVersion),
+					ActualRevision:   cqrs.Revision(events[i].GlobalPosition),
 				}
 			}
 			return cqrs.AppendResult{StreamID: streamID, Successful: false}, err
@@ -381,7 +381,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		StreamID:            streamID,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
-		GlobalVersion:       events[len(events)-1].GlobalVersion,
+		GlobalPosition:      events[len(events)-1].GlobalPosition,
 	}, nil
 
 }
@@ -406,7 +406,7 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 }
 
 // ReadAll implements [cqrs.GlobalReader]. It lists the "all" directory,
-// whose entries are named by zero-padded GlobalVersion so that their lexical
+// whose entries are named by zero-padded GlobalPosition so that their lexical
 // order is the global order, and decodes the events after after.
 //
 // The listing is taken under the store's lock, so it never includes part of
@@ -436,7 +436,7 @@ func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 
 	res := cqrs.ReadResult{Next: after, AtEnd: true}
 	for _, e := range entries {
-		v, ok := parseGlobalVersion(e.Name())
+		v, ok := parseGlobalPosition(e.Name())
 		if !ok || v <= after {
 			continue
 		}
@@ -453,7 +453,7 @@ func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 		}
 		env, err := readEventFile(filepath.Join(allDir, e.Name()))
 		if err != nil {
-			return cqrs.ReadResult{}, fmt.Errorf("read all: global version %d: %w", v, err)
+			return cqrs.ReadResult{}, fmt.Errorf("read all: global position %d: %w", v, err)
 		}
 		if !hasPrefix(env.StreamID, opts.StreamPrefixes) {
 			continue
@@ -463,12 +463,12 @@ func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 	return res, nil
 }
 
-// Head implements [cqrs.GlobalReader]: it returns the highest GlobalVersion
+// Head implements [cqrs.GlobalReader]: it returns the highest GlobalPosition
 // in the "all" directory, or 0 if it is empty.
 func (f *FilesStore) Head(ctx context.Context) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return highestGlobalVersion(filepath.Join(f.baseDir, allDirName))
+	return highestGlobalPosition(filepath.Join(f.baseDir, allDirName))
 }
 
 func hasPrefix(streamID string, prefixes []string) bool {
@@ -501,13 +501,13 @@ func readEventFile(path string) (*cqrs.Envelope, error) {
 		return nil, fmt.Errorf("cannot unmarshal event %q: %w", stored.EventType, err)
 	}
 	return &cqrs.Envelope{
-		EventID:       stored.EventID,
-		StreamID:      stored.StreamID,
-		Event:         ev,
-		Metadata:      stored.Metadata,
-		Version:       stored.Version,
-		GlobalVersion: stored.GlobalVersion,
-		OccurredAt:    stored.OccurredAt,
+		EventID:        stored.EventID,
+		StreamID:       stored.StreamID,
+		Event:          ev,
+		Metadata:       stored.Metadata,
+		Version:        stored.Version,
+		GlobalPosition: stored.GlobalPosition,
+		OccurredAt:     stored.OccurredAt,
 	}, nil
 }
 
@@ -613,13 +613,13 @@ func (f *FilesStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 			}
 
 			envelope := cqrs.Envelope{
-				EventID:       storedEv.EventID,
-				StreamID:      storedEv.StreamID,
-				Event:         ev,
-				Metadata:      storedEv.Metadata,
-				Version:       storedEv.Version,
-				GlobalVersion: storedEv.GlobalVersion,
-				OccurredAt:    storedEv.OccurredAt,
+				EventID:        storedEv.EventID,
+				StreamID:       storedEv.StreamID,
+				Event:          ev,
+				Metadata:       storedEv.Metadata,
+				Version:        storedEv.Version,
+				GlobalPosition: storedEv.GlobalPosition,
+				OccurredAt:     storedEv.OccurredAt,
 			}
 
 			return &envelope, nil
@@ -669,12 +669,12 @@ func (f *FilesStore) Close() error {
 
 // storedEvent is the on-disk JSON representation of a saved [cqrs.Envelope].
 type storedEvent struct {
-	EventID       uuid.UUID       `json:"event_id"`
-	StreamID      string          `json:"stream_id"`
-	Metadata      map[string]any  `json:"metadata"`
-	EventType     string          `json:"event_type"`
-	Data          json.RawMessage `json:"data"`
-	Version       uint64          `json:"version"`
-	GlobalVersion uint64          `json:"global_version"`
-	OccurredAt    time.Time       `json:"occurred_at"`
+	EventID        uuid.UUID       `json:"event_id"`
+	StreamID       string          `json:"stream_id"`
+	Metadata       map[string]any  `json:"metadata"`
+	EventType      string          `json:"event_type"`
+	Data           json.RawMessage `json:"data"`
+	Version        uint64          `json:"version"`
+	GlobalPosition uint64          `json:"global_version"` // JSON name predates the rename; kept for files on disk
+	OccurredAt     time.Time       `json:"occurred_at"`
 }

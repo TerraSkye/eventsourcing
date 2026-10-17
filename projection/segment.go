@@ -246,9 +246,9 @@ func (r *Runner) applyBatch(ctx context.Context, seg int, events []*eventsourcin
 func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsourcing.Envelope, batchCP Checkpoint, batchStatus Status) error {
 	for _, env := range events {
 		cp := batchCP
-		cp.Position = env.GlobalVersion
+		cp.Position = env.GlobalPosition
 		status := batchStatus
-		status.Position = env.GlobalVersion
+		status.Position = env.GlobalPosition
 
 		err := r.commit(ctx, seg, cp, status, func(ctx context.Context) error {
 			return r.handle(ctx, env, cp.ReplayUntil)
@@ -257,7 +257,7 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 		switch {
 		case err == nil:
 			// Applied on its own; a flaky handler may succeed on retry.
-		case errors.As(err, &he) && r.shouldSkip(batchStatus.Phase, env.GlobalVersion <= cp.ReplayUntil):
+		case errors.As(err, &he) && r.shouldSkip(batchStatus.Phase, env.GlobalPosition <= cp.ReplayUntil):
 			if err = r.skipEvent(ctx, seg, env, he.err, cp, status); err != nil {
 				return err
 			}
@@ -293,7 +293,7 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 		if !ok {
 			return nil
 		}
-		return dls.SaveDeadLetter(ctx, r.lease(seg), env.GlobalVersion, eventType, cause)
+		return dls.SaveDeadLetter(ctx, r.lease(seg), env.GlobalPosition, eventType, cause)
 	})
 	if err != nil {
 		return err
@@ -326,7 +326,7 @@ type handlerError struct {
 }
 
 func (e *handlerError) Error() string {
-	return fmt.Sprintf("projection: handler failed on event %d: %v", e.env.GlobalVersion, e.err)
+	return fmt.Sprintf("projection: handler failed on event %d: %v", e.env.GlobalPosition, e.err)
 }
 
 func (e *handlerError) Unwrap() error { return e.err }

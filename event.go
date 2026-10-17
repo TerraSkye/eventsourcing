@@ -31,9 +31,9 @@ type Envelope struct {
 	Event Event
 	// Version is the event's position within its own stream, starting at 1.
 	Version uint64
-	// GlobalVersion is the event's position across all streams, used to
+	// GlobalPosition is the event's position across all streams, used to
 	// resume a global subscription from a specific point.
-	GlobalVersion uint64
+	GlobalPosition uint64
 	// OccurredAt is when the event was appended to the store.
 	OccurredAt time.Time
 }

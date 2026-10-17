@@ -55,7 +55,7 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 		attr := []attribute.KeyValue{
 			AttrEventType.String(event.EventType()),
 			AttrEventID.String(eventsourcing.EventIDFromContext(ctx).String()),
-			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalVersionFromContext(ctx))),
+			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalPositionFromContext(ctx))),
 			AttrEventStreamPos.Int64(int64(eventsourcing.VersionFromContext(ctx))),
 			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
 			AttrSubscriberName.String(name),

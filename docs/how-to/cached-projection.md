@@ -171,7 +171,7 @@ res, err := commandBus.Dispatch(ctx, createtask.CreateTask{...})
 if err != nil {
     return err
 }
-if err := runner.WaitUntil(ctx, res.GlobalVersion); err != nil {
+if err := runner.WaitUntil(ctx, res.GlobalPosition); err != nil {
     return err
 }
 // The task is now in the read model.

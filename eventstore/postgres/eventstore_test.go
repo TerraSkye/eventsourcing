@@ -361,10 +361,10 @@ func TestReadAll_AppendsBecomeVisibleInIDOrder(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events after both commit, got %d", len(events))
 	}
-	if events[0].StreamID != "stream-A" || events[0].GlobalVersion != 1 ||
-		events[1].StreamID != "stream-B" || events[1].GlobalVersion != 2 {
+	if events[0].StreamID != "stream-A" || events[0].GlobalPosition != 1 ||
+		events[1].StreamID != "stream-B" || events[1].GlobalPosition != 2 {
 		t.Errorf("got %s@%d, %s@%d; want stream-A@1, stream-B@2",
-			events[0].StreamID, events[0].GlobalVersion, events[1].StreamID, events[1].GlobalVersion)
+			events[0].StreamID, events[0].GlobalPosition, events[1].StreamID, events[1].GlobalPosition)
 	}
 }
 

@@ -58,7 +58,7 @@ defer store.Close()
 - Events are serialized as JSON, so event types must be registered with `RegisterEvent` (see [Event registry](../event-registry.md)) — loading fails for unregistered types.
 - Zero-valued `EventID` and `OccurredAt` fields are filled in on save (`uuid.New()` and `time.Now()`).
 - `LoadStream` requires the stream to exist (`StreamExists` semantics).
-- `ReadAll` and `Head` (`GlobalReader`) use the global `id` column (`GlobalVersion` on the envelope). Because appends commit one at a time in id order, no id becomes visible before a lower one, so a reader that checkpoints a position never skips an event from a slower concurrent writer. Filters run in SQL; stream prefixes match literally.
+- `ReadAll` and `Head` (`GlobalReader`) use the global `id` column (`GlobalPosition` on the envelope). Because appends commit one at a time in id order, no id becomes visible before a lower one, so a reader that checkpoints a position never skips an event from a slower concurrent writer. Filters run in SQL; stream prefixes match literally.
 - Iterators are lazy: rows are fetched as you iterate and a pool connection is held until the iterator is exhausted or errors. Always drain or abandon iterators promptly.
 
 ## Limitations

@@ -257,7 +257,7 @@ curl -s http://localhost:8080/api/v1/tasks | jq .
 
 A projection is **eventually consistent**: a command returns as soon as its events are stored, and the runner picks them up shortly after. In this tutorial that is within a second, the runner's default poll interval.
 
-When a caller must see its own write, wait for the projection to reach the command's position. Every command returns an `AppendResult` whose `GlobalVersion` is the position of its last event:
+When a caller must see its own write, wait for the projection to reach the command's position. Every command returns an `AppendResult` whose `GlobalPosition` is the position of its last event:
 
 ```go
 res, err := createTask(ctx, cmd)
@@ -265,7 +265,7 @@ if err != nil {
     return err
 }
 // Blocks until the task list has processed the new event.
-if err := taskList.WaitUntil(ctx, res.GlobalVersion); err != nil {
+if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
     return err
 }
 ```

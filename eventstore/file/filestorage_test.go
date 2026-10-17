@@ -144,9 +144,9 @@ func TestFileStoreSave_AfterClose_Panics(t *testing.T) {
 // TestFileStoreGlobalSequenceSurvivesReopen is a regression test for GitHub
 // issue #40: globalSeq started at 0 on every NewFileStore call and was never
 // recovered from the events already on disk, so reopening a store over an
-// existing directory re-issued global versions that were already taken —
+// existing directory re-issued global positions that were already taken —
 // causing Save to fail with "file exists" (same event type as an existing
-// event) or silently produce duplicate GlobalVersion values (different
+// event) or silently produce duplicate GlobalPosition values (different
 // event type).
 func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
@@ -182,7 +182,7 @@ func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
 		t.Fatalf("Save after reopen unsuccessful")
 	}
 
-	// Both events must be reachable from all/ with distinct global versions.
+	// Both events must be reachable from all/ with distinct global positions.
 	entries, err := os.ReadDir(filepath.Join(dir, allDirName))
 	if err != nil {
 		t.Fatalf("ReadDir(all): %v", err)
@@ -198,7 +198,7 @@ func TestFileStoreGlobalSequenceSurvivesReopen(t *testing.T) {
 
 // TestSave_GlobalSequenceConflictRollsBackBatch is a regression test for the
 // combination of two behaviors Save relies on for correctness under
-// concurrent writers sharing a directory: a global version collision must
+// concurrent writers sharing a directory: a global position collision must
 // surface as a [cqrs.StreamRevisionConflictError] a caller can recognize and
 // retry (the same way NewCommandHandler's retry loop already does for
 // stream-level conflicts), and the batch that hit it must not leave any of
@@ -221,7 +221,7 @@ func TestSave_GlobalSequenceConflictRollsBackBatch(t *testing.T) {
 		}
 	}()
 
-	// Pre-claim the global version the second event in the batch below will
+	// Pre-claim the global position the second event in the batch below will
 	// be assigned (globalSeq starts at 0, so the first event takes 1 and the
 	// second takes 2), simulating a peer instance that won that race.
 	collidingPath := filepath.Join(dir, allDirName, eventFileName(2, "allCollisionEvent"))
@@ -489,11 +489,11 @@ func TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents(t *testing.T)
 	}
 }
 
-// TestReadAll_GlobalVersionAbove9999999999KeepsOrder is the ReadAll
+// TestReadAll_GlobalPositionAbove9999999999KeepsOrder is the ReadAll
 // counterpart of TestLoadStream_VersionAbove9999999999SortsBeforeEarlierEvents:
-// allDir's symlinks are named after GlobalVersion by the same format, so the
+// allDir's symlinks are named after GlobalPosition by the same format, so the
 // global log had the same ordering bug once it crossed 10 digits.
-func TestReadAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
+func TestReadAll_GlobalPositionAbove9999999999KeepsOrder(t *testing.T) {
 	ctx := context.Background()
 
 	store, err := NewFileStore(t.TempDir())
@@ -502,7 +502,7 @@ func TestReadAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
 	}
 	defer store.Close()
 
-	// The next two appends are assigned global versions 9999999999 and
+	// The next two appends are assigned global positions 9999999999 and
 	// 10000000000.
 	store.mu.Lock()
 	store.globalSeq = 9999999998
@@ -522,7 +522,7 @@ func TestReadAll_GlobalVersionAbove9999999999KeepsOrder(t *testing.T) {
 
 	var versions []uint64
 	for _, env := range res.Events {
-		versions = append(versions, env.GlobalVersion)
+		versions = append(versions, env.GlobalPosition)
 	}
 
 	if len(versions) != 2 || versions[0] != 9999999999 || versions[1] != 10000000000 {
