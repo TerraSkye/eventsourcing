@@ -65,6 +65,11 @@ release may break the API; every break is listed under **Breaking**.
   or OpenTelemetry. It requires Go 1.24; `postgres` and `kurrentdb`
   require Go 1.25.
 
+### Deprecated
+
+- Package `file`. Use `sqlite` instead; `sqlite.Import` copies a file
+  store's events into SQLite. `file` will be removed in a later release.
+
 ### Added
 
 - `eventsourcing.GlobalReader`, `ReadOptions` and `ReadResult`, with
@@ -78,5 +83,10 @@ release may break the API; every break is listed under **Breaking**.
   detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
   letters. Stores in `projection/memory` and `projection/postgres`,
   checked by `projectiontest.StoreAcceptanceTest`.
+- Package `sqlite`, its own module: an event store, an event bus and a
+  projection store in one SQLite database on the pure-Go
+  `modernc.org/sqlite` driver, for development, tests that need real
+  transactions, and single-process services. It passes the same
+  acceptance suites as the Postgres store, in memory and on disk.
 - The `telemetry` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.

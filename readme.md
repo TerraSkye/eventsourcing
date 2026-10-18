@@ -29,6 +29,16 @@ go get github.com/terraskye/eventsourcing
 
 ---
 
+## Choosing a store
+
+- **Tests:** `memory` for unit tests of aggregates and handlers; `sqlite` with `":memory:"` for tests that need real transactions, such as projections.
+- **Development:** `sqlite` on disk. One file, no Docker, inspectable with the `sqlite3` tool.
+- **Production:** `postgres` or `kurrentdb` when several processes share the log.
+
+SQLite also serves a single-process production service (WAL mode, replicated with a tool such as Litestream); the line is processes, one or many. `postgres`, `kurrentdb`, `sqlite` and `telemetry` are separate modules, each fetched with its own `go get`.
+
+---
+
 ## OpenTelemetry Instrumentation
 
 The `telemetry` subpackage provides built-in observability for your event-sourced application using OpenTelemetry standards.
