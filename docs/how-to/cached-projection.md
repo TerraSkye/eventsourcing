@@ -67,7 +67,7 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 
 - `Name` keys the projection's checkpoint, so it must be unique and stable between releases.
 - `Handler` is any `eventsourcing.EventHandler`, the same type an event bus subscriber takes.
-- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
+- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place; the runner notices the change and rebuilds (see [Rebuild a projection](#rebuild-a-projection)).
 
 If you prefer one method per event type, group them and pass the group's filter:
 
@@ -202,8 +202,8 @@ func reset(ctx context.Context) error {
 
 On start, a runner whose stored version differs from `Version` runs `Reset` and the checkpoint move back to zero in one unit of work, then processes the log again. `runner.Rebuild(ctx)` does the same on demand.
 
-!!! warning "Adding an event type is a change too"
-    Bump `Version` when you add a name to `EventTypes`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
+!!! note "Changing `EventTypes` rebuilds too"
+    The checkpoint records which event types it was written for. When you add or remove a name in `EventTypes`, the runner rebuilds the projection with `Reset` on its next start, so the history of an added type is applied. A projection without `Reset`, or a segmented one, stops with `ErrEventTypesChanged` instead; give it a `Reset`, or run it under a new name.
 
 A rebuild in place empties the read model: queries see an empty table until the runner has caught up again. For a large log, build the new version next to the old one instead; see [Rebuild a projection without downtime](./rebuild-without-downtime.md).
 
@@ -231,9 +231,13 @@ When a batch fails, the runner retries it one event at a time to find the failin
 | `SkipWhenLive` | Skips failing events while live; stalls while catching up or rebuilding. |
 | `SkipAlways` | Skips failing events in every phase. |
 
-A skipped event does not hold back its stream: the runner keeps applying that stream's later events, so a read model can see `OrderShipped` without the `OrderPlaced` it skipped. Use a skipping policy only when the handlers tolerate such gaps.
+A skipped event parks its stream: the runner skips that stream's later events too, so a read model never sees `OrderShipped` without the `OrderPlaced` it skipped, while other streams carry on. Every skipped event is recorded as a dead letter (in `projection_dead_letters` by the Postgres and SQLite stores, in memory by the memory store). Once the cause is fixed, apply a parked stream's events in order:
 
-Skipped events are recorded in `projection_dead_letters` by the Postgres store. A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
+```go
+if err := runner.ReplayStream(ctx, "order-42"); err != nil {
+    log.Printf("replay order-42: %v", err) // the stream stays parked
+}
+``` A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
 The runner does not log. Wrap the handler to log failures, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
 

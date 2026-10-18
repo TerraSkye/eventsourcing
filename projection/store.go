@@ -37,6 +37,11 @@ type Checkpoint struct {
 	// head of the log at that moment) and on every rebuild (to the position
 	// the segment had reached before it).
 	ReplayUntil uint64
+
+	// Fingerprint identifies the [Definition.EventTypes] the checkpoint was
+	// written for. Empty means unknown: a segment that has not committed
+	// since it was created or reset.
+	Fingerprint string
 }
 
 // Phase is where a segment of a projection is in its life cycle.
@@ -199,8 +204,8 @@ type Store interface {
 
 	// Reset runs wipe to empty the read model and, in the same unit of
 	// work, moves the segment's checkpoint back to Position 0 with
-	// Version newVersion and ReplayUntil set to the position it had
-	// reached. It is fenced like Commit.
+	// Version newVersion, ReplayUntil set to the position it had reached,
+	// and an empty Fingerprint. It is fenced like Commit.
 	Reset(ctx context.Context, l Lease, newVersion int, wipe func(ctx context.Context) error) error
 
 	// Release gives the segment up at once instead of waiting for its
@@ -222,13 +227,40 @@ type Store interface {
 	LoadStatuses(ctx context.Context, name string) ([]Status, error)
 }
 
+// DeadLetter is an event a segment skipped instead of applying.
+type DeadLetter struct {
+	// Position is the event's GlobalPosition.
+	Position uint64
+
+	// StreamID is the event's stream. A stream with a dead letter is
+	// parked: the segment skips its later events too, until
+	// [Runner.ReplayStream] applies them.
+	StreamID string
+
+	// EventType is the event's registered name.
+	EventType string
+
+	// Error is why the event was skipped: the handler's error, or
+	// [ErrStreamParked] for a later event of a parked stream.
+	Error string
+}
+
 // DeadLetterStore is optionally implemented by a [Store] to record events
-// the runner skipped under a non-stalling error policy, so they can be
-// inspected and replayed. It is called inside the Commit that moves the
-// checkpoint past the event, so the record and the move commit together.
+// the runner skipped, so they can be inspected and replayed. Without it a
+// skipped event is gone, and a parked stream is forgotten when the runner
+// stops.
 type DeadLetterStore interface {
-	// SaveDeadLetter records that the segment l skipped the event at
-	// position because its handler returned cause. ctx carries the Commit's
-	// unit of work.
-	SaveDeadLetter(ctx context.Context, l Lease, position uint64, eventType string, cause error) error
+	// SaveDeadLetter records d for the segment l. It is called inside the
+	// Commit that moves the checkpoint past the event, and ctx carries that
+	// Commit's unit of work, so the record and the move commit together.
+	SaveDeadLetter(ctx context.Context, l Lease, d DeadLetter) error
+
+	// LoadDeadLetters returns the dead letters of segment segment of the
+	// projection name, ordered by Position.
+	LoadDeadLetters(ctx context.Context, name string, segment int) ([]DeadLetter, error)
+
+	// DeleteDeadLetter removes the dead letter at position from the
+	// segment l. It is called inside the Commit that applies the event
+	// again, and ctx carries that Commit's unit of work.
+	DeleteDeadLetter(ctx context.Context, l Lease, position uint64) error
 }

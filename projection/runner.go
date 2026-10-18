@@ -3,11 +3,14 @@ package projection
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -30,6 +33,25 @@ var (
 	// projection. A segmented projection is rebuilt by running it under a
 	// new name; see [Definition.Version].
 	ErrRebuildSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
+
+	// ErrEventTypesChanged stalls a segment whose stored checkpoint was
+	// written for a different [Definition.EventTypes] than the runner's,
+	// when the runner cannot rebuild: the projection has no Reset, or it is
+	// segmented. Carrying on would never apply the history of an added
+	// type. Bump [Definition.Version], or run the projection under a new
+	// Name.
+	ErrEventTypesChanged = errors.New("projection: EventTypes changed since the checkpoint was written")
+
+	// ErrStreamParked is the cause recorded for an event that was skipped
+	// without running the handler, because an earlier event of its stream
+	// was skipped. Applying it would show the read model a later state of
+	// the stream without the earlier one; see [Runner.ReplayStream].
+	ErrStreamParked = errors.New("projection: an earlier event of the stream was skipped")
+
+	// ErrNoDeadLetterStore is returned by [Runner.ReplayStream] when the
+	// Store does not implement [DeadLetterStore], so there are no skipped
+	// events to replay.
+	ErrNoDeadLetterStore = errors.New("projection: the store does not record dead letters")
 )
 
 // Runner keeps one projection up to date: it claims the segments it can,
@@ -46,13 +68,17 @@ type Runner struct {
 	store    Store
 	segments int // normalized: at least 1
 
+	// fingerprint identifies p.EventTypes; see Checkpoint.Fingerprint.
+	fingerprint string
+
 	nudge chan struct{}
 
 	mu             sync.Mutex
 	segs           []*segmentState // indexed by segment
 	changed        chan struct{}   // closed and replaced on every status change, for WaitUntil
 	watchers       []func()
-	pendingRebuild *rebuildRequest // taken by segment 0 between batches
+	pendingRebuild *rebuildRequest          // taken by segment 0 between batches
+	pendingReplays map[int][]*replayRequest // by segment, taken between batches
 
 	skipped atomic.Int64
 }
@@ -67,6 +93,22 @@ type segmentState struct {
 	// active reports that this instance holds the segment's claim and is
 	// processing it.
 	active bool
+
+	// parked holds the streams with a dead letter in this segment, whose
+	// later events are skipped. Only the segment's own goroutine uses it.
+	parked map[string]bool
+}
+
+// replayRequest is a pending [Runner.ReplayStream] for one segment.
+type replayRequest struct {
+	streamID string
+	done     chan struct{}
+	err      error
+}
+
+func (req *replayRequest) finish(err error) {
+	req.err = err
+	close(req.done)
 }
 
 // rebuildRequest is a pending [Runner.Rebuild]. The runner sets err and
@@ -136,16 +178,31 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		store:    store,
 		segments: segments,
 		nudge:    make(chan struct{}, 1),
-		segs:     make([]*segmentState, segments),
-		changed:  make(chan struct{}),
+
+		fingerprint: fingerprint(p.EventTypes),
+		segs:        make([]*segmentState, segments),
+
+		pendingReplays: map[int][]*replayRequest{},
+		changed:        make(chan struct{}),
 	}
 	for i := range r.segs {
 		r.segs[i] = &segmentState{
 			status: Status{Phase: Starting, Version: p.Version, Segment: i},
 			lease:  Lease{Name: p.Name, Segment: i, Owner: p.Owner},
+			parked: map[string]bool{},
 		}
 	}
 	return r
+}
+
+// fingerprint returns a short hash of the event type names, independent of
+// their order and of duplicates.
+func fingerprint(eventTypes []string) string {
+	names := slices.Clone(eventTypes)
+	slices.Sort(names)
+	names = slices.Compact(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return hex.EncodeToString(sum[:16])
 }
 
 // defaultOwner returns "hostname/pid/random", with "unknown" for a hostname
@@ -259,15 +316,79 @@ func (r *Runner) takeRebuild(seg int) *rebuildRequest {
 }
 
 // setActive records whether this instance is processing seg. When seg stops
-// being active, a pending rebuild fails with [ErrNotActive].
+// being active, a pending rebuild or replay for it fails with
+// [ErrNotActive].
 func (r *Runner) setActive(seg int, active bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.segs[seg].active = active
-	if !active && seg == 0 && r.pendingRebuild != nil {
+	if active {
+		return
+	}
+	if seg == 0 && r.pendingRebuild != nil {
 		r.pendingRebuild.finish(ErrNotActive)
 		r.pendingRebuild = nil
 	}
+	for _, req := range r.pendingReplays[seg] {
+		req.finish(ErrNotActive)
+	}
+	delete(r.pendingReplays, seg)
+}
+
+// ReplayStream applies the skipped events of streamID again, in order, on
+// every segment this instance is processing, and un-parks the stream once
+// they all apply. Call it after fixing whatever made the handler fail. Each
+// event is applied and its dead letter removed in one Commit; if the
+// handler fails again, ReplayStream returns that error and the stream stays
+// parked, with the events not yet applied still recorded.
+//
+// The runner performs it between two batches. ctx only bounds how long
+// ReplayStream waits. It returns [ErrNoDeadLetterStore] when the Store
+// keeps no dead letters, and [ErrNotActive] when this instance processes
+// no segment of the projection. A stream with nothing to replay on a
+// segment is not an error.
+func (r *Runner) ReplayStream(ctx context.Context, streamID string) error {
+	if _, ok := r.store.(DeadLetterStore); !ok {
+		return ErrNoDeadLetterStore
+	}
+
+	r.mu.Lock()
+	var reqs []*replayRequest
+	for seg, st := range r.segs {
+		if !st.active {
+			continue
+		}
+		req := &replayRequest{streamID: streamID, done: make(chan struct{})}
+		r.pendingReplays[seg] = append(r.pendingReplays[seg], req)
+		reqs = append(reqs, req)
+	}
+	r.mu.Unlock()
+	if len(reqs) == 0 {
+		return ErrNotActive
+	}
+	r.Nudge()
+
+	var errs []error
+	for _, req := range reqs {
+		select {
+		case <-req.done:
+			if req.err != nil {
+				errs = append(errs, req.err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// takeReplays returns the pending replay requests for seg and clears them.
+func (r *Runner) takeReplays(seg int) []*replayRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reqs := r.pendingReplays[seg]
+	delete(r.pendingReplays, seg)
+	return reqs
 }
 
 // Nudge asks the runner to read now instead of waiting for its next poll.

@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"cmp"
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -31,7 +33,10 @@ type ProjectionStore struct {
 	projections map[string]*memoryProjection
 }
 
-var _ projection.Store = (*ProjectionStore)(nil)
+var (
+	_ projection.Store           = (*ProjectionStore)(nil)
+	_ projection.DeadLetterStore = (*ProjectionStore)(nil)
+)
 
 // NewProjectionStore returns an empty [ProjectionStore].
 func NewProjectionStore() *ProjectionStore {
@@ -44,11 +49,12 @@ type memoryProjection struct {
 }
 
 type memoryRow struct {
-	cp        projection.Checkpoint
-	status    projection.Status
-	owner     string
-	epoch     uint64
-	heartbeat time.Time
+	cp          projection.Checkpoint
+	status      projection.Status
+	owner       string
+	epoch       uint64
+	heartbeat   time.Time
+	deadLetters []projection.DeadLetter // ordered by Position
 }
 
 // Declare implements [projection.Store].
@@ -227,4 +233,46 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// SaveDeadLetter implements [projection.DeadLetterStore]. Like Commit, it
+// cannot be rolled back: a Commit that fails after fn recorded a dead letter
+// keeps it.
+func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, d projection.DeadLetter) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.row(l)
+	if row == nil {
+		return projection.ErrClaimLost
+	}
+	i, _ := slices.BinarySearchFunc(row.deadLetters, d.Position, func(e projection.DeadLetter, pos uint64) int {
+		return cmp.Compare(e.Position, pos)
+	})
+	row.deadLetters = slices.Insert(row.deadLetters, i, d)
+	return nil
+}
+
+// LoadDeadLetters implements [projection.DeadLetterStore].
+func (s *ProjectionStore) LoadDeadLetters(ctx context.Context, name string, segment int) ([]projection.DeadLetter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.row(projection.Lease{Name: name, Segment: segment})
+	if row == nil {
+		return nil, nil
+	}
+	return slices.Clone(row.deadLetters), nil
+}
+
+// DeleteDeadLetter implements [projection.DeadLetterStore].
+func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lease, position uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.row(l)
+	if row == nil {
+		return projection.ErrClaimLost
+	}
+	row.deadLetters = slices.DeleteFunc(row.deadLetters, func(d projection.DeadLetter) bool {
+		return d.Position == position
+	})
+	return nil
 }

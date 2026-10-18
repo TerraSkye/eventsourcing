@@ -72,14 +72,27 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 // when the claim is lost, ctx is done, or a batch fails; it never returns
 // nil.
 func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
-	// Rebuild if the stored version differs from the configured one and
-	// there is already something to wipe. A fresh segment (nothing
-	// processed yet) just picks up the configured version on its first
-	// commit.
-	if r.p.Version != 0 && cp.Version != r.p.Version && cp.Position > 0 {
-		var err error
-		if cp, err = r.rebuild(ctx, seg); err != nil {
-			return err
+	if err := r.loadParked(ctx, seg); err != nil {
+		return err
+	}
+
+	// Rebuild if the stored version or EventTypes differ from the
+	// configured ones and there is already something to wipe. A fresh
+	// segment (nothing processed yet) just picks both up on its first
+	// commit, and an empty stored fingerprint is not a change. Only an
+	// unsegmented projection with Reset can rebuild; NewRunner rejects a
+	// Version on any other, so a changed version always gets here.
+	if cp.Position > 0 {
+		versionChanged := r.p.Version != 0 && cp.Version != r.p.Version
+		typesChanged := cp.Fingerprint != "" && cp.Fingerprint != r.fingerprint
+		switch {
+		case (versionChanged || typesChanged) && r.p.Reset != nil && r.segments == 1:
+			var err error
+			if cp, err = r.rebuild(ctx, seg); err != nil {
+				return err
+			}
+		case typesChanged:
+			return fmt.Errorf("projection %q segment %d: %w", r.p.Name, seg, ErrEventTypesChanged)
 		}
 	}
 
@@ -93,6 +106,13 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			cp, err = r.rebuild(ctx, seg)
 			req.finish(err)
 			if err != nil {
+				return err
+			}
+		}
+		for _, req := range r.takeReplays(seg) {
+			err := r.replayStream(ctx, seg, cp, req.streamID)
+			req.finish(err)
+			if errors.Is(err, ErrClaimLost) {
 				return err
 			}
 		}
@@ -122,6 +142,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			Position:    next,
 			Version:     r.p.Version,
 			ReplayUntil: cp.ReplayUntil,
+			Fingerprint: r.fingerprint,
 		}
 		phase := CatchingUp
 		if res.AtEnd {
@@ -222,6 +243,13 @@ func (r *Runner) ownEvents(seg int, events []*eventsourcing.Envelope) []*eventso
 // the events one at a time so the failing one can be stalled on or skipped
 // on its own.
 func (r *Runner) applyBatch(ctx context.Context, seg int, events []*eventsourcing.Envelope, cp Checkpoint, status Status) error {
+	// A batch that touches a parked stream goes event by event, so the
+	// parked stream's events can be skipped on their own.
+	for _, env := range events {
+		if r.segs[seg].parked[env.StreamID] {
+			return r.applyOneByOne(ctx, seg, events, cp, status)
+		}
+	}
 	err := r.commit(ctx, seg, cp, status, func(ctx context.Context) error {
 		for _, env := range events {
 			if err := r.handle(ctx, env, cp.ReplayUntil); err != nil {
@@ -250,6 +278,13 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 		status := batchStatus
 		status.Position = env.GlobalPosition
 
+		if r.segs[seg].parked[env.StreamID] {
+			if err := r.skipEvent(ctx, seg, env, ErrStreamParked, cp, status); err != nil {
+				return err
+			}
+			continue
+		}
+
 		err := r.commit(ctx, seg, cp, status, func(ctx context.Context) error {
 			return r.handle(ctx, env, cp.ReplayUntil)
 		})
@@ -261,6 +296,7 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 			if err = r.skipEvent(ctx, seg, env, he.err, cp, status); err != nil {
 				return err
 			}
+			r.segs[seg].parked[env.StreamID] = true
 		default:
 			return err
 		}
@@ -293,12 +329,77 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 		if !ok {
 			return nil
 		}
-		return dls.SaveDeadLetter(ctx, r.lease(seg), env.GlobalPosition, eventType, cause)
+		return dls.SaveDeadLetter(ctx, r.lease(seg), DeadLetter{
+			Position:  env.GlobalPosition,
+			StreamID:  env.StreamID,
+			EventType: eventType,
+			Error:     cause.Error(),
+		})
 	})
 	if err != nil {
 		return err
 	}
 	r.skipped.Add(1)
+	return nil
+}
+
+// loadParked reloads the streams parked in seg from the store's dead
+// letters, so a parked stream stays parked across restarts and takeovers.
+// Without a [DeadLetterStore] the runner keeps what it parked itself.
+func (r *Runner) loadParked(ctx context.Context, seg int) error {
+	dls, ok := r.store.(DeadLetterStore)
+	if !ok {
+		return nil
+	}
+	letters, err := dls.LoadDeadLetters(ctx, r.p.Name, seg)
+	if err != nil {
+		return fmt.Errorf("projection %q: load dead letters of segment %d: %w", r.p.Name, seg, err)
+	}
+	parked := make(map[string]bool, len(letters))
+	for _, d := range letters {
+		parked[d.StreamID] = true
+	}
+	r.segs[seg].parked = parked
+	return nil
+}
+
+// replayStream applies the dead letters of streamID in seg again, each in
+// a Commit that leaves the checkpoint at cp and removes the dead letter,
+// and un-parks the stream once all of them apply.
+func (r *Runner) replayStream(ctx context.Context, seg int, cp Checkpoint, streamID string) error {
+	dls := r.store.(DeadLetterStore) // checked by ReplayStream
+	letters, err := dls.LoadDeadLetters(ctx, r.p.Name, seg)
+	if err != nil {
+		return fmt.Errorf("projection %q: replay stream %q: load dead letters: %w", r.p.Name, streamID, err)
+	}
+	for _, d := range letters {
+		if d.StreamID != streamID {
+			continue
+		}
+		res, err := r.reader.ReadAll(ctx, d.Position-1, eventsourcing.ReadOptions{Limit: 1})
+		if err != nil {
+			return fmt.Errorf("projection %q: replay stream %q: read event %d: %w", r.p.Name, streamID, d.Position, err)
+		}
+		if len(res.Events) != 1 || res.Events[0].GlobalPosition != d.Position {
+			return fmt.Errorf("projection %q: replay stream %q: event %d is not in the log", r.p.Name, streamID, d.Position)
+		}
+		env := res.Events[0]
+
+		r.mu.Lock()
+		status := r.segs[seg].status
+		r.mu.Unlock()
+		err = r.commit(ctx, seg, cp, status, func(ctx context.Context) error {
+			if err := r.handle(ctx, env, cp.ReplayUntil); err != nil {
+				return err
+			}
+			return dls.DeleteDeadLetter(ctx, r.lease(seg), d.Position)
+		})
+		if err != nil {
+			return fmt.Errorf("projection %q: replay stream %q at %d: %w", r.p.Name, streamID, d.Position, err)
+		}
+	}
+	delete(r.segs[seg].parked, streamID)
+	r.notifyWatchers()
 	return nil
 }
 

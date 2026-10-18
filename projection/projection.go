@@ -40,10 +40,11 @@ func SegmentOf(key string, segments int) int {
 // ErrorPolicy decides what the runner does when a handler returns an error
 // for an event.
 //
-// A skipped event does not hold back its stream: the runner keeps applying
-// that stream's later events, so a read model can see OrderShipped without
-// the OrderPlaced it skipped. Handlers used with a skipping policy must
-// tolerate such gaps, or the projection should stall instead.
+// A skipped event parks its stream: the runner skips that stream's later
+// events too, recording each as a dead letter, so a read model never sees
+// OrderShipped without the OrderPlaced it skipped. Other streams carry on.
+// [Runner.ReplayStream] applies a parked stream's events once the cause is
+// fixed.
 type ErrorPolicy int
 
 const (
@@ -145,8 +146,8 @@ type Definition struct {
 	// checkpoint. When the runner starts a segment and finds a stored
 	// version different from this one, the segment is rebuilt before
 	// processing new events. Bump the version whenever the projection
-	// starts writing the read model differently, including when EventTypes
-	// gains a type; see Reset.
+	// starts writing the read model differently; see Reset. A change to
+	// EventTypes is detected without a bump; see [ErrEventTypesChanged].
 	//
 	// A rebuild empties the read model until the runner has caught up
 	// again. For a large log, build the new version under a new Name

@@ -101,9 +101,9 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 		  AND ((owner = $3 AND epoch = $5)
 		       OR owner IS NULL
 		       OR heartbeat < clock_timestamp() - make_interval(secs => $4))
-		RETURNING epoch, position, version, replay_until`,
+		RETURNING epoch, position, version, replay_until, fingerprint`,
 		l.Name, l.Segment, l.Owner, ttl.Seconds(), l.Epoch,
-	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil)
+	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil, &cp.Fingerprint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
@@ -130,13 +130,13 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET position = $3, version = $4, replay_until = $5,
+			SET position = $3, version = $4, replay_until = $5, fingerprint = $11,
 			    phase = $6, head = $7, last_error = $8, heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $9 AND epoch = $10`,
 			l.Name, l.Segment,
 			cp.Position, cp.Version, cp.ReplayUntil,
 			status.Phase.String(), status.Head, lastErr,
-			l.Owner, l.Epoch,
+			l.Owner, l.Epoch, cp.Fingerprint,
 		)
 		if err != nil {
 			return fmt.Errorf("postgres: store checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
@@ -158,7 +158,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = $3, replay_until = $4,
+			SET position = 0, version = $3, replay_until = $4, fingerprint = '',
 			    phase = 'starting', head = 0, last_error = NULL,
 			    heartbeat = clock_timestamp()
 			WHERE name = $1 AND segment = $2 AND owner = $5 AND epoch = $6`,
@@ -286,19 +286,64 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
 // inside the Commit that moves the checkpoint past the event.
-func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, position uint64, eventType string, cause error) error {
+func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, d projection.DeadLetter) error {
 	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
 	if !ok {
 		return errors.New("postgres: SaveDeadLetter called outside a ProjectionStore commit")
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
-		(projection, segment, global_position, event_type, error)
-		VALUES ($1, $2, $3, $4, $5)`,
-		l.Name, l.Segment, position, eventType, cause.Error(),
+		(projection, segment, global_position, stream_id, event_type, error)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		l.Name, l.Segment, d.Position, d.StreamID, d.EventType, d.Error,
 	)
 	if err != nil {
-		return fmt.Errorf("postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
+		return fmt.Errorf("postgres: save dead letter of %q segment %d at %d: %w", l.Name, l.Segment, d.Position, err)
+	}
+	return nil
+}
+
+// LoadDeadLetters implements [projection.DeadLetterStore].
+func (s *ProjectionStore) LoadDeadLetters(ctx context.Context, name string, segment int) ([]projection.DeadLetter, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT global_position, stream_id, event_type, error
+		FROM projection_dead_letters
+		WHERE projection = $1 AND segment = $2
+		ORDER BY global_position`,
+		name, segment,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+	}
+	defer rows.Close()
+	var out []projection.DeadLetter
+	for rows.Next() {
+		var d projection.DeadLetter
+		if err := rows.Scan(&d.Position, &d.StreamID, &d.EventType, &d.Error); err != nil {
+			return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: load dead letters of %q segment %d: %w", name, segment, err)
+	}
+	return out, nil
+}
+
+// DeleteDeadLetter implements [projection.DeadLetterStore]. It is called
+// inside the Commit that applies the event again.
+func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lease, position uint64) error {
+	tx, ok := ctx.Value(txKey{}).(pgx.Tx)
+	if !ok {
+		return errors.New("postgres: DeleteDeadLetter called outside a ProjectionStore commit")
+	}
+	_, err := tx.Exec(ctx, `
+		DELETE FROM projection_dead_letters
+		WHERE projection = $1 AND segment = $2 AND global_position = $3`,
+		l.Name, l.Segment, position,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: delete dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
 	}
 	return nil
 }
