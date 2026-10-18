@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/kurrent-io/KurrentDB-Client-Go v1.1.0
-	github.com/terraskye/eventsourcing v0.1.8
+	github.com/terraskye/eventsourcing v0.2.0
 	github.com/testcontainers/testcontainers-go v0.42.0
 	google.golang.org/grpc v1.71.0
 )
@@ -65,7 +65,3 @@ require (
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// Develop against the module in the parent directory; see go.work. Bump
-// the require above to the tagged version when releasing.
-replace github.com/terraskye/eventsourcing => ../
