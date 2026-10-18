@@ -56,10 +56,12 @@
 //	todoList := projection.NewRunner(shipping.NewProjection(),
 //		eventStore, postgres.NewProjectionStore(pool))
 //
-//	ship := automation.New("ship-orders", todoList,
-//		ordersToShip.Claim,
-//		shipping.ShipOrder(commandBus, carrier),
-//	)
+//	ship := automation.New(automation.Definition[shipping.ShippingTodo]{
+//		Name:     "ship-orders",
+//		TodoList: todoList,
+//		Claim:    ordersToShip.Claim,
+//		Work:     shipping.ShipOrder(commandBus, carrier),
+//	})
 //
 //	go todoList.Run(ctx)
 //	go ship.Run(ctx)
@@ -73,8 +75,8 @@
 // on a bad event, or whose instance died: completed items would never
 // disappear from it.
 //
-// The automation therefore checks its todo list, and anything passed with
-// [WaitFor], before every claim, not only at start. Items claimed before a
+// The automation therefore checks its todo list, and anything listed in
+// [Definition.WaitFor], before every claim, not only at start. Items claimed before a
 // dependency stopped being live are finished normally.
 //
 // The todo list may run in another process or another program; pass a
@@ -94,15 +96,31 @@
 //     the item's ID, so that a retry after a crash does not create a
 //     second shipment.
 //
+// There is no attempt limit and no dead letter: an item whose work keeps
+// failing is retried once per lease for as long as it stays on the todo
+// list. Nor is the work cancelled when the lease runs out; ctx is only
+// cancelled when the automation stops. Work that fails for good should
+// record that outcome as an event, so the todo list drops the item, and
+// work that may hang should set its own deadline well below
+// [Definition.Lease].
+//
 // The work function receives a ctx carrying the automation's name as
 // causation (see eventsourcing.CausationFromContext), so events recorded
 // by its commands can be traced back to it.
 //
 // # Waking up
 //
-// An automation claims work at every interval ([WithInterval]), and
+// An automation claims work at every [Definition.Interval], and
 // immediately when nudged. When its dependencies implement
 // [Watcher], as a [projection.Runner] does, the automation is
 // nudged whenever the todo list commits new events or becomes live, so
 // new work is picked up within milliseconds.
+//
+// # Status
+//
+// [Automation.Status] reports a [Phase] (Waiting, Idle, Working, Stalled)
+// and counts, in the same shape as a projection's status. A failing check
+// or claim stalls the automation with the same backoff as a projection,
+// 0.5s growing to 30s, and it never gives up; a failing work call is
+// counted, logged, and retried once its item's lease expires.
 package automation
