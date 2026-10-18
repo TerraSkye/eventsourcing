@@ -1,152 +1,285 @@
-# TerraSkye Eventsourcing
+# eventsourcing
 
-`eventsourcing` is a generic, type-safe event sourcing framework for Go.  
-It provides the building blocks for **event-driven architectures**, including command handling, query handling, event buses, envelopes, and a flexible iterator for read models.
+Event sourcing and CQRS for Go, built around a functional `decide`/`evolve` core, typed buses, a projection runner, and pluggable stores for SQLite, Postgres and KurrentDB.
 
-This library focuses on simplicity, modern Go patterns, and full generics support, making it easy to build event-sourced systems with strong type guarantees.
+[![Go Reference](https://pkg.go.dev/badge/github.com/terraskye/eventsourcing.svg)](https://pkg.go.dev/github.com/terraskye/eventsourcing)
+[![Unit Tests](https://github.com/TerraSkye/eventsourcing/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/TerraSkye/eventsourcing/actions/workflows/unit-tests.yml)
+[![Integration Tests](https://github.com/TerraSkye/eventsourcing/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/TerraSkye/eventsourcing/actions/workflows/integration-tests.yml)
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
 
----
-
-## Features
-
-- **Commands & Command Handlers** – Strongly typed command routing.
-- **Events & Event Handlers** – Publish and consume events safely.
-- **Event Bus** – Supports multiple subscribers with typed handlers.
-- **Queries & Query Handlers** – Request data through a type-safe query bus.
-- **Query Gateway** – Simple façade to dispatch typed queries.
-- **Generic Iterator** – Lazy, paginated, or buffered read model iteration.
-- **Revision Management** – Built-in support for aggregate and stream revisions.
-- **Metadata & Envelopes** – Rich event metadata included by default.
-- **Type-Safe Generics Everywhere** – Commands, events, queries, handlers, results.
+**[Documentation](https://terraskye.github.io/eventsourcing/)** · [Tutorials](https://terraskye.github.io/eventsourcing/tutorials/) · [Example app](examples/todolist) · [Changelog](CHANGELOG.md)
 
 ---
 
-## Installation
+## Why this library
+
+- **Aggregates are two pure functions.** `evolve(state, event) → state` rebuilds state from history; `decide(state, command) → []event` enforces the rules. No base struct to embed, no reflection, trivial to unit test.
+- **Generics, not `interface{}`.** Command handlers, query handlers and event handlers are typed end to end. A handler for `CreateTask` can't be called with anything else.
+- **Optimistic concurrency built in.** Every save states an expectation (`Any`, `NoStream`, `StreamExists`, `Revision(n)`); conflicts come back as a typed error, and handlers can retry with backoff.
+- **Projections that catch up, checkpoint and rebuild.** A `projection.Runner` reads the global log in order, keeps a checkpoint per read model, rebuilds on a version bump, and can be segmented across instances when one can't keep up.
+- **Stores you can grow into.** Start with `memory` in tests and `sqlite` on your laptop; move to `postgres` or `kurrentdb` when several processes share the log. Every store passes the same acceptance suite.
+- **Batteries included, dependencies isolated.** OpenTelemetry traces and metrics, `slog` middleware and a test suite for stores ship in the repo. Drivers live in separate Go modules, so the root module pulls in only `uuid`, `backoff` and `fsnotify`.
+
+## Install
 
 ```bash
 go get github.com/terraskye/eventsourcing
 ```
 
----
+The root module needs Go 1.24+. Backends and telemetry are separate modules, fetched only when you use them:
+
+```bash
+go get github.com/terraskye/eventsourcing/sqlite
+go get github.com/terraskye/eventsourcing/postgres
+go get github.com/terraskye/eventsourcing/kurrentdb
+go get github.com/terraskye/eventsourcing/telemetry
+```
+
+## Quick start
+
+A task that can be created once. Events and commands are plain structs; the handler is assembled from `evolve` and `decide`.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/memory"
+)
+
+// --- Event: something that happened. Pointer receivers, registered once. ---
+
+type TaskCreated struct {
+	TaskID uuid.UUID `json:"task_id"`
+	Title  string    `json:"title"`
+}
+
+func (e *TaskCreated) AggregateID() string { return e.TaskID.String() }
+func (e *TaskCreated) EventType() string   { return "TaskCreated" }
+
+func init() { eventsourcing.RegisterEvent(&TaskCreated{}) }
+
+// --- Command: something someone wants to happen. ---
+
+type CreateTask struct {
+	TaskID uuid.UUID
+	Title  string
+}
+
+func (c CreateTask) AggregateID() string { return c.TaskID.String() }
+func (c CreateTask) CommandType() string { return "CreateTask" }
+
+// --- Aggregate: state folded from events, rules checked against it. ---
+
+type taskState struct{ Exists bool }
+
+func evolve(s taskState, env *eventsourcing.Envelope) taskState {
+	switch env.Event.(type) {
+	case *TaskCreated:
+		s.Exists = true
+	}
+	return s
+}
+
+func decide(s taskState, cmd CreateTask) ([]eventsourcing.Event, error) {
+	if s.Exists {
+		return nil, errors.New("task already exists")
+	}
+	if cmd.Title == "" {
+		return nil, errors.New("title is required")
+	}
+	return []eventsourcing.Event{&TaskCreated{TaskID: cmd.TaskID, Title: cmd.Title}}, nil
+}
+
+func main() {
+	ctx := context.Background()
+
+	store := memory.NewEventStore(100)
+	defer store.Close()
+
+	bus := eventsourcing.NewCommandBus(20, 1)
+	defer bus.Stop()
+
+	handler := eventsourcing.NewCommandHandler(
+		store,
+		func() taskState { return taskState{} },
+		evolve,
+		decide,
+	)
+	eventsourcing.Register(bus, handler)
+
+	id := uuid.New()
+	res, err := bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Write a README"})
+	fmt.Println(res.Successful, err) // true <nil>
+
+	_, err = bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Again"})
+	var violation *eventsourcing.BusinessRuleViolationError
+	fmt.Println(errors.As(err, &violation)) // true
+}
+```
+
+On each dispatch the handler loads the stream, folds it through `evolve`, calls `decide`, wraps the returned events in envelopes (UUID, version, timestamp, metadata) and saves them with the revision it loaded. Handler options let you pin the expected revision, retry on conflict, stamp metadata from the context, or change how streams are named:
+
+```go
+eventsourcing.NewCommandHandler(store, initial, evolve, decide,
+	eventsourcing.WithStreamState(eventsourcing.NoStream{}),       // must not exist yet
+	eventsourcing.WithRetryStrategy(backoff.NewExponentialBackOff()), // retry save conflicts
+	eventsourcing.WithMetadataExtractor(func(ctx context.Context) map[string]any {
+		return map[string]any{"user_id": userFromContext(ctx)}
+	}),
+	eventsourcing.WithStreamNamer(func(ctx context.Context, cmd eventsourcing.Command) string {
+		return tenantFromContext(ctx) + "-" + cmd.AggregateID()
+	}),
+)
+```
+
+### Read models
+
+A projection is a `Definition` — a name, a handler, and the event types it cares about — run by a `Runner` against any store that implements `GlobalReader` (all of them do).
+
+```go
+import "github.com/terraskye/eventsourcing/projection"
+
+titles := map[string]string{}
+
+group := eventsourcing.NewEventGroupProcessor(
+	eventsourcing.OnEvent(func(ctx context.Context, e *TaskCreated) error {
+		titles[e.TaskID.String()] = e.Title
+		return nil
+	}),
+)
+
+runner := projection.NewRunner(projection.Definition{
+	Name:       "task-titles",
+	Handler:    group,
+	EventTypes: group.StreamFilter(),
+}, store, memory.NewProjectionStore())
+
+go runner.Run(ctx)
+
+// After a dispatch, wait until the read model reflects it:
+res, _ := bus.Dispatch(ctx, CreateTask{TaskID: uuid.New(), Title: "Ship it"})
+_ = runner.WaitUntil(ctx, res.GlobalPosition)
+```
+
+The runner polls the log in batches, commits the checkpoint with each batch (inside the same transaction as your writes on SQLite and Postgres), and rebuilds the read model when you bump `Definition.Version`. Set `Segments` to spread one projection across several instances. See [Part 4 of the tutorial](https://terraskye.github.io/eventsourcing/tutorials/04-projections/) and [Rebuild without downtime](https://terraskye.github.io/eventsourcing/how-to/rebuild-without-downtime/).
+
+### Queries and the event bus
+
+The query side mirrors the command side with a typed `QueryBus` and `QueryGateway[Q, R]`. The `EventBus` lets handlers subscribe to events as they are saved, with filtering by event type. Both take middleware with `Use`. See the [reference](https://terraskye.github.io/eventsourcing/reference/interfaces/).
 
 ## Choosing a store
 
-- **Tests:** `memory` for unit tests of aggregates and handlers; `sqlite` with `":memory:"` for tests that need real transactions, such as projections.
-- **Development:** `sqlite` on disk. One file, no Docker, inspectable with the `sqlite3` tool.
-- **Production:** `postgres` or `kurrentdb` when several processes share the log.
+| Package | Use it for | Event store | Event bus | Projection store | Notes |
+|---|---|:-:|:-:|:-:|---|
+| `memory` | Unit tests of handlers and aggregates | ✓ | ✓ | ✓ | In the root module. Not durable. |
+| `sqlite` | Local development, tutorials, tests that need real transactions, single-process services | ✓ | ✓ | ✓ | Pure Go driver (`modernc.org/sqlite`), no C toolchain. One file, or `":memory:"`. WAL mode; replicate with Litestream. |
+| `postgres` | Production with several processes sharing the log | ✓ | ✓ | ✓ | `pgx/v5`. Appends are serialized under an advisory lock so the global log has no gaps; expect lower write throughput on a very busy store. |
+| `kurrentdb` | Production on KurrentDB / EventStoreDB | ✓ | ✓ | – | Uses the official Go client. Event bus is a catch-up subscription. |
+| `file` | — | ✓ | ✓ | – | **Deprecated**: use `sqlite`, which also keeps the log in one file. |
 
-SQLite also serves a single-process production service (WAL mode, replicated with a tool such as Litestream); the line is processes, one or many. `postgres`, `kurrentdb`, `sqlite` and `telemetry` are separate modules, each fetched with its own `go get`.
+Every store is run against the shared acceptance suite in [`eventsourcingtest`](eventsourcingtest), which checks ordering, revisions, concurrent saves, paging, filters and iterator cleanup.
 
----
+**SQLite in three lines:**
 
-## OpenTelemetry Instrumentation
+```go
+db, err := sqlite.Open("events.db") // or ":memory:"
+_, err = db.ExecContext(ctx, sqlite.Schema)
+store := sqlite.NewEventStore(db)
+```
 
-The `telemetry` subpackage provides built-in observability for your event-sourced application using OpenTelemetry standards.
+**Postgres:**
 
-### Why Instrumentation?
+```go
+pool, err := pgxpool.New(ctx, dsn)
+_, err = pool.Exec(ctx, postgres.Schema)
+store := postgres.NewEventStore(pool)
+```
 
-Event-sourced systems are inherently distributed and asynchronous. Without proper observability:
-- Command failures are hard to diagnose
-- Event handler latency goes unnoticed
-- Concurrency conflicts are invisible
-- Performance bottlenecks in the event store remain hidden
+Projection handlers on SQLite and Postgres write through `sqlite.Tx(ctx)` / `postgres.Tx(ctx)` so the read model and the checkpoint commit together.
 
-The `telemetry` package wraps your handlers and stores with tracing spans and metrics, giving you full visibility into your system's behavior without modifying business logic.
+## Package map
 
-### What's Instrumented
+| Package | What it holds |
+|---|---|
+| `eventsourcing` (root) | `Command`, `Event`, `Envelope`, `EventStore`, `GlobalReader`, `EventBus`, command/query buses, `NewCommandHandler`, middleware, event registry, `Iterator`, stream states and typed errors |
+| `projection` | `Definition`, `Runner`, `Store`; checkpoints, leases, segments, rebuilds, replay, error policies, dead-lettering |
+| `automation` | Background workers that claim items from a todo-list read model and act on them (process managers, scheduled follow-ups) |
+| `memory`, `file`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore`, `NewEventBus` and, where supported, `NewProjectionStore` |
+| `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores, the event bus and projections |
+| `logging` | `slog` middleware for commands, queries and events |
+| `eventsourcingtest`, `projection/projectiontest`, `automation/automationtest` | Acceptance suites and fakes for testing your own implementations |
 
-| Component | Spans | Metrics |
-|-----------|-------|---------|
-| Command Handlers | `command.handle <Type>` | duration, in-flight, handled, failed, conflicts |
-| Event Handlers | `events.handle <Type>` | duration, handled |
-| Event Store | `EventStore.Save`, `EventStore.LoadStream`, etc. | duration, saves, loads, errors, events appended/loaded |
+## Observability
 
-### How to Use
-
-Wrap your handlers and stores with the telemetry decorators:
+Wrap handlers and stores, or add telemetry as bus middleware:
 
 ```go
 import "github.com/terraskye/eventsourcing/telemetry"
 
-// Wrap a command handler
-handler := telemetry.WithCommandTelemetry(myCommandHandler)
-
-// Wrap an event handler
-eventHandler := telemetry.WithEventTelemetry(myEventHandler)
-
-// Wrap an event store
-store := telemetry.WithEventStoreTelemetry(myEventStore)
+bus.Use(telemetry.CommandTelemetry())
+store := telemetry.WithEventStoreTelemetry(sqlite.NewEventStore(db))
+telemetry.ObserveProjection(runner) // lag, position, phase and skipped events as gauges
 ```
 
-### Configuration Options
+Spans carry `eventsourcing.command.type`, `eventsourcing.aggregate.id`, `eventsourcing.stream.id`, `eventsourcing.event.type`, `eventsourcing.event.global_position` and friends; metrics cover durations, in-flight counts, failures, concurrency conflicts, and events appended and loaded. Full list in [Add OpenTelemetry](https://terraskye.github.io/eventsourcing/how-to/add-opentelemetry/).
 
-Customize span names and attributes using options:
+For plain logging, `logging.CommandLogging(logger)`, `logging.QueryLogging(logger)` and `logging.EventLogging(logger)` do the same with `log/slog`.
 
-```go
-// Static operation name
-handler := telemetry.WithCommandTelemetry(myHandler,
-    telemetry.WithOperation("order.create"),
-)
+## Example application
 
-// Add static attributes to all spans
-handler := telemetry.WithCommandTelemetry(myHandler,
-    telemetry.WithAttributes(
-        attribute.String("service.name", "orders"),
-        attribute.String("service.version", "1.0.0"),
-    ),
-)
+[`examples/todolist`](examples/todolist) is the application built across the tutorials: an HTTP API organised as vertical slices, with a live task-list projection and a background automation that archives completed tasks. It's its own module, so its dependencies stay out of the library's `go.mod`.
 
-// Dynamic operation name based on context
-handler := telemetry.WithCommandTelemetry(myHandler,
-    telemetry.WithOperationGetter(func(ctx context.Context, defaultOp string) string {
-        if tenant := TenantFromContext(ctx); tenant != "" {
-            return fmt.Sprintf("%s [%s]", defaultOp, tenant)
-        }
-        return defaultOp
-    }),
-)
-
-// Extract dynamic attributes from context
-handler := telemetry.WithCommandTelemetry(myHandler,
-    telemetry.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
-        return []attribute.KeyValue{
-            attribute.String("tenant.id", TenantFromContext(ctx)),
-            attribute.String("user.id", UserFromContext(ctx)),
-        }
-    }),
-)
+```bash
+cd examples/todolist
+go run .
+# then: curl -X POST localhost:9000/api/v1/tasks -H 'Content-Type: application/json' -d '{"title":"Try it"}'
 ```
 
-### Available Metrics
+## Documentation
 
-**Commands:**
-- `eventsourcing.commands.handled` - total successful commands
-- `eventsourcing.commands.failed` - total failed commands
-- `eventsourcing.commands.duration` - histogram of handling time (ms)
-- `eventsourcing.commands.in_flight` - currently processing
-- `eventsourcing.concurrency.conflicts` - optimistic locking conflicts
+The [docs site](https://terraskye.github.io/eventsourcing/) follows the Diátaxis layout:
 
-**Events:**
-- `eventsourcing.eventbus.handled` - events processed by handlers
-- `eventsourcing.eventbus.duration` - handler execution time (ms)
-- `eventsourcing.events.appended` - events written to store
-- `eventsourcing.events.loaded` - events read from store
+- **Tutorials** — build the todolist API from the first command to background processing.
+- **How-to guides** — concurrency, metadata, multi-tenant stream names, event versioning, middleware, testing, rebuilding projections without downtime, KurrentDB.
+- **Explanation** — event sourcing, CQRS, decide/evolve, concurrency, vertical slice architecture.
+- **Reference** — every interface, option and backend.
 
-**Event Store:**
-- `eventsourcing.eventstore.saves` - save operations
-- `eventsourcing.eventstore.duration` - operation time (ms)
-- `eventsourcing.eventstore.errors` - failed operations
+The Go doc comments are the primary reference and spell out the contracts each interface must uphold — including, for `GlobalReader`, why Postgres positions can become visible out of order and how the store prevents it.
 
-### Semantic Attributes
+## Status and versioning
 
-All spans include semantic attributes following OpenTelemetry conventions:
+This is pre-1.0 software under active development by a single maintainer. It is well tested and documented, but:
 
-- `eventsourcing.command.type` - the command type name
-- `eventsourcing.aggregate.id` - target aggregate ID
-- `eventsourcing.stream.id` - event stream identifier
-- `eventsourcing.stream.version` - stream version after operation
-- `eventsourcing.event.type` - event type name
-- `eventsourcing.event.id` - unique event ID
-- `eventsourcing.event.global_position` - global ordering position
-- `eventsourcing.event.stream_position` - position within stream
+- A minor release may break the API. Every break is listed under **Breaking** in the [changelog](CHANGELOG.md), with the old and new names side by side.
+- Nested modules (`sqlite`, `postgres`, `kurrentdb`, `telemetry`) are tagged alongside the root (`sqlite/v0.2.0` with `v0.2.0`) and require the matching root version.
+- Pin a version and read the changelog before upgrading.
 
+## Development
+
+```bash
+# unit tests, all modules
+go test -race ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+
+# integration tests (Postgres and KurrentDB via testcontainers; needs Docker)
+go test -race -tags=integration -timeout 20m ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/...
+
+# root module alone, on its minimum Go version
+GOWORK=off go test -race ./...
+
+# docs
+pip install -r requirements-docs.txt && mkdocs serve
+```
+
+The repository's `go.work` points the nested modules at the local root; outside the repository they resolve the published version.
+
+Issues and pull requests are welcome. If you're adding a backend, run it against `eventsourcingtest.AcceptanceTest` and `eventsourcingtest.GlobalReaderAcceptanceTest` first; if it passes those, projections and automations work on top of it unchanged.
+
+## License
+
+[Mozilla Public License 2.0](LICENSE)
