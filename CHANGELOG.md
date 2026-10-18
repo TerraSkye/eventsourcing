@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
 ### Breaking
 
 - `EventStore.LoadFromAll` is removed. Read the global log through the new
