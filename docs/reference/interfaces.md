@@ -88,7 +88,6 @@ type EventStore interface {
     Save(ctx context.Context, events []Envelope, revision StreamState) (AppendResult, error)
     LoadStream(ctx context.Context, id string) (*Iterator[*Envelope], error)
     LoadStreamFrom(ctx context.Context, id string, version StreamState) (*Iterator[*Envelope], error)
-    LoadFromAll(ctx context.Context, version StreamState) (*Iterator[*Envelope], error)
     Close() error
 }
 ```
@@ -98,8 +97,29 @@ Append-only store for event envelopes. See [Stream states](./stream-states.md) f
 - `Save` — appends events with an optional concurrency check.
 - `LoadStream` — loads all events for a stream (requires stream to exist).
 - `LoadStreamFrom` — loads events from a given revision.
-- `LoadFromAll` — loads all events across all streams from a given position.
 - `Close` — releases resources.
+
+Reading across all streams is not part of `EventStore`; see [GlobalReader](#globalreader).
+
+---
+
+## GlobalReader
+
+```go
+type GlobalReader interface {
+    ReadAll(ctx context.Context, after uint64, opts ReadOptions) (ReadResult, error)
+    Head(ctx context.Context) (uint64, error)
+}
+```
+
+Reads the global log — every event across all streams — in strictly ascending `GlobalVersion` order, a page at a time. Implemented by the memory, file, Postgres and KurrentDB stores.
+
+- `ReadAll` — returns the events after position `after` (exclusive; `0` reads from the start), up to `opts.Limit`, optionally filtered by `opts.EventTypes` (exact names) and `opts.StreamPrefixes`. `ReadResult.Next` is the position to pass as `after` next time, and moves past filtered-out events; `ReadResult.AtEnd` reports the read reached the head. It never blocks waiting for new events.
+- `Head` — the `GlobalVersion` of the newest event `ReadAll` could return, ignoring filters, or `0` for an empty log.
+
+Stores guarantee that no event becomes visible behind a position already returned, so a reader that checkpoints `Next` never misses an event. `eventsourcingtest.GlobalReaderAcceptanceTest` checks an implementation against the full contract.
+
+`ReadAll` does not block at the head of the log; readers poll. The [projection runner](../how-to/cached-projection.md) is built on `GlobalReader` and handles polling and checkpointing for you.
 
 ---
 

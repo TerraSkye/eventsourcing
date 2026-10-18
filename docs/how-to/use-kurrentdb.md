@@ -13,17 +13,23 @@ go get github.com/terraskye/eventsourcing/eventbus/kurrentdb
 
 ```go
 import (
-    "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
+    "github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
+    kurrentstore "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
 )
 
-store, err := kurrentdb.NewEventStore("esdb://localhost:2113?tls=false")
+settings, err := kurrentdb.ParseConnectionString("esdb://localhost:2113?tls=false")
 if err != nil {
     log.Fatal(err)
 }
+client, err := kurrentdb.NewClient(settings)
+if err != nil {
+    log.Fatal(err)
+}
+store := kurrentstore.NewEventStore(client)
 defer store.Close()
 ```
 
-The connection string follows the EventStoreDB URI format. Pass your existing `EventStore` consumers (command handlers, query handlers) the `store` as usual — no changes needed.
+`NewEventStore(db *kurrentdb.Client, opts ...Option) *EventStore` returns the concrete store, which implements both `EventStore` and `GlobalReader`. The connection string follows the EventStoreDB URI format. Pass your existing `EventStore` consumers (command handlers, query handlers) the `store` as usual — no changes needed.
 
 ## Register events before using the store
 

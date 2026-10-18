@@ -424,23 +424,6 @@ func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_HugeRevisionPanicsInsteadOfErroring is the LoadFromAll
-// counterpart of TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring.
-func TestLoadFromAll_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
-	store := memory.NewMemoryStore(0)
-	defer store.Close()
-
-	rev := cqrs.Revision(math.MaxUint64)
-
-	iter, err := store.LoadFromAll(context.Background(), rev)
-	if iter != nil {
-		t.Fatalf("expected a nil iterator when LoadFromAll rejects the revision")
-	}
-	if !errors.Is(err, cqrs.ErrInvalidRevision) {
-		t.Fatalf("expected ErrInvalidRevision, got %v", err)
-	}
-}
-
 func TestLoadStreamFrom_StreamExists(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
@@ -484,9 +467,9 @@ func TestLoadStreamFrom_NoStream(t *testing.T) {
 	}
 }
 
-// LoadFromAll Tests
+// ReadAll Tests
 
-func TestLoadFromAll_AllEvents(t *testing.T) {
+func TestReadAll_AllEvents(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
 
@@ -503,13 +486,8 @@ func TestLoadFromAll_AllEvents(t *testing.T) {
 		newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 	}, cqrs.Any{})
 
-	// Load all from beginning
-	iter, err := store.LoadFromAll(context.Background(), cqrs.Revision(0))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	loaded := collectAll(t, iter)
+	// Read all from the beginning
+	loaded := readAll(t, store, 0)
 	if len(loaded) != 3 {
 		t.Errorf("expected 3 events, got %d", len(loaded))
 	}
@@ -526,7 +504,7 @@ func TestLoadFromAll_AllEvents(t *testing.T) {
 	}
 }
 
-func TestLoadFromAll_FromPosition(t *testing.T) {
+func TestReadAll_AfterPosition(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
 
@@ -537,36 +515,34 @@ func TestLoadFromAll_FromPosition(t *testing.T) {
 		}, cqrs.Any{})
 	}
 
-	// Load from position 2
-	iter, err := store.LoadFromAll(context.Background(), cqrs.Revision(2))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	loaded := collectAll(t, iter)
+	// Read after position 2
+	loaded := readAll(t, store, 2)
 	if len(loaded) != 3 {
 		t.Errorf("expected 3 events, got %d", len(loaded))
 	}
 }
 
-func TestLoadFromAll_InvalidPosition(t *testing.T) {
+// TestReadAll_AfterHead reads after a position beyond the head: an empty
+// page at the end of the log, with Next left where it was, rather than an
+// error, since a position past the head is simply nothing new yet.
+func TestReadAll_AfterHead(t *testing.T) {
 	store := memory.NewMemoryStore(10)
 	defer store.Close()
 
-	// Save 2 events
 	_, _ = store.Save(context.Background(), []cqrs.Envelope{
 		newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 	}, cqrs.Any{})
 
-	// Try to load from position beyond total events
-	_, err := store.LoadFromAll(context.Background(), cqrs.Revision(10))
-
-	if err == nil {
-		t.Fatal("expected error for invalid position")
-	}
-	if !errors.Is(err, cqrs.ErrInvalidRevision) {
-		t.Errorf("expected ErrInvalidRevision, got %v", err)
+	for _, after := range []uint64{2, 10} {
+		res, err := store.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		if err != nil {
+			t.Fatalf("ReadAll(after %d): %v", after, err)
+		}
+		if len(res.Events) != 0 || !res.AtEnd || res.Next != after {
+			t.Errorf("ReadAll(after %d) = %d events, Next %d, AtEnd %v; want 0, %d, true",
+				after, len(res.Events), res.Next, res.AtEnd, after)
+		}
 	}
 }
 
@@ -641,12 +617,7 @@ func TestConcurrent_Saves(t *testing.T) {
 	}
 
 	// Verify total events
-	iter, err := store.LoadFromAll(context.Background(), cqrs.Revision(0))
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	loaded := collectAll(t, iter)
+	loaded := readAll(t, store, 0)
 	expected := numGoroutines * eventsPerGoroutine
 	if len(loaded) != expected {
 		t.Errorf("expected %d events, got %d", expected, len(loaded))
@@ -736,51 +707,6 @@ func TestSave_AfterClose_Panics(t *testing.T) {
 	}
 }
 
-// TestLoadFromAll_Any is a regression test for GitHub issue #49:
-// LoadFromAll never switched on the concrete type of version, feeding
-// version.ToRawInt64() straight into an unsigned offset. Any{}'s
-// ToRawInt64() of -1 became a huge uint64 offset, panicking with
-// "index out of range" on the very first Next() call — even against an
-// empty store.
-func TestLoadFromAll_Any(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("empty store", func(t *testing.T) {
-		store := memory.NewMemoryStore(10)
-
-		iter, err := store.LoadFromAll(ctx, cqrs.Any{})
-		if err != nil {
-			t.Fatalf("LoadFromAll(Any{}) on an empty store: unexpected error: %v", err)
-		}
-
-		got := collectAll(t, iter)
-		if len(got) != 0 {
-			t.Fatalf("expected 0 events, got %d", len(got))
-		}
-	})
-
-	t.Run("store with events", func(t *testing.T) {
-		store := memory.NewMemoryStore(10)
-
-		if _, err := store.Save(ctx, []cqrs.Envelope{
-			newEnvelope("order-1", OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
-			newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 2}),
-		}, cqrs.NoStream{}); err != nil {
-			t.Fatalf("setup save: %v", err)
-		}
-
-		iter, err := store.LoadFromAll(ctx, cqrs.Any{})
-		if err != nil {
-			t.Fatalf("LoadFromAll(Any{}): unexpected error: %v", err)
-		}
-
-		got := collectAll(t, iter)
-		if len(got) != 2 {
-			t.Fatalf("expected 2 events, got %d", len(got))
-		}
-	})
-}
-
 // TestLoadStreamFrom_RevisionAtStreamHead is a regression test for GitHub
 // issue #50: LoadStreamFrom's Revision guard used >= where a start index
 // needs >, so asking for the revision a stream is currently at — "I am
@@ -818,42 +744,6 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 			iter, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.Revision(tt.eventCount))
 			if err != nil {
 				t.Fatalf("LoadStreamFrom(Revision(%d)) on a stream with %d events: "+
-					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
-			}
-
-			if loaded := collectAll(t, iter); len(loaded) != 0 {
-				t.Errorf("expected 0 events past the head, got %d", len(loaded))
-			}
-		})
-	}
-}
-
-// TestLoadFromAll_RevisionAtHead is the LoadFromAll counterpart of
-// TestLoadStreamFrom_RevisionAtStreamHead: the same off-by-one guard backed
-// both.
-func TestLoadFromAll_RevisionAtHead(t *testing.T) {
-	tests := []struct {
-		name       string
-		eventCount int
-	}{
-		{name: "empty store, position 0", eventCount: 0},
-		{name: "two events, position 2", eventCount: 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := memory.NewMemoryStore(10)
-			defer store.Close()
-
-			for i := 0; i < tt.eventCount; i++ {
-				_, _ = store.Save(context.Background(), []cqrs.Envelope{
-					newEnvelope("order-1", ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i}),
-				}, cqrs.Any{})
-			}
-
-			iter, err := store.LoadFromAll(context.Background(), cqrs.Revision(tt.eventCount))
-			if err != nil {
-				t.Fatalf("LoadFromAll(Revision(%d)) with %d events stored: "+
 					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
 			}
 
@@ -906,8 +796,8 @@ func (e closeTestEvent) AggregateID() string { return e.ID }
 func (e closeTestEvent) EventType() string   { return "closeTestEvent" }
 
 // TestClose_LeavesGlobalEventsAccessible verifies Close's doc comment
-// promise that "Close discards all stored events" holds for LoadFromAll's
-// global event log, not just per-stream reads.
+// promise that "Close discards all stored events" holds for the global
+// event log ReadAll reads, not just per-stream reads.
 func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 
 	store := memory.NewMemoryStore(10)
@@ -923,22 +813,10 @@ func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 		t.Fatalf("close failed: %v", err)
 	}
 
-	// Close's doc comment: "Close discards all stored events". LoadFromAll
-	// reads m.global, which Close never clears (unlike m.events, which it
-	// resets to an empty map), so the event saved before Close is still
-	// returned here.
-	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
-	if err != nil {
-		t.Fatalf("LoadFromAll failed: %v", err)
-	}
-
-	events, err := iter.All()
-	if err != nil {
-		t.Fatalf("iter.All failed: %v", err)
-	}
-
-	if len(events) != 0 {
-		t.Fatalf("Close should discard all stored events, but LoadFromAll after Close returned %d event(s)", len(events))
+	// Close's doc comment: "Close discards all stored events", the global
+	// log included.
+	if events := readAll(t, store, 0); len(events) != 0 {
+		t.Fatalf("Close should discard all stored events, but ReadAll after Close returned %d event(s)", len(events))
 	}
 }
 
@@ -1000,6 +878,13 @@ func TestAcceptance(t *testing.T) {
 	eventsourcingtest.AcceptanceTest(t, store)
 }
 
+func TestGlobalReaderAcceptance(t *testing.T) {
+	store := memory.NewMemoryStore(0)
+	t.Cleanup(func() { store.Close() })
+
+	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
+}
+
 // Save copied each envelope into the store before assigning its
 // GlobalVersion, and assigned it to the caller's slice instead, so every
 // stored event read back with GlobalVersion 0.
@@ -1020,21 +905,17 @@ func TestSave_StoresGlobalVersion(t *testing.T) {
 		t.Fatalf("save order-2: %v", err)
 	}
 
-	iter, err := store.LoadFromAll(ctx, cqrs.Any{})
-	if err != nil {
-		t.Fatalf("LoadFromAll: %v", err)
-	}
-	all := collectAll(t, iter)
+	all := readAll(t, store, 0)
 	if len(all) != 3 {
-		t.Fatalf("LoadFromAll returned %d events, want 3", len(all))
+		t.Fatalf("ReadAll returned %d events, want 3", len(all))
 	}
 	for i, env := range all {
 		if want := uint64(i + 1); env.GlobalVersion != want {
-			t.Errorf("LoadFromAll event %d: GlobalVersion = %d, want %d", i, env.GlobalVersion, want)
+			t.Errorf("ReadAll event %d: GlobalVersion = %d, want %d", i, env.GlobalVersion, want)
 		}
 	}
 
-	iter, err = store.LoadStream(ctx, "order-2")
+	iter, err := store.LoadStream(ctx, "order-2")
 	if err != nil {
 		t.Fatalf("LoadStream: %v", err)
 	}
@@ -1074,6 +955,24 @@ func TestSave_EventsChannelDoesNotAliasCallerSlice(t *testing.T) {
 			}
 		default:
 			t.Fatalf("expected an event on Events() for %q", want)
+		}
+	}
+}
+
+// readAll pages through the store's global log after position after and
+// returns every event.
+func readAll(t *testing.T, store *memory.MemoryStore, after uint64) []*cqrs.Envelope {
+	t.Helper()
+	var out []*cqrs.Envelope
+	for {
+		res, err := store.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		if err != nil {
+			t.Fatalf("ReadAll(after %d): %v", after, err)
+		}
+		out = append(out, res.Events...)
+		after = res.Next
+		if res.AtEnd {
+			return out
 		}
 	}
 }

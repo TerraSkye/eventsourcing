@@ -19,10 +19,13 @@ import (
 	cqrs "github.com/terraskye/eventsourcing"
 )
 
-var _ cqrs.EventStore = (*FilesStore)(nil)
+var (
+	_ cqrs.EventStore   = (*FilesStore)(nil)
+	_ cqrs.GlobalReader = (*FilesStore)(nil)
+)
 
 // allDirName is the top-level directory holding the symlink fan-in of every
-// event across all streams, used by [FilesStore.LoadFromAll].
+// event across all streams, used by [FilesStore.ReadAll].
 const allDirName = "all"
 
 // streamsDirName is the top-level directory under which each stream gets
@@ -35,7 +38,7 @@ const streamsDirName = "streams"
 // FilesStore is a file-backed [cqrs.EventStore] intended for tests and local
 // development. Each stream's events are stored as one JSON file per event
 // under its own directory (see streamDir), and a symlink to every event is
-// also kept under an "all" directory to support [FilesStore.LoadFromAll].
+// also kept under an "all" directory to support [FilesStore.ReadAll].
 // It is safe for concurrent use.
 type FilesStore struct {
 	baseDir   string
@@ -378,6 +381,7 @@ func (f *FilesStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		StreamID:            streamID,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
+		GlobalVersion:       events[len(events)-1].GlobalVersion,
 	}, nil
 
 }
@@ -401,17 +405,114 @@ func (f *FilesStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 	return f.loadFromDir(ctx, f.streamDir(id), version)
 }
 
-// LoadFromAll returns a lazy iterator over every event saved across all
-// streams, ordered by the [cqrs.Envelope] GlobalVersion assigned when each
-// event was appended. version is interpreted the same way as in
-// [FilesStore.LoadStreamFrom], but against the global sequence rather than a
-// single stream.
-func (f *FilesStore) LoadFromAll(ctx context.Context, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
-	return f.loadFromDir(ctx, filepath.Join(f.baseDir, allDirName), version)
+// ReadAll implements [cqrs.GlobalReader]. It lists the "all" directory,
+// whose entries are named by zero-padded GlobalVersion so that their lexical
+// order is the global order, and decodes the events after after.
+//
+// The listing is taken under the store's lock, so it never includes part of
+// a batch that this store is still writing and might roll back. Another
+// FilesStore writing into the same directory is not covered by that lock;
+// sharing a directory between writers is for tests only.
+func (f *FilesStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
+	if err := ctx.Err(); err != nil {
+		return cqrs.ReadResult{}, err
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	types := make(map[string]bool, len(opts.EventTypes))
+	for _, t := range opts.EventTypes {
+		types[t] = true
+	}
+
+	allDir := filepath.Join(f.baseDir, allDirName)
+	f.mu.Lock()
+	entries, err := os.ReadDir(allDir)
+	f.mu.Unlock()
+	if err != nil {
+		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+	}
+
+	res := cqrs.ReadResult{Next: after, AtEnd: true}
+	for _, e := range entries {
+		v, ok := parseGlobalVersion(e.Name())
+		if !ok || v <= after {
+			continue
+		}
+		if len(res.Events) == limit {
+			// A matching page is full and more entries follow.
+			res.AtEnd = false
+			break
+		}
+		res.Next = v
+
+		eventType := strings.TrimSuffix(e.Name()[strings.IndexByte(e.Name(), '-')+1:], ".json")
+		if len(types) > 0 && !types[eventType] {
+			continue
+		}
+		env, err := readEventFile(filepath.Join(allDir, e.Name()))
+		if err != nil {
+			return cqrs.ReadResult{}, fmt.Errorf("read all: global version %d: %w", v, err)
+		}
+		if !hasPrefix(env.StreamID, opts.StreamPrefixes) {
+			continue
+		}
+		res.Events = append(res.Events, env)
+	}
+	return res, nil
 }
 
-// loadFromDir is the shared implementation behind LoadStream, LoadStreamFrom,
-// and LoadFromAll: it lists dir, applies the precondition or starting offset
+// Head implements [cqrs.GlobalReader]: it returns the highest GlobalVersion
+// in the "all" directory, or 0 if it is empty.
+func (f *FilesStore) Head(ctx context.Context) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return highestGlobalVersion(filepath.Join(f.baseDir, allDirName))
+}
+
+func hasPrefix(streamID string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		return true
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(streamID, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// readEventFile decodes the event stored at path.
+func readEventFile(path string) (*cqrs.Envelope, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var stored storedEvent
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return nil, fmt.Errorf("decode %q: %w", path, err)
+	}
+	ev, err := cqrs.NewEventByName(stored.EventType)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create event %q: %w", stored.EventType, err)
+	}
+	if err := json.Unmarshal(stored.Data, &ev); err != nil {
+		return nil, fmt.Errorf("cannot unmarshal event %q: %w", stored.EventType, err)
+	}
+	return &cqrs.Envelope{
+		EventID:       stored.EventID,
+		StreamID:      stored.StreamID,
+		Event:         ev,
+		Metadata:      stored.Metadata,
+		Version:       stored.Version,
+		GlobalVersion: stored.GlobalVersion,
+		OccurredAt:    stored.OccurredAt,
+	}, nil
+}
+
+// loadFromDir is the shared implementation behind LoadStream and
+// LoadStreamFrom: it lists dir, applies the precondition or starting offset
 // described by from, and returns a lazy iterator over the decoded events in
 // filename order.
 //
