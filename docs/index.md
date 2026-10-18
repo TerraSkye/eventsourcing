@@ -18,6 +18,9 @@ Step-by-step guides to learn event sourcing by building a real application.
 - [Part 4: Projections](./tutorials/04-projections.md) — read models kept up to date by the projection runner
 - [Part 5: Background Processing](./tutorials/05-background-processing.md) — automations that work off a todo list
 
+A runnable version of everything built across these parts lives in
+[`examples/todolist`](../examples/todolist/README.md).
+
 ---
 
 ## How-to guides
