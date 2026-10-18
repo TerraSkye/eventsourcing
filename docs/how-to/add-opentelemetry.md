@@ -54,6 +54,49 @@ tracedEventHandler := telemetry.TraceEventHandler(tracer, projector.EventHandler
 bus.Subscribe(ctx, "task-list", tracedEventHandler)
 ```
 
+## Instrument a projection
+
+Wrap the three things a `projection.Runner` uses: the event store it reads,
+the handler it calls, and the projection store it commits through. Then
+register its status metrics:
+
+```go
+reader := telemetry.WithEventStoreTelemetry(store).(eventsourcing.GlobalReader)
+pstore := telemetry.WithProjectionStoreTelemetry(postgres.NewProjectionStore(pool))
+
+r := projection.NewRunner(projection.Definition{
+    Name:       "task-list",
+    Handler:    telemetry.WithEventTelemetry(eventsourcing.NewEventHandlerFunc(list.handle)),
+    EventTypes: []string{"TaskCreated", "TaskCompleted"},
+}, reader, pstore)
+
+reg, err := telemetry.ObserveProjection(r)
+if err != nil {
+    return err
+}
+defer reg.Unregister()
+```
+
+Each batch becomes a `process batch` span, tagged with
+`eventsourcing.projection.name`, `.segment` and `.position`. The handler's
+`process event` spans are its children, and each one is still linked to the
+span of the command that appended the event. A rebuild becomes a
+`rebuild projection` span. Reads that return no events, which a live
+projection makes on every poll, are counted in metrics but get no span.
+
+| Metric | Type | What it shows |
+|---|---|---|
+| `eventsourcing.projection.lag` | gauge | Head of the log minus the checkpoint. Events on Postgres, memory and file; log bytes on KurrentDB |
+| `eventsourcing.projection.position` | gauge | The checkpoint |
+| `eventsourcing.projection.phase` | gauge | 1 for the current phase, per `eventsourcing.projection.phase` |
+| `eventsourcing.projection.events.skipped` | counter | Events skipped under `SkipWhenLive` or `SkipAlways` |
+| `eventsourcing.projection.batch.duration` | histogram | Batch commit time, by `eventsourcing.result` (`success`, `failure`, `claim_lost`) |
+| `eventsourcing.projection.claims` | counter | Claim attempts, by `eventsourcing.projection.claim.result` |
+| `eventsourcing.projection.rebuilds` | counter | Rebuilds, by `eventsourcing.result` |
+
+Alert on `phase{eventsourcing.projection.phase="stalled"} == 1` and on lag
+that keeps growing.
+
 ## Add custom attributes
 
 Use `WithAttributes` for static attributes, or `WithAttributeGetter` for dynamic ones extracted from context:

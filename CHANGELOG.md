@@ -7,6 +7,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Added
+
+- `telemetry.WithProjectionStoreTelemetry` traces each projection batch
+  and rebuild and counts claims, and `telemetry.ObserveProjection` reports
+  a runner's lag, position, phase and skipped events as gauges. Handlers
+  wrapped with `WithEventTelemetry` show up as children of the batch.
+
 ## [0.2.0] - 2026-10-18
 
 ### Breaking
