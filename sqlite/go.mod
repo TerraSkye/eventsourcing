@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/terraskye/eventsourcing v0.1.8
+	github.com/terraskye/eventsourcing v0.2.0
 	modernc.org/sqlite v1.46.1
 )
 
@@ -20,7 +20,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// Develop against the module in the parent directory; see go.work. Bump
-// the require above to the tagged version when releasing.
-replace github.com/terraskye/eventsourcing => ../

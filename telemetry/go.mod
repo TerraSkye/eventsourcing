@@ -3,7 +3,7 @@ module github.com/terraskye/eventsourcing/telemetry
 go 1.24.0
 
 require (
-	github.com/terraskye/eventsourcing v0.1.8
+	github.com/terraskye/eventsourcing v0.2.0
 	go.opentelemetry.io/otel v1.41.0
 	go.opentelemetry.io/otel/metric v1.41.0
 	go.opentelemetry.io/otel/trace v1.41.0
@@ -17,7 +17,3 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 )
-
-// Develop against the module in the parent directory; see go.work. Bump
-// the require above to the tagged version when releasing.
-replace github.com/terraskye/eventsourcing => ../

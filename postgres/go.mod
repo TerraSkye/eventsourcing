@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
-	github.com/terraskye/eventsourcing v0.1.8
+	github.com/terraskye/eventsourcing v0.2.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 )
 
@@ -66,7 +66,3 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// Develop against the module in the parent directory; see go.work. Bump
-// the require above to the tagged version when releasing.
-replace github.com/terraskye/eventsourcing => ../
