@@ -79,12 +79,14 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 	// Rebuild if the stored version or EventTypes differ from the
 	// configured ones and there is already something to wipe. A fresh
 	// segment (nothing processed yet) just picks both up on its first
-	// commit, and an empty stored fingerprint is not a change.
+	// commit, and an empty stored fingerprint is not a change. Only an
+	// unsegmented projection with Reset can rebuild; NewRunner rejects a
+	// Version on any other, so a changed version always gets here.
 	if cp.Position > 0 {
 		versionChanged := r.p.Version != 0 && cp.Version != r.p.Version
 		typesChanged := cp.Fingerprint != "" && cp.Fingerprint != r.fingerprint
 		switch {
-		case versionChanged || typesChanged && r.p.Reset != nil && r.segments == 1:
+		case (versionChanged || typesChanged) && r.p.Reset != nil && r.segments == 1:
 			var err error
 			if cp, err = r.rebuild(ctx, seg); err != nil {
 				return err
