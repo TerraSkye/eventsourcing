@@ -96,6 +96,14 @@
 //     the item's ID, so that a retry after a crash does not create a
 //     second shipment.
 //
+// There is no attempt limit and no dead letter: an item whose work keeps
+// failing is retried once per lease for as long as it stays on the todo
+// list. Nor is the work cancelled when the lease runs out; ctx is only
+// cancelled when the automation stops. Work that fails for good should
+// record that outcome as an event, so the todo list drops the item, and
+// work that may hang should set its own deadline well below
+// [Definition.Lease].
+//
 // The work function receives a ctx carrying the automation's name as
 // causation (see eventsourcing.CausationFromContext), so events recorded
 // by its commands can be traced back to it.
