@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
@@ -97,6 +98,10 @@ type segmentState struct {
 	// parked holds the streams with a dead letter in this segment, whose
 	// later events are skipped. Only the segment's own goroutine uses it.
 	parked map[string]bool
+
+	// rebuilding reports that the segment was rebuilt and has not reached
+	// the head of the log since. Only the segment's own goroutine uses it.
+	rebuilding bool
 }
 
 // replayRequest is a pending [Runner.ReplayStream] for one segment.
@@ -170,6 +175,9 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 	}
 	if p.Owner == "" {
 		p.Owner = defaultOwner()
+	}
+	if p.Logger == nil {
+		p.Logger = slog.Default()
 	}
 
 	r := &Runner{

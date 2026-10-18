@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -930,5 +931,100 @@ func TestRunner_SkippedEventParksItsStream(t *testing.T) {
 	}
 	if got := h.snapshot(); len(got) != 4 || got[3] != "s1:projection_test.TaskRenamed" {
 		t.Fatalf("applied %v, want s1's new event applied after the replay", got)
+	}
+}
+
+// logRecorder is a slog.Handler that keeps every record.
+type logRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *logRecorder) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *logRecorder) WithGroup(string) slog.Handler            { return h }
+func (h *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *logRecorder) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.records)
+}
+
+// attrs returns r's attributes by key.
+func attrs(r slog.Record) map[string]slog.Value {
+	m := map[string]slog.Value{}
+	r.Attrs(func(a slog.Attr) bool {
+		m[a.Key] = a.Value
+		return true
+	})
+	return m
+}
+
+// TestRunner_LogsLifecycle covers that the runner logs claiming and
+// stalling with the segment's attributes, and stays silent while idle.
+func TestRunner_LogsLifecycle(t *testing.T) {
+	es := &testStore{}
+	last := save(t, es, 2)
+	logs := &logRecorder{}
+	c := newCounter()
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Owner:        "owner-a",
+		Logger:       slog.New(logs),
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, memory.NewProjectionStore())
+	stop := runRunner(t, r)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // ten idle polls
+	idle := logs.snapshot()
+	if len(idle) != 1 || idle[0].Level != slog.LevelInfo {
+		t.Fatalf("records after catching up and idling = %v, want one Info for the claim", idle)
+	}
+	a := attrs(idle[0])
+	for _, key := range []string{"projection", "segment", "owner", "position", "head"} {
+		if _, ok := a[key]; !ok {
+			t.Errorf("claim record lacks attribute %q: %v", key, a)
+		}
+	}
+	if a["projection"].String() != "test" || a["owner"].String() != "owner-a" {
+		t.Errorf("claim record attributes = %v, want projection test and owner owner-a", a)
+	}
+
+	c.fail = func(uint64) error { return errors.New("boom") }
+	save(t, es, 1)
+	r.Nudge()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		recs := logs.snapshot()
+		if n := len(recs); n > 1 && recs[n-1].Level == slog.LevelError {
+			if a := attrs(recs[n-1]); !strings.Contains(a["error"].String(), "boom") {
+				t.Errorf("stall record error = %q, want the handler's error", a["error"].String())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no Error record after the handler failed: %v", recs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	stop()
+	recs := logs.snapshot()
+	if lastRec := recs[len(recs)-1]; lastRec.Level != slog.LevelInfo || !strings.Contains(lastRec.Message, "released") {
+		t.Fatalf("last record = %q (%s), want the Info for the release on shutdown", lastRec.Message, lastRec.Level)
 	}
 }
