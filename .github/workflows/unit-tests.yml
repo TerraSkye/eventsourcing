@@ -13,8 +13,27 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
           cache: true
 
       - name: Run unit tests
-        run: go test -race -v ./...
+        run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/...
+
+  root-minimum-go:
+    # The root module promises to build on the Go version in its go.mod, so a
+    # user of the in-memory store is not pushed to the newest Go by a driver.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests of the root module alone
+        env:
+          GOWORK: "off"
+        run: go test -race ./...

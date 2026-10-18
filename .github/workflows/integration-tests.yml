@@ -19,8 +19,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
           cache: true
 
       - name: Run all tests (including testcontainers-based integration tests)
-        run: go test -race -v -timeout 20m -tags=integration ./...
+        run: go test -race -v -timeout 20m -tags=integration ./... ./postgres/... ./kurrentdb/... ./telemetry/...

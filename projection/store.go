@@ -192,9 +192,9 @@ type Store interface {
 	// Commit runs fn as one unit of work and, if fn returns nil, stores cp
 	// and status and refreshes the heartbeat in that same unit of work. If
 	// fn fails, or l is no longer the segment's current claim, everything
-	// fn wrote is rolled back. The ctx passed to fn carries the unit of work; each
-	// implementation provides its own accessor, such as postgres.Tx in
-	// projection/postgres.
+	// fn wrote is rolled back. The ctx passed to fn carries the unit of
+	// work; each implementation provides its own accessor, such as
+	// postgres.Tx.
 	Commit(ctx context.Context, l Lease, cp Checkpoint, status Status, fn func(ctx context.Context) error) error
 
 	// Reset runs wipe to empty the read model and, in the same unit of

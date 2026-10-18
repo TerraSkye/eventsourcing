@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/memory"
 	"github.com/terraskye/eventsourcing/projection"
-	"github.com/terraskye/eventsourcing/projection/memory"
 )
 
 // testStore is a tiny in-process GlobalReader + EventStore pair for tests.
@@ -196,7 +196,7 @@ func newRunner(c *counter, store *testStore, segments int) *projection.Runner {
 		p.Segments = segments
 		p.SegmentKey = projection.ByStreamID
 	}
-	return projection.NewRunner(p, store, memory.NewStore())
+	return projection.NewRunner(p, store, memory.NewProjectionStore())
 }
 
 func TestRunner_CatchesUpAndLive(t *testing.T) {
@@ -333,31 +333,31 @@ func TestRunner_Panics(t *testing.T) {
 		fn   func()
 	}{
 		{"empty name", func() {
-			projection.NewRunner(projection.Definition{Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"nil handler", func() {
-			projection.NewRunner(projection.Definition{Name: "x", EventTypes: counterEvents}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", EventTypes: counterEvents}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"no events", func() {
-			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle)}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle)}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"unregistered event", func() {
-			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: []string{"Unregistered"}}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: []string{"Unregistered"}}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"version without reset", func() {
 			c := newCounter()
-			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Version: 1}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Version: 1}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"segments without key", func() {
 			c := newCounter()
-			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewProjectionStore())
 		}},
 		{"segments with version", func() {
 			c := newCounter()
 			projection.NewRunner(projection.Definition{
 				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents,
 				Segments: 2, SegmentKey: projection.ByStreamID, Version: 1, Reset: c.Reset,
-			}, &nopReader{}, memory.NewStore())
+			}, &nopReader{}, memory.NewProjectionStore())
 		}},
 	}
 	for _, tc := range tests {
@@ -396,7 +396,7 @@ func TestRunner_Segmented(t *testing.T) {
 		SegmentKey:   projection.ByStreamID,
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Second,
-	}, es, memory.NewStore())
+	}, es, memory.NewProjectionStore())
 	defer runRunner(t, r)()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
@@ -424,7 +424,7 @@ func (*nopReader) Head(context.Context) (uint64, error) { return 0, nil }
 func TestRunner_DefaultOwnerIsUniquePerRunner(t *testing.T) {
 	es := &testStore{}
 	last := save(t, es, 3)
-	store := memory.NewStore()
+	store := memory.NewProjectionStore()
 
 	newDefaultOwnerRunner := func(c *counter) *projection.Runner {
 		return projection.NewRunner(projection.Definition{
@@ -473,7 +473,7 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 		},
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Second,
-	}, es, memory.NewStore())
+	}, es, memory.NewProjectionStore())
 
 	runCtx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -508,7 +508,7 @@ func TestRunner_RebuildNotActive(t *testing.T) {
 // before it has reported Live in this process.
 func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 	es := &testStore{}
-	ps := memory.NewStore()
+	ps := memory.NewProjectionStore()
 	c := newCounter()
 	c.fail = func(uint64) error { return errors.New("poison") }
 	newSkipRunner := func() *projection.Runner {
@@ -548,7 +548,7 @@ func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 // the restart.
 func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 	es := &testStore{}
-	ps := memory.NewStore()
+	ps := memory.NewProjectionStore()
 	c := newCounter()
 	newPlain := func() *projection.Runner {
 		return projection.NewRunner(projection.Definition{
@@ -586,7 +586,7 @@ func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 // segment stops reporting the segment as its own.
 func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 	es := &testStore{}
-	ps := memory.NewStore()
+	ps := memory.NewProjectionStore()
 	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
@@ -624,7 +624,7 @@ func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 // runner has stopped is not reported Live to other instances.
 func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	es := &testStore{}
-	ps := memory.NewStore()
+	ps := memory.NewProjectionStore()
 	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
@@ -681,7 +681,7 @@ func TestRunner_StatusHeadReportsLag(t *testing.T) {
 		BatchSize:    2,
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Second,
-	}, es, memory.NewStore())
+	}, es, memory.NewProjectionStore())
 	defer runRunner(t, r)()
 
 	deadline := time.Now().Add(2 * time.Second)

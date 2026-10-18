@@ -5,7 +5,7 @@ An in-memory implementation of `EventBus`. Each subscriber gets its own buffered
 ## Package
 
 ```
-github.com/terraskye/eventsourcing/eventbus/memory
+github.com/terraskye/eventsourcing/memory
 ```
 
 ## Constructor

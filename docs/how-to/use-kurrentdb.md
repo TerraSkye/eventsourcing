@@ -5,8 +5,7 @@ Replace the in-memory store with KurrentDB (formerly EventStoreDB) for durable e
 ## Install
 
 ```bash
-go get github.com/terraskye/eventsourcing/eventstore/kurrentdb
-go get github.com/terraskye/eventsourcing/eventbus/kurrentdb
+go get github.com/terraskye/eventsourcing/kurrentdb
 ```
 
 ## Event store
@@ -14,7 +13,7 @@ go get github.com/terraskye/eventsourcing/eventbus/kurrentdb
 ```go
 import (
     "github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
-    kurrentstore "github.com/terraskye/eventsourcing/eventstore/kurrentdb"
+    kdb "github.com/terraskye/eventsourcing/kurrentdb"
 )
 
 settings, err := kurrentdb.ParseConnectionString("esdb://localhost:2113?tls=false")
@@ -25,7 +24,7 @@ client, err := kurrentdb.NewClient(settings)
 if err != nil {
     log.Fatal(err)
 }
-store := kurrentstore.NewEventStore(client)
+store := kdb.NewEventStore(client)
 defer store.Close()
 ```
 
@@ -48,14 +47,8 @@ See [How to register events](./register-events.md) for details.
 The KurrentDB event bus uses persistent subscriptions to deliver events reliably, with at-least-once semantics and automatic reconnection.
 
 ```go
-import (
-    kurrentbus "github.com/terraskye/eventsourcing/eventbus/kurrentdb"
-)
-
-bus, err := kurrentbus.NewEventBus("esdb://localhost:2113?tls=false")
-if err != nil {
-    log.Fatal(err)
-}
+// client is the *kurrentdb.Client from above; 256 is each subscriber's buffer.
+bus := kdb.NewEventBus(client, 256)
 defer bus.Close()
 
 // Subscribe — the subscription name is used as the consumer group name in KurrentDB.

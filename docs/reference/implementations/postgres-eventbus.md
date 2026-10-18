@@ -5,12 +5,12 @@ A PostgreSQL-backed implementation of `EventBus`. Subscribers poll the `events` 
 ## Package
 
 ```
-github.com/terraskye/eventsourcing/eventbus/postgres
+github.com/terraskye/eventsourcing/postgres
 ```
 
 ## Schema
 
-Apply `eventbus/postgres/schema.sql` (in addition to the event store schema — the bus reads the same `events` table):
+Apply `postgres.Schema`, which creates the `events` table the bus reads together with its own table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS event_subscriptions (

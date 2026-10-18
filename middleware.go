@@ -39,7 +39,7 @@ type CommandHandlerMiddleware func(next CommandHandler[Command]) CommandHandler[
 //
 //	bus.Use(
 //	    logging.CommandLogging(logger),
-//	    otel.CommandTelemetry(),
+//	    telemetry.CommandTelemetry(),
 //	)
 func (b *CommandBus) Use(middlewares ...CommandHandlerMiddleware) {
 	b.mu.Lock()
@@ -90,7 +90,7 @@ type QueryHandlerMiddleware func(next QueryGateway[Query, any]) QueryGateway[Que
 //
 //	bus.Use(
 //	    logging.QueryLogging(logger),
-//	    otel.QueryTelemetry(),
+//	    telemetry.QueryTelemetry(),
 //	)
 func (q *QueryBus) Use(middlewares ...QueryHandlerMiddleware) {
 	q.mu.Lock()

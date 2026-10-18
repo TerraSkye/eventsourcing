@@ -31,6 +31,39 @@ release may break the API; every break is listed under **Breaking**.
   logging middleware's `global_version` attribute is now
   `global_position`. The file store and file bus keep `global_version` as
   the JSON name, so existing files still load.
+- Package `otel` is renamed `telemetry` and moves to
+  `github.com/terraskye/eventsourcing/telemetry`, so it no longer shares
+  its name with `go.opentelemetry.io/otel`, which every user imports
+  alongside it. Only the import path and the package name change.
+
+- Backends are laid out one package per backend instead of one per
+  concern. Each backend package offers `NewEventStore`, `NewEventBus` and,
+  where it has one, `NewProjectionStore`:
+
+  | Before | After |
+  |---|---|
+  | `eventstore/memory.NewMemoryStore` | `memory.NewEventStore` |
+  | `eventbus/memory.NewEventBus` | `memory.NewEventBus` |
+  | `projection/memory.NewStore` | `memory.NewProjectionStore` |
+  | `eventstore/file.NewFileStore` | `file.NewEventStore` |
+  | `eventbus/file.NewFileEventBus` | `file.NewEventBus` |
+  | `eventstore/postgres.NewEventStore` | `postgres.NewEventStore` |
+  | `eventbus/postgres.NewEventBus` | `postgres.NewEventBus` |
+  | `projection/postgres.NewStore` | `postgres.NewProjectionStore` |
+  | `eventstore/kurrentdb.NewEventStore` | `kurrentdb.NewEventStore` |
+  | `eventbus/kurrentdb.NewEventBus` | `kurrentdb.NewEventBus` |
+
+  `postgres.Schema` (also shipped as `postgres/schema.sql`) creates every
+  table the package uses, replacing `eventstore/postgres/schema.sql` and
+  `eventbus/postgres/schema.sql`.
+
+- `postgres`, `kurrentdb` and `telemetry` are separate Go modules, each
+  with its own `go.mod`; their import paths do not change, but each is
+  fetched with its own `go get`. The root module keeps the core
+  interfaces, `memory`, `file`, `projection` and the acceptance suites,
+  and no longer pulls in pgx, the KurrentDB client, gRPC, testcontainers
+  or OpenTelemetry. It requires Go 1.24; `postgres` and `kurrentdb`
+  require Go 1.25.
 
 ### Added
 
@@ -45,5 +78,5 @@ release may break the API; every break is listed under **Breaking**.
   detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
   letters. Stores in `projection/memory` and `projection/postgres`,
   checked by `projectiontest.StoreAcceptanceTest`.
-- The `otel` event store wrapper traces `ReadAll` and `Head`, and
+- The `telemetry` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.

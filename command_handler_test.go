@@ -602,7 +602,7 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 // for GitHub issue #24: when decide produces multiple events, every envelope
 // in the batch used to get the same *map[string]any* instance for Metadata,
 // so mutating one envelope's metadata after the fact (e.g. a per-event
-// causation_id, as otel.TelemetryStore.Save adds) silently mutated every
+// causation_id, as telemetry.TelemetryStore.Save adds) silently mutated every
 // other envelope's metadata too.
 func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
 	var savedEnvelopes []Envelope
@@ -1042,7 +1042,7 @@ func TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate(t *testing
 	}
 
 	// A minimal stand-in for a real store's Revision check, matching
-	// eventstore/memory: a mismatch is a StreamRevisionConflictError.
+	// memory.EventStore: a mismatch is a StreamRevisionConflictError.
 	var storedVersion uint64
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		if rev, ok := revision.(Revision); ok && uint64(rev) != storedVersion {
