@@ -247,12 +247,12 @@ func TestFileEventBusDeliversDispatchedEvent(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	env := &eventsourcing.Envelope{
-		EventID:       uuid.New(),
-		StreamID:      "order-1",
-		Event:         orderPlaced{ID: "order-1", Total: 42},
-		Version:       1,
-		GlobalVersion: 1,
-		OccurredAt:    time.Now().UTC(),
+		EventID:        uuid.New(),
+		StreamID:       "order-1",
+		Event:          orderPlaced{ID: "order-1", Total: 42},
+		Version:        1,
+		GlobalPosition: 1,
+		OccurredAt:     time.Now().UTC(),
 	}
 
 	if err := bus.Dispatch(env); err != nil {

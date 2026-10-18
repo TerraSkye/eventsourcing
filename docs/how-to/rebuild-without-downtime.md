@@ -33,11 +33,11 @@ Put the version in both the projection's name and its table, so the next version
 ```go
 package tasklist
 
-func NewProjectionV2() projection.Projection {
-    return projection.Projection{
-        Name:    "task-list-v2",
-        Handler: eventsourcing.NewEventHandlerFunc(handleV2),
-        Events:  []string{"TaskCreated", "TaskCompleted", "TaskRenamed"},
+func NewProjectionV2() projection.Definition {
+    return projection.Definition{
+        Name:       "task-list-v2",
+        Handler:    eventsourcing.NewEventHandlerFunc(handleV2),
+        EventTypes: []string{"TaskCreated", "TaskCompleted", "TaskRenamed"},
     }
 }
 
@@ -78,7 +78,7 @@ While `v2` processes events that were stored before it first started, `projectio
 
 ## Step 3: Wait until the new version is live
 
-`v2.Live(ctx)` reports true once it has reached the head of the log. From outside the service, read the status the runner publishes:
+`v2.IsLive(ctx)` reports true once it has reached the head of the log. From outside the service, read the status the runner publishes:
 
 ```sql
 SELECT segment, phase, position, head

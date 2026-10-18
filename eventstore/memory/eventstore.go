@@ -32,7 +32,7 @@ type MemoryStore struct {
 }
 
 // ReadAll implements [eventsourcing.GlobalReader]. Events are kept in a
-// single slice in append order and GlobalVersion is their index plus one,
+// single slice in append order and GlobalPosition is their index plus one,
 // so a read is a slice of that slice, filtered in Go.
 func (m *MemoryStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -53,7 +53,7 @@ func (m *MemoryStore) ReadAll(ctx context.Context, after uint64, opts eventsourc
 	res := eventsourcing.ReadResult{Next: after}
 	for i := after; i < uint64(len(m.global)); i++ {
 		env := m.global[i]
-		res.Next = env.GlobalVersion
+		res.Next = env.GlobalPosition
 		if matches(env, types, opts.StreamPrefixes) {
 			cp := *env
 			res.Events = append(res.Events, &cp)
@@ -164,7 +164,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 	// each envelope and publishes another on Events().
 	for i := range events {
 		ev := events[i]
-		ev.GlobalVersion = uint64(len(m.global)) + 1
+		ev.GlobalPosition = uint64(len(m.global)) + 1
 		m.events[streamId] = append(m.events[streamId], &ev)
 		m.global = append(m.global, &ev)
 		currentVersion++
@@ -181,7 +181,7 @@ func (m *MemoryStore) Save(ctx context.Context, events []eventsourcing.Envelope,
 		StreamID:            streamId,
 		Successful:          true,
 		NextExpectedVersion: currentVersion,
-		GlobalVersion:       uint64(len(m.global)),
+		GlobalPosition:      uint64(len(m.global)),
 	}, nil
 }
 

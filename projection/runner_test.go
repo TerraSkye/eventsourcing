@@ -27,14 +27,14 @@ func (s *testStore) Save(ctx context.Context, envs []eventsourcing.Envelope, sta
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range envs {
-		envs[i].GlobalVersion = uint64(len(s.events) + 1)
+		envs[i].GlobalPosition = uint64(len(s.events) + 1)
 		envs[i].OccurredAt = time.Now()
 		copy := envs[i]
 		s.events = append(s.events, &copy)
 	}
 	var res eventsourcing.AppendResult
 	if n := len(envs); n > 0 {
-		res.GlobalVersion = envs[n-1].GlobalVersion
+		res.GlobalPosition = envs[n-1].GlobalPosition
 	}
 	return res, nil
 }
@@ -49,10 +49,10 @@ func (s *testStore) ReadAll(ctx context.Context, after uint64, opts eventsourcin
 	out := make([]*eventsourcing.Envelope, 0, limit)
 	next := after
 	for _, env := range s.events {
-		if env.GlobalVersion <= after {
+		if env.GlobalPosition <= after {
 			continue
 		}
-		next = env.GlobalVersion
+		next = env.GlobalPosition
 		if len(opts.EventTypes) > 0 {
 			ok := false
 			for _, t := range opts.EventTypes {
@@ -112,7 +112,7 @@ func newCounter() *counter {
 }
 
 func (c *counter) OnTaskCreated(ctx context.Context, e *taskCreated) error {
-	gv := eventsourcing.GlobalVersionFromContext(ctx)
+	gv := eventsourcing.GlobalPositionFromContext(ctx)
 	if c.fail != nil {
 		if err := c.fail(gv); err != nil {
 			return err
@@ -144,7 +144,7 @@ func (c *counter) Handle(ctx context.Context, event eventsourcing.Event) error {
 
 var counterEvents = []string{"projection_test.TaskCreated"}
 
-// save appends n events, returning the last GlobalVersion.
+// save appends n events, returning the last GlobalPosition.
 func save(t *testing.T, store *testStore, n int) uint64 {
 	t.Helper()
 	envs := make([]eventsourcing.Envelope, n)
@@ -160,7 +160,7 @@ func save(t *testing.T, store *testStore, n int) uint64 {
 	if err != nil {
 		t.Fatalf("Save(%d events) = %v", n, err)
 	}
-	return res.GlobalVersion
+	return res.GlobalPosition
 }
 
 // runRunner starts r and returns a cancel func that waits for Run to exit.
@@ -183,10 +183,10 @@ func runRunner(t *testing.T, r *projection.Runner) func() {
 }
 
 func newRunner(c *counter, store *testStore, segments int) *projection.Runner {
-	p := projection.Projection{
+	p := projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-		Events:       counterEvents,
+		EventTypes:   counterEvents,
 		Reset:        c.Reset,
 		Version:      1,
 		PollInterval: 10 * time.Millisecond,
@@ -236,9 +236,9 @@ func TestRunner_WaitUntilReturnsOnLive(t *testing.T) {
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v", err)
 	}
-	live, err := r.Live(ctx)
+	live, err := r.IsLive(ctx)
 	if err != nil || !live {
-		t.Fatalf("Live() = %v, %v; want true, nil", live, err)
+		t.Fatalf("IsLive() = %v, %v; want true, nil", live, err)
 	}
 }
 
@@ -333,29 +333,29 @@ func TestRunner_Panics(t *testing.T) {
 		fn   func()
 	}{
 		{"empty name", func() {
-			projection.NewRunner(projection.Projection{Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), Events: counterEvents}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents}, &nopReader{}, memory.NewStore())
 		}},
 		{"nil handler", func() {
-			projection.NewRunner(projection.Projection{Name: "x", Events: counterEvents}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", EventTypes: counterEvents}, &nopReader{}, memory.NewStore())
 		}},
 		{"no events", func() {
-			projection.NewRunner(projection.Projection{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle)}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle)}, &nopReader{}, memory.NewStore())
 		}},
 		{"unregistered event", func() {
-			projection.NewRunner(projection.Projection{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), Events: []string{"Unregistered"}}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: []string{"Unregistered"}}, &nopReader{}, memory.NewStore())
 		}},
 		{"version without reset", func() {
 			c := newCounter()
-			projection.NewRunner(projection.Projection{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), Events: counterEvents, Version: 1}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Version: 1}, &nopReader{}, memory.NewStore())
 		}},
 		{"segments without key", func() {
 			c := newCounter()
-			projection.NewRunner(projection.Projection{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), Events: counterEvents, Segments: 2}, &nopReader{}, memory.NewStore())
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewStore())
 		}},
 		{"segments with version", func() {
 			c := newCounter()
-			projection.NewRunner(projection.Projection{
-				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), Events: counterEvents,
+			projection.NewRunner(projection.Definition{
+				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents,
 				Segments: 2, SegmentKey: projection.ByStreamID, Version: 1, Reset: c.Reset,
 			}, &nopReader{}, memory.NewStore())
 		}},
@@ -388,10 +388,10 @@ func TestRunner_Segmented(t *testing.T) {
 	}
 
 	c := newCounter()
-	r := projection.NewRunner(projection.Projection{
+	r := projection.NewRunner(projection.Definition{
 		Name:         "test-seg",
 		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-		Events:       counterEvents,
+		EventTypes:   counterEvents,
 		Segments:     4,
 		SegmentKey:   projection.ByStreamID,
 		PollInterval: 10 * time.Millisecond,
@@ -427,10 +427,10 @@ func TestRunner_DefaultOwnerIsUniquePerRunner(t *testing.T) {
 	store := memory.NewStore()
 
 	newDefaultOwnerRunner := func(c *counter) *projection.Runner {
-		return projection.NewRunner(projection.Projection{
+		return projection.NewRunner(projection.Definition{
 			Name:         "test",
 			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-			Events:       counterEvents,
+			EventTypes:   counterEvents,
 			PollInterval: 10 * time.Millisecond,
 			ClaimTTL:     time.Second,
 		}, es, store)
@@ -463,10 +463,10 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 	es := &testStore{}
 	save(t, es, 3)
 	c := newCounter()
-	r := projection.NewRunner(projection.Projection{
-		Name:    "test",
-		Handler: eventsourcing.NewEventHandlerFunc(c.Handle),
-		Events:  counterEvents,
+	r := projection.NewRunner(projection.Definition{
+		Name:       "test",
+		Handler:    eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes: counterEvents,
 		Reset: func(ctx context.Context) error {
 			<-ctx.Done()
 			return ctx.Err()
@@ -512,10 +512,10 @@ func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 	c := newCounter()
 	c.fail = func(uint64) error { return errors.New("poison") }
 	newSkipRunner := func() *projection.Runner {
-		return projection.NewRunner(projection.Projection{
+		return projection.NewRunner(projection.Definition{
 			Name:         "test",
 			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-			Events:       counterEvents,
+			EventTypes:   counterEvents,
 			OnError:      projection.SkipWhenLive,
 			PollInterval: 10 * time.Millisecond,
 			ClaimTTL:     time.Second,
@@ -551,10 +551,10 @@ func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 	ps := memory.NewStore()
 	c := newCounter()
 	newPlain := func() *projection.Runner {
-		return projection.NewRunner(projection.Projection{
+		return projection.NewRunner(projection.Definition{
 			Name:         "test",
 			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-			Events:       counterEvents,
+			EventTypes:   counterEvents,
 			PollInterval: 10 * time.Millisecond,
 			ClaimTTL:     time.Second,
 		}, es, ps)
@@ -587,10 +587,10 @@ func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 	es := &testStore{}
 	ps := memory.NewStore()
-	r := projection.NewRunner(projection.Projection{
+	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
-		Events:       counterEvents,
+		EventTypes:   counterEvents,
 		Owner:        "a",
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Hour,
@@ -625,10 +625,10 @@ func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	es := &testStore{}
 	ps := memory.NewStore()
-	r := projection.NewRunner(projection.Projection{
+	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
-		Events:       counterEvents,
+		EventTypes:   counterEvents,
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Second,
 	}, es, ps)
@@ -636,7 +636,7 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	for {
-		if live, _ := r.Live(ctx); live {
+		if live, _ := r.IsLive(ctx); live {
 			break
 		}
 		if ctx.Err() != nil {
@@ -647,18 +647,18 @@ func TestRunner_NotLiveAfterShutdown(t *testing.T) {
 	stop()
 
 	// A runner of another instance answers from the store.
-	other := projection.NewRunner(projection.Projection{
-		Name:    "test",
-		Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle),
-		Events:  counterEvents,
-		Owner:   "other",
+	other := projection.NewRunner(projection.Definition{
+		Name:       "test",
+		Handler:    eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+		EventTypes: counterEvents,
+		Owner:      "other",
 	}, es, ps)
-	live, err := other.Live(t.Context())
+	live, err := other.IsLive(t.Context())
 	if err != nil {
-		t.Fatalf("Live() on another instance: %v", err)
+		t.Fatalf("IsLive() on another instance: %v", err)
 	}
 	if live {
-		t.Fatal("Live() on another instance = true after the only runner stopped, want false")
+		t.Fatal("IsLive() on another instance = true after the only runner stopped, want false")
 	}
 }
 
@@ -674,10 +674,10 @@ func TestRunner_StatusHeadReportsLag(t *testing.T) {
 		}
 		return nil
 	}
-	r := projection.NewRunner(projection.Projection{
+	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
-		Events:       counterEvents,
+		EventTypes:   counterEvents,
 		BatchSize:    2,
 		PollInterval: 10 * time.Millisecond,
 		ClaimTTL:     time.Second,

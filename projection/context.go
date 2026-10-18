@@ -30,5 +30,5 @@ func withEnvelope(ctx context.Context, env *eventsourcing.Envelope, replayUntil 
 // [Runner].
 func IsReplaying(ctx context.Context) bool {
 	ru, ok := ctx.Value(replayUntilKey{}).(uint64)
-	return ok && eventsourcing.GlobalVersionFromContext(ctx) <= ru
+	return ok && eventsourcing.GlobalPositionFromContext(ctx) <= ru
 }

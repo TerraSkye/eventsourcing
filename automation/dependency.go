@@ -17,10 +17,15 @@ type Dependency interface {
 	// Name returns the projection's name, as shown in [Status.WaitingFor].
 	Name() string
 
-	// Live reports whether the projection has caught up with the head of
+	// IsLive reports whether the projection has caught up with the head of
 	// the log.
-	Live(ctx context.Context) (bool, error)
+	IsLive(ctx context.Context) (bool, error)
 }
+
+var (
+	_ Dependency = (*projection.Runner)(nil)
+	_ Watcher    = (*projection.Runner)(nil)
+)
 
 // Watcher is optionally implemented by a [Dependency] that can call back
 // when its projection changes, so the automation does not have to poll.
@@ -33,7 +38,7 @@ type Watcher interface {
 
 // Remote returns a [Dependency] for the projection called name, run by a
 // different program, judged by the status its runner publishes to store.
-// claimTTL is the [projection.Projection.ClaimTTL] that program runs the
+// claimTTL is the [projection.Definition.ClaimTTL] that program runs the
 // projection with, or 0 for [projection.DefaultClaimTTL]; a segment whose
 // status is older than that counts as not live, as its runner has stopped.
 //
@@ -55,7 +60,7 @@ type remote struct {
 
 func (r *remote) Name() string { return r.name }
 
-func (r *remote) Live(ctx context.Context) (bool, error) {
+func (r *remote) IsLive(ctx context.Context) (bool, error) {
 	statuses, err := r.store.LoadStatuses(ctx, r.name)
 	if err != nil || len(statuses) == 0 {
 		return false, err

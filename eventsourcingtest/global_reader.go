@@ -46,7 +46,7 @@ type globalAcceptance struct {
 // The suite checks that:
 //
 //   - events across several streams come back in strictly ascending
-//     GlobalVersion order, with no event returned twice;
+//     GlobalPosition order, with no event returned twice;
 //   - ReadAll(after = n) never returns the event at position n, and
 //     after = 0 starts at the beginning of the log;
 //   - Limit bounds the page, and paging with Next visits every event
@@ -56,7 +56,7 @@ type globalAcceptance struct {
 //   - AtEnd is reported at the head, and when AtEnd is false, Next is
 //     greater than after;
 //   - Head never exceeds what ReadAll returns;
-//   - Save reports, in AppendResult.GlobalVersion, the GlobalVersion
+//   - Save reports, in AppendResult.GlobalPosition, the GlobalPosition
 //     ReadAll returns for the last event it appended;
 //   - under many concurrent Saves to different streams, some of them
 //     multi-event, a reader paging along at the same time sees every event
@@ -113,7 +113,7 @@ func (g *globalAcceptance) exclusiveStart(t *testing.T) {
 	if len(all) != 3 {
 		t.Fatalf("ReadAll returned %d of this test's events, want 3", len(all))
 	}
-	checkpoint := all[0].GlobalVersion
+	checkpoint := all[0].GlobalPosition
 	got := g.readToEnd(t, checkpoint, eventsourcing.ReadOptions{}, id)
 	if vs := versions(got); !slices.Equal(vs, []uint64{2, 3}) {
 		t.Errorf("ReadAll(after %d) versions = %v, want [2 3]", checkpoint, vs)
@@ -126,8 +126,8 @@ func (g *globalAcceptance) exclusiveStart(t *testing.T) {
 	if len(res.Events) != 1 {
 		t.Fatalf("ReadAll(after 0, Limit 1) on a log with events returned %d events, want 1", len(res.Events))
 	}
-	if gv := res.Events[0].GlobalVersion; gv == 0 || gv > all[0].GlobalVersion {
-		t.Errorf("ReadAll(after 0) starts at GlobalVersion %d, want the first event of the log (0 < gv <= %d)", gv, all[0].GlobalVersion)
+	if gv := res.Events[0].GlobalPosition; gv == 0 || gv > all[0].GlobalPosition {
+		t.Errorf("ReadAll(after 0) starts at GlobalPosition %d, want the first event of the log (0 < gv <= %d)", gv, all[0].GlobalPosition)
 	}
 }
 
@@ -146,7 +146,7 @@ func (g *globalAcceptance) limitAndPaging(t *testing.T) {
 
 // saveMixed saves, to two fresh streams with distinct prefixes, events of
 // both acceptance types and returns the two stream IDs (whose prefixes are
-// the IDs minus their last character) and the GlobalVersion of the last
+// the IDs minus their last character) and the GlobalPosition of the last
 // event saved.
 func (g *globalAcceptance) saveMixed(t *testing.T) (a, b string, last uint64) {
 	t.Helper()
@@ -161,7 +161,7 @@ func (g *globalAcceptance) saveMixed(t *testing.T) (a, b string, last uint64) {
 	if len(all) != 6 {
 		t.Fatalf("unfiltered ReadAll returned %d of this test's events, want 6", len(all))
 	}
-	return a, b, all[len(all)-1].GlobalVersion
+	return a, b, all[len(all)-1].GlobalPosition
 }
 
 func (g *globalAcceptance) filterEventTypes(t *testing.T) {
@@ -243,8 +243,8 @@ func (g *globalAcceptance) head(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("ReadAll returned %d of this test's events, want 2", len(got))
 	}
-	if h < got[1].GlobalVersion {
-		t.Errorf("Head() = %d after saving an event at %d, want at least %d", h, got[1].GlobalVersion, got[1].GlobalVersion)
+	if h < got[1].GlobalPosition {
+		t.Errorf("Head() = %d after saving an event at %d, want at least %d", h, got[1].GlobalPosition, got[1].GlobalPosition)
 	}
 	if next < h {
 		t.Errorf("reading to the end stopped at Next = %d, below Head %d: Head must not exceed what ReadAll returns", next, h)
@@ -311,8 +311,8 @@ func (g *globalAcceptance) concurrentSaves(t *testing.T) {
 				continue
 			}
 			if expected := seen[env.StreamID] + 1; env.Version != expected {
-				t.Errorf("stream %q: saw version %d after %d, want %d; an event was skipped or repeated (GlobalVersion %d)",
-					env.StreamID, env.Version, seen[env.StreamID], expected, env.GlobalVersion)
+				t.Errorf("stream %q: saw version %d after %d, want %d; an event was skipped or repeated (GlobalPosition %d)",
+					env.StreamID, env.Version, seen[env.StreamID], expected, env.GlobalPosition)
 				return
 			}
 			seen[env.StreamID] = env.Version
@@ -351,8 +351,8 @@ func (g *globalAcceptance) appendResult(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("ReadAll returned %d of this test's events, want 3", len(got))
 	}
-	if want := got[2].GlobalVersion; res.GlobalVersion != want {
-		t.Errorf("AppendResult.GlobalVersion = %d, want %d, the GlobalVersion of the last event appended", res.GlobalVersion, want)
+	if want := got[2].GlobalPosition; res.GlobalPosition != want {
+		t.Errorf("AppendResult.GlobalPosition = %d, want %d, the GlobalPosition of the last event appended", res.GlobalPosition, want)
 	}
 }
 
@@ -429,14 +429,14 @@ func (g *globalAcceptance) readToEndNext(t *testing.T, after uint64, opts events
 func checkPage(after uint64, res eventsourcing.ReadResult) error {
 	prev := after
 	for _, env := range res.Events {
-		if env.GlobalVersion <= prev {
-			return fmt.Errorf("ReadAll(after %d) returned GlobalVersion %d after %d, want strictly ascending and exclusive of after",
-				after, env.GlobalVersion, prev)
+		if env.GlobalPosition <= prev {
+			return fmt.Errorf("ReadAll(after %d) returned GlobalPosition %d after %d, want strictly ascending and exclusive of after",
+				after, env.GlobalPosition, prev)
 		}
-		prev = env.GlobalVersion
+		prev = env.GlobalPosition
 	}
 	if len(res.Events) > 0 && res.Next < prev {
-		return fmt.Errorf("ReadAll(after %d).Next = %d, want at least its last event's GlobalVersion %d", after, res.Next, prev)
+		return fmt.Errorf("ReadAll(after %d).Next = %d, want at least its last event's GlobalPosition %d", after, res.Next, prev)
 	}
 	if res.Next < after {
 		return fmt.Errorf("ReadAll(after %d).Next = %d, want at least %d", after, res.Next, after)

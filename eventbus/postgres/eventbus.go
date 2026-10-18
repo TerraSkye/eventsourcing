@@ -338,7 +338,7 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 			}
 		}
 
-		pos = int64(env.GlobalVersion)
+		pos = int64(env.GlobalPosition)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -521,12 +521,12 @@ func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
 	}
 
 	return &cqrs.Envelope{
-		EventID:       uuid.UUID(rawUUID.Bytes),
-		StreamID:      streamID,
-		Event:         ev,
-		Metadata:      meta,
-		Version:       uint64(streamPosition),
-		GlobalVersion: uint64(globalID),
-		OccurredAt:    occurredAt,
+		EventID:        uuid.UUID(rawUUID.Bytes),
+		StreamID:       streamID,
+		Event:          ev,
+		Metadata:       meta,
+		Version:        uint64(streamPosition),
+		GlobalPosition: uint64(globalID),
+		OccurredAt:     occurredAt,
 	}, nil
 }

@@ -28,13 +28,13 @@ func TestContextGetters(t *testing.T) {
 	metadata := map[string]any{"key": "value"}
 
 	env := &Envelope{
-		StreamID:      "stream-123",
-		Event:         &event{aggregateID: "agg-456"},
-		EventID:       eventID,
-		Version:       7,
-		GlobalVersion: 42,
-		OccurredAt:    occurredAt,
-		Metadata:      metadata,
+		StreamID:       "stream-123",
+		Event:          &event{aggregateID: "agg-456"},
+		EventID:        eventID,
+		Version:        7,
+		GlobalPosition: 42,
+		OccurredAt:     occurredAt,
+		Metadata:       metadata,
 	}
 
 	ctxWithEnv := WithEnvelope(t.Context(), env)
@@ -97,15 +97,15 @@ func TestContextGetters(t *testing.T) {
 			want: uint64(0),
 		},
 		{
-			name: "GlobalVersionFromContext with value",
+			name: "GlobalPositionFromContext with value",
 			ctx:  ctxWithEnv,
-			fn:   func(ctx context.Context) any { return GlobalVersionFromContext(ctx) },
+			fn:   func(ctx context.Context) any { return GlobalPositionFromContext(ctx) },
 			want: uint64(42),
 		},
 		{
-			name: "GlobalVersionFromContext without value",
+			name: "GlobalPositionFromContext without value",
 			ctx:  emptyCtx,
-			fn:   func(ctx context.Context) any { return GlobalVersionFromContext(ctx) },
+			fn:   func(ctx context.Context) any { return GlobalPositionFromContext(ctx) },
 			want: uint64(0),
 		},
 		{

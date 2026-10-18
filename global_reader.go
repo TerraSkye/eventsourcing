@@ -32,11 +32,11 @@ type ReadOptions struct {
 // [GlobalReader.ReadAll].
 type ReadResult struct {
 	// Events holds the matching events, in ascending
-	// [Envelope.GlobalVersion] order. It may be empty even when Next has
+	// [Envelope.GlobalPosition] order. It may be empty even when Next has
 	// advanced, if every event scanned was filtered out.
 	Events []*Envelope
 
-	// Next is the GlobalVersion of the last event the read scanned, whether
+	// Next is the GlobalPosition of the last event the read scanned, whether
 	// it matched the filter or not. Pass it as after to the next ReadAll
 	// call, and store it as a checkpoint once Events are processed.
 	//
@@ -47,7 +47,7 @@ type ReadResult struct {
 	Next uint64
 
 	// AtEnd reports that the read reached the head of the log: at the moment
-	// of the read, no event with a GlobalVersion greater than Next was
+	// of the read, no event with a GlobalPosition greater than Next was
 	// visible. It is a snapshot; new events may be appended right after.
 	//
 	// A reader that sees AtEnd is caught up and can wait for new events
@@ -70,9 +70,9 @@ type ReadResult struct {
 // Every implementation must uphold the following, and is checked against
 // it by eventsourcingtest.GlobalReaderAcceptanceTest:
 //
-//   - Order: events are returned in strictly ascending GlobalVersion order.
-//   - No gaps: once ReadAll has returned an event with GlobalVersion n, no
-//     event with a GlobalVersion of n or lower may become visible later.
+//   - Order: events are returned in strictly ascending GlobalPosition order.
+//   - No gaps: once ReadAll has returned an event with GlobalPosition n, no
+//     event with a GlobalPosition of n or lower may become visible later.
 //     Stores where positions can become visible out of order (a SQL
 //     sequence assigned before commit, for example) must hide events until
 //     every lower position is either committed or permanently abandoned.
@@ -84,10 +84,10 @@ type ReadResult struct {
 //     advisory lock taken by every append, so appends commit in position
 //     order), or order the log by (transaction ID, position) and only read
 //     transactions older than pg_snapshot_xmin(pg_current_snapshot()), in
-//     which case GlobalVersion must be assigned in that order too.
+//     which case GlobalPosition must be assigned in that order too.
 //   - Progress: if AtEnd is false, Next is greater than after.
 //   - Exclusive start: ReadAll(ctx, n, ...) never returns the event at
-//     position n itself. GlobalVersion 0 is never assigned to an event, so
+//     position n itself. GlobalPosition 0 is never assigned to an event, so
 //     after == 0 reads from the beginning of the log.
 //   - Filters: EventTypes and StreamPrefixes are always honored, on the
 //     server when the backend can and in Go otherwise.
@@ -99,7 +99,7 @@ type GlobalReader interface {
 	// events.
 	ReadAll(ctx context.Context, after uint64, opts ReadOptions) (ReadResult, error)
 
-	// Head returns the GlobalVersion of the newest event a ReadAll call
+	// Head returns the GlobalPosition of the newest event a ReadAll call
 	// started now could return, ignoring filters, or 0 if the log is empty.
 	//
 	// It is used to measure how far a reader lags behind, and to record

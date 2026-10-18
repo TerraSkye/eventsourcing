@@ -78,9 +78,9 @@ func (s *stubStore) ReadAll(_ context.Context, after uint64, _ eventsourcing.Rea
 	}
 	res := eventsourcing.ReadResult{Next: after, AtEnd: true}
 	for _, e := range s.events {
-		if e.GlobalVersion > after {
+		if e.GlobalPosition > after {
 			res.Events = append(res.Events, e)
-			res.Next = e.GlobalVersion
+			res.Next = e.GlobalPosition
 		}
 	}
 	return res, nil
@@ -90,7 +90,7 @@ func (s *stubStore) Head(context.Context) (uint64, error) {
 	if len(s.events) == 0 {
 		return 0, nil
 	}
-	return s.events[len(s.events)-1].GlobalVersion, nil
+	return s.events[len(s.events)-1].GlobalPosition, nil
 }
 
 func (s *stubStore) Close() error { return nil }
@@ -103,7 +103,7 @@ func TestTelemetryStore_ReadAll(t *testing.T) {
 	stub := &stubStore{}
 	for i := 1; i <= 3; i++ {
 		stub.events = append(stub.events, &eventsourcing.Envelope{
-			StreamID: "agg-1", Event: stubEvent{}, Version: uint64(i), GlobalVersion: uint64(i),
+			StreamID: "agg-1", Event: stubEvent{}, Version: uint64(i), GlobalPosition: uint64(i),
 		})
 	}
 	reader, ok := WithEventStoreTelemetry(stub).(eventsourcing.GlobalReader)

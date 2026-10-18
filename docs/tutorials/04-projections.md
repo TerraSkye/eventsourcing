@@ -99,16 +99,16 @@ import (
 )
 
 // NewProjection returns the projection that keeps list up to date.
-func NewProjection(list *TaskList) projection.Projection {
-    return projection.Projection{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+func NewProjection(list *TaskList) projection.Definition {
+    return projection.Definition{
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
 // handle applies one event to the task list. The runner calls it for every
-// event in Events, in the order they were stored.
+// event in EventTypes, in the order they were stored.
 func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
     l.mu.Lock()
     defer l.mu.Unlock()
@@ -130,7 +130,7 @@ func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
 
 - `Name` identifies the projection's checkpoint, so it must be unique and stay the same between releases.
 - `Handler` is called for every event the runner reads. `NewEventHandlerFunc` turns a function into an `eventsourcing.EventHandler`.
-- `Events` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
+- `EventTypes` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
 
 ## Step 4: Write the query handler
 
@@ -223,7 +223,7 @@ func main() {
 - The **event store** to read from. The memory store implements `eventsourcing.GlobalReader`.
 - A **projection store** to keep the checkpoint in. `projmem.NewStore()` keeps it in memory, which fits a read model that also lives in memory: both start empty on every run, and the runner rebuilds the task list from the start of the log.
 
-`main.go` decides how the projection runs; the slice decides what it does. Because `Projection` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
+`main.go` decides how the projection runs; the slice decides what it does. Because `Definition` is a plain value, `main.go` can still adjust it before passing it on, for example to log handler failures:
 
 ```go
 p := tasklist.NewProjection(list)
@@ -257,7 +257,7 @@ curl -s http://localhost:8080/api/v1/tasks | jq .
 
 A projection is **eventually consistent**: a command returns as soon as its events are stored, and the runner picks them up shortly after. In this tutorial that is within a second, the runner's default poll interval.
 
-When a caller must see its own write, wait for the projection to reach the command's position. Every command returns an `AppendResult` whose `GlobalVersion` is the position of its last event:
+When a caller must see its own write, wait for the projection to reach the command's position. Every command returns an `AppendResult` whose `GlobalPosition` is the position of its last event:
 
 ```go
 res, err := createTask(ctx, cmd)
@@ -265,12 +265,12 @@ if err != nil {
     return err
 }
 // Blocks until the task list has processed the new event.
-if err := taskList.WaitUntil(ctx, res.GlobalVersion); err != nil {
+if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
     return err
 }
 ```
 
-`taskList.Live(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
+`taskList.IsLive(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
 
 ## Going further
 

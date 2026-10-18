@@ -44,7 +44,7 @@ import (
 // segment 0.
 //
 // projection_dead_letters holds events skipped under
-// [projection.Projection.OnError] on a non-stalling policy.
+// [projection.Definition.OnError] on a non-stalling policy.
 const Schema = `
 CREATE TABLE IF NOT EXISTS projection_segments (
     name          TEXT        NOT NULL,
@@ -65,14 +65,14 @@ CREATE TABLE IF NOT EXISTS projection_dead_letters (
     id             BIGSERIAL   PRIMARY KEY,
     projection     TEXT        NOT NULL,
     segment        INT         NOT NULL,
-    global_version BIGINT      NOT NULL,
+    global_position BIGINT      NOT NULL,
     event_type     TEXT        NOT NULL,
     error          TEXT        NOT NULL,
     skipped_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_projection_dead_letters_projection
-    ON projection_dead_letters (projection, global_version);
+    ON projection_dead_letters (projection, global_position);
 `
 
 type txKey struct{}
@@ -111,16 +111,16 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-// Init implements [projection.Store]: it creates the segment rows for name
+// Declare implements [projection.Store]: it creates the segment rows for name
 // on first use, and verifies the count has not changed since.
-func (s *Store) Init(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (s *Store) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	// Count existing rows; if none, insert; if some, verify the count.
 	var count int
 	err := s.db.QueryRow(ctx,
 		`SELECT COUNT(*) FROM projection_segments WHERE name = $1`, name,
 	).Scan(&count)
 	if err != nil {
-		return fmt.Errorf("projection/postgres: init %q: count segments: %w", name, err)
+		return fmt.Errorf("projection/postgres: declare %q: count segments: %w", name, err)
 	}
 	if count == 0 {
 		return s.insertSegments(ctx, name, segments, replayUntil)
@@ -144,7 +144,7 @@ func (s *Store) insertSegments(ctx context.Context, name string, segments int, r
 	defer br.Close()
 	for i := 0; i < segments; i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("projection/postgres: init %q segment %d: %w", name, i, err)
+			return fmt.Errorf("projection/postgres: declare %q segment %d: %w", name, i, err)
 		}
 	}
 	return nil
@@ -357,7 +357,7 @@ func (s *Store) SaveDeadLetter(ctx context.Context, l projection.Lease, position
 	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO projection_dead_letters
-		(projection, segment, global_version, event_type, error)
+		(projection, segment, global_position, event_type, error)
 		VALUES ($1, $2, $3, $4, $5)`,
 		l.Name, l.Segment, position, eventType, cause.Error(),
 	)

@@ -8,7 +8,7 @@ The `projection` package provides a `Runner` that does the reading, checkpointin
 
 ```
          ┌──────────────── Runner ─────────────────┐
-log ───► │ ReadAll(after checkpoint, Events) ──►   │
+log ───► │ ReadAll(after checkpoint, EventTypes) ─►│
          │   Handler.Handle(ctx, event) ...        │
          │   Store.Commit(read-model writes +      │
          │                checkpoint, one unit)    │
@@ -18,7 +18,7 @@ log ───► │ ReadAll(after checkpoint, Events) ──►   │
 
 A runner needs three things:
 
-1. A `projection.Projection`: the projection's name, its handler, and the event types it handles.
+1. A `projection.Definition`: the projection's name, its handler, and the event types it handles.
 2. An `eventsourcing.GlobalReader` to read the log from. The memory, file, Postgres and KurrentDB event stores all implement it.
 3. A `projection.Store` that holds checkpoints, claims and status. Use `projection/memory` for in-memory read models and tests, and `projection/postgres` for read models in Postgres.
 
@@ -30,7 +30,7 @@ A slice that owns a read model has three parts:
 - the **projection**: how events turn into that read model;
 - the **query**: reads the read model. It never needs the projection.
 
-An in-memory read model is a type both sides share. The projection is a constructor that returns a `projection.Projection` with one handler that switches on the event type:
+An in-memory read model is a type both sides share. The projection is a constructor that returns a `projection.Definition` with one handler that switches on the event type:
 
 ```go
 package tasklist
@@ -41,11 +41,11 @@ type TaskList struct {
     tasks map[string]*Task
 }
 
-func NewProjection(list *TaskList) projection.Projection {
-    return projection.Projection{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(list.handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+func NewProjection(list *TaskList) projection.Definition {
+    return projection.Definition{
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
@@ -67,20 +67,20 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 
 - `Name` keys the projection's checkpoint, so it must be unique and stable between releases.
 - `Handler` is any `eventsourcing.EventHandler`, the same type an event bus subscriber takes.
-- `Events` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `Events` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
+- `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place, and bump `Version` when you do (see [Rebuild a projection](#rebuild-a-projection)).
 
 If you prefer one method per event type, group them and pass the group's filter:
 
 ```go
-func NewProjection(list *TaskList) projection.Projection {
+func NewProjection(list *TaskList) projection.Definition {
     group := eventsourcing.NewEventGroupProcessor(
         eventsourcing.OnEvent(list.onTaskCreated),
         eventsourcing.OnEvent(list.onTaskCompleted),
     )
-    return projection.Projection{
-        Name:    "task-list",
-        Handler: group,
-        Events:  group.StreamFilter(),
+    return projection.Definition{
+        Name:       "task-list",
+        Handler:    group,
+        EventTypes: group.StreamFilter(),
     }
 }
 ```
@@ -103,7 +103,7 @@ go runner.Run(ctx)
 
 With `memory.NewStore()` the checkpoint lives in memory too, so the projection replays the whole log on every start. That is right for an in-memory read model, which is empty after a restart anyway.
 
-`Projection` is a plain value, so `main.go` can still change how it runs, such as `PollInterval` or a logging wrapper (see [Failures](#failures)), without the slice knowing.
+`Definition` is a plain value, so `main.go` can still change how it runs, such as `PollInterval` or a logging wrapper (see [Failures](#failures)), without the slice knowing.
 
 ## Store the read model in Postgres
 
@@ -120,11 +120,11 @@ Here the read model is the `tasks` table, so the projection keeps no state. The 
 ```go
 package tasklist
 
-func NewProjection() projection.Projection {
-    return projection.Projection{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
+func NewProjection() projection.Definition {
+    return projection.Definition{
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
     }
 }
 
@@ -163,7 +163,7 @@ The read model's tables must be in the same database as the store's tables, sinc
 
 A read model is eventually consistent. Two methods let you wait for it:
 
-- `runner.Live(ctx)` reports whether the projection has reached the head of the log. Use it for readiness probes, or to hold off work that must not see a half-built read model.
+- `runner.IsLive(ctx)` reports whether the projection has reached the head of the log. Use it for readiness probes, or to hold off work that must not see a half-built read model.
 - `runner.WaitUntil(ctx, globalVersion)` blocks until the projection has processed the log up to that position. Use it for read-your-writes after a command:
 
 ```go
@@ -171,7 +171,7 @@ res, err := commandBus.Dispatch(ctx, createtask.CreateTask{...})
 if err != nil {
     return err
 }
-if err := runner.WaitUntil(ctx, res.GlobalVersion); err != nil {
+if err := runner.WaitUntil(ctx, res.GlobalPosition); err != nil {
     return err
 }
 // The task is now in the read model.
@@ -184,13 +184,13 @@ At the head of the log the runner polls every `PollInterval` (1s by default). Ca
 When you change how a projection writes its read model, rebuild it from the start of the log. Give the projection a `Reset` that wipes the read model, and bump `Version` in the same change as the handler:
 
 ```go
-func NewProjection() projection.Projection {
-    return projection.Projection{
-        Name:    "task-list",
-        Handler: eventsourcing.NewEventHandlerFunc(handle),
-        Events:  []string{"TaskCreated", "TaskCompleted"},
-        Version: 2,
-        Reset:   reset,
+func NewProjection() projection.Definition {
+    return projection.Definition{
+        Name:       "task-list",
+        Handler:    eventsourcing.NewEventHandlerFunc(handle),
+        EventTypes: []string{"TaskCreated", "TaskCompleted"},
+        Version:    2,
+        Reset:      reset,
     }
 }
 
@@ -203,7 +203,7 @@ func reset(ctx context.Context) error {
 On start, a runner whose stored version differs from `Version` runs `Reset` and the checkpoint move back to zero in one unit of work, then processes the log again. `runner.Rebuild(ctx)` does the same on demand.
 
 !!! warning "Adding an event type is a change too"
-    Bump `Version` when you add a name to `Events`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
+    Bump `Version` when you add a name to `EventTypes`, not only when the handler's writes change. Without the bump, the runner carries on from its checkpoint, and every event of the new type stored before the change is never applied.
 
 A rebuild in place empties the read model: queries see an empty table until the runner has caught up again. For a large log, build the new version next to the old one instead; see [Rebuild a projection without downtime](./rebuild-without-downtime.md).
 
@@ -254,11 +254,11 @@ The claim's heartbeat is refreshed when a batch commits, not while its handlers 
 When one instance cannot keep up, split the projection into segments:
 
 ```go
-func NewProjection() projection.Projection {
-    return projection.Projection{
+func NewProjection() projection.Definition {
+    return projection.Definition{
         Name:       "order-summaries",
         Handler:    eventsourcing.NewEventHandlerFunc(handle),
-        Events:     []string{"OrderPlaced", "OrderShipped"},
+        EventTypes: []string{"OrderPlaced", "OrderShipped"},
         Segments:   16,
         SegmentKey: projection.ByStreamID,
     }

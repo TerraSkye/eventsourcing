@@ -87,11 +87,11 @@ func assertRecord(t *testing.T, r map[string]any, level, msg string, attrs map[s
 
 func eventContext() context.Context {
 	ctx := eventsourcing.WithEnvelope(context.Background(), &eventsourcing.Envelope{
-		EventID:       uuid.New(),
-		StreamID:      "order-1",
-		Event:         testEvent{},
-		Version:       3,
-		GlobalVersion: 42,
+		EventID:        uuid.New(),
+		StreamID:       "order-1",
+		Event:          testEvent{},
+		Version:        3,
+		GlobalPosition: 42,
 	})
 	return eventsourcing.WithCausation(ctx, "cmd-1")
 }
@@ -191,12 +191,12 @@ func TestWithEventLogging_Success(t *testing.T) {
 		t.Fatalf("got %d records, want 2: %v", len(rs), rs)
 	}
 	attrs := map[string]any{
-		"event_type":     "OrderPlaced",
-		"stream_id":      "order-1",
-		"aggregate_id":   "order-1",
-		"version":        float64(3),
-		"global_version": float64(42),
-		"causation":      "cmd-1",
+		"event_type":      "OrderPlaced",
+		"stream_id":       "order-1",
+		"aggregate_id":    "order-1",
+		"version":         float64(3),
+		"global_position": float64(42),
+		"causation":       "cmd-1",
 	}
 	assertRecord(t, rs[0], "DEBUG", "handling event", attrs)
 	assertRecord(t, rs[1], "DEBUG", "event handled", attrs)

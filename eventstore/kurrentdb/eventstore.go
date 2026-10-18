@@ -224,7 +224,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: result.NextExpectedVersion + 1,
-		GlobalVersion:       result.CommitPosition,
+		GlobalPosition:      result.CommitPosition,
 	}, nil
 
 }
@@ -353,7 +353,7 @@ func (e EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 // [eventsourcing.GlobalReader] contract allows.
 const scanLimit = 4096
 
-// ReadAll implements [eventsourcing.GlobalReader] over $all. GlobalVersion
+// ReadAll implements [eventsourcing.GlobalReader] over $all. GlobalPosition
 // is an event's commit position.
 //
 // KurrentDB's own records in $all — events in system streams, and event
@@ -496,13 +496,13 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 	}
 
 	return &eventsourcing.Envelope{
-		EventID:       rec.EventID,
-		StreamID:      rec.StreamID,
-		Event:         ev,
-		Metadata:      metadata,
-		Version:       rec.EventNumber + 1,
-		GlobalVersion: rec.Position.Commit,
-		OccurredAt:    rec.CreatedDate,
+		EventID:        rec.EventID,
+		StreamID:       rec.StreamID,
+		Event:          ev,
+		Metadata:       metadata,
+		Version:        rec.EventNumber + 1,
+		GlobalPosition: rec.Position.Commit,
+		OccurredAt:     rec.CreatedDate,
 	}, nil
 }
 

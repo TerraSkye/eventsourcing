@@ -24,18 +24,26 @@ release may break the API; every break is listed under **Breaking**.
   order they were assigned, which `GlobalReader` needs, but appends to
   different streams no longer commit in parallel. Write throughput of a
   busy Postgres store goes down; encoding events happens before the lock.
+- `Envelope.GlobalVersion` is renamed `GlobalPosition`, and
+  `GlobalVersionFromContext` is renamed `GlobalPositionFromContext`: it is
+  a position in the global log, like `ReadAll`'s `after` and a projection
+  checkpoint, while a version counts events within one stream. The
+  logging middleware's `global_version` attribute is now
+  `global_position`. The file store and file bus keep `global_version` as
+  the JSON name, so existing files still load.
 
 ### Added
 
 - `eventsourcing.GlobalReader`, `ReadOptions` and `ReadResult`, with
   `eventsourcingtest.GlobalReaderAcceptanceTest` to check a store against
   the contract.
-- `AppendResult.GlobalVersion`, the global position of the last event
+- `AppendResult.GlobalPosition`, the global position of the last event
   appended, set by every store.
-- Package `projection`: a `Runner` that keeps a read model up to date from
-  the global log, with checkpoints, claims across instances, segments,
-  rebuilds, replay detection (`IsReplaying`), read-your-writes
-  (`WaitUntil`) and dead letters. Stores in `projection/memory` and
-  `projection/postgres`, checked by `projectiontest.StoreAcceptanceTest`.
+- Package `projection`: a `Runner` that keeps a read model, described by a
+  `projection.Definition`, up to date from the global log, with
+  checkpoints, claims across instances, segments, rebuilds, replay
+  detection (`IsReplaying`), read-your-writes (`WaitUntil`) and dead
+  letters. Stores in `projection/memory` and `projection/postgres`,
+  checked by `projectiontest.StoreAcceptanceTest`.
 - The `otel` event store wrapper traces `ReadAll` and `Head`, and
   implements `GlobalReader` only when the store it wraps does.

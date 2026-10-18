@@ -14,7 +14,7 @@ var (
 	// owner continue.
 	ErrClaimLost = errors.New("projection: claim lost")
 
-	// ErrSegmentsChanged is returned by [Store.Init] when the projection
+	// ErrSegmentsChanged is returned by [Store.Declare] when the projection
 	// exists with a different segment count. Events would map to different
 	// segments than the stored checkpoints were written for, so changing the
 	// count takes a new projection name.
@@ -24,16 +24,16 @@ var (
 // Checkpoint records how far a segment of a projection has processed the
 // log, and which projection version wrote the read model.
 type Checkpoint struct {
-	// Position is the GlobalVersion up to which the segment has processed
+	// Position is the GlobalPosition up to which the segment has processed
 	// the log. Zero means nothing has been processed yet.
 	Position uint64
 
 	// Version is the projection version that wrote the read model; see
-	// [Projection.Version].
+	// [Definition.Version].
 	Version int
 
 	// ReplayUntil is the position up to which events count as replayed; see
-	// [IsReplaying]. It is set when [Store.Init] creates the segment (to the
+	// [IsReplaying]. It is set when [Store.Declare] creates the segment (to the
 	// head of the log at that moment) and on every rebuild (to the position
 	// the segment had reached before it).
 	ReplayUntil uint64
@@ -87,13 +87,13 @@ func (p Phase) String() string {
 // Status describes how a projection, or one of its segments, is doing. The
 // runner publishes it to the [Store] after every committed batch and on
 // every change of [Phase]; other instances read it with [Store.LoadStatuses]
-// to answer [Runner.Live] and [Runner.WaitUntil] about segments they do
+// to answer [Runner.IsLive] and [Runner.WaitUntil] about segments they do
 // not own.
 type Status struct {
 	// Phase is where the segment is in its life cycle.
 	Phase Phase
 
-	// Position is the checkpoint: the GlobalVersion up to which the segment
+	// Position is the checkpoint: the GlobalPosition up to which the segment
 	// has processed the log.
 	Position uint64
 
@@ -113,7 +113,7 @@ type Status struct {
 	Owner string
 
 	// Segment is which segment this status describes. 0 for an
-	// unsegmented projection ([Projection.Segments] <= 1).
+	// unsegmented projection ([Definition.Segments] <= 1).
 	Segment int
 
 	// Age is how long ago this status was published, by the store's clock
@@ -125,7 +125,7 @@ type Status struct {
 // Lease identifies one segment of a projection and the instance that
 // claims it. Every [Store] call that acts on a claimed segment takes one.
 type Lease struct {
-	// Name is the projection's name; see [Projection.Name].
+	// Name is the projection's name; see [Definition.Name].
 	Name string
 
 	// Segment is the segment, in [0, segments). 0 for a single-segment
@@ -133,7 +133,7 @@ type Lease struct {
 	Segment int
 
 	// Owner identifies the instance that claims the segment; see
-	// [Projection.Owner].
+	// [Definition.Owner].
 	Owner string
 
 	// Epoch is the fencing token of the claim, as returned by
@@ -171,13 +171,13 @@ type Lease struct {
 // Implementations must be safe for concurrent use, and are checked against
 // this contract by [projectiontest.StoreAcceptanceTest].
 type Store interface {
-	// Init declares that the projection name has segments segments, creating
-	// them on first use with a zero checkpoint whose ReplayUntil is
-	// replayUntil. Every other call for name assumes Init has been called
-	// for it. Calling Init again with the same count changes nothing, not
+	// Declare states that the projection name has segments segments,
+	// creating them on first use with a zero checkpoint whose ReplayUntil is
+	// replayUntil. Every other call for name assumes Declare has been called
+	// for it. Calling Declare again with the same count changes nothing, not
 	// even ReplayUntil; with a different count it returns
 	// [ErrSegmentsChanged].
-	Init(ctx context.Context, name string, segments int, replayUntil uint64) error
+	Declare(ctx context.Context, name string, segments int, replayUntil uint64) error
 
 	// Claim takes the segment for l.Owner. When l is the segment's current
 	// claim (same Owner and Epoch), Claim refreshes it and keeps its epoch.
