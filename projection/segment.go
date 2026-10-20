@@ -80,6 +80,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			held = false
 		default:
 			r.setPhase(seg, Stalled, err.Error())
+			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
 			sleepCtx(ctx, wait)
@@ -480,6 +481,18 @@ func (r *Runner) waitLive(ctx context.Context) bool {
 	case <-t.C:
 	}
 	return true
+}
+
+// publishStatus saves seg's in-memory status to the store, so other
+// instances see a stall instead of the phase of the last commit. The
+// claim is still held after a failed batch, as only a lost claim ends it.
+// Best effort: the store may be what failed, and ErrClaimLost means
+// another instance owns the segment now, which the next Claim finds out.
+func (r *Runner) publishStatus(ctx context.Context, seg int) {
+	r.mu.Lock()
+	st := r.segs[seg].status
+	r.mu.Unlock()
+	_ = r.store.SaveStatus(ctx, r.lease(seg), st)
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.

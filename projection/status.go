@@ -3,6 +3,8 @@ package projection
 import (
 	"context"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 // Status returns the projection's status as seen by this instance.
@@ -77,23 +79,11 @@ func (r *Runner) IsLive(ctx context.Context) (bool, error) {
 			return st.Phase == Live, nil
 		}
 	}
-	statuses, err := r.store.LoadStatuses(ctx, r.p.Name)
-	if err != nil {
-		return false, err
-	}
-	if len(statuses) < r.segments {
-		return false, nil
-	}
-	for _, s := range statuses {
-		if !s.IsLive(r.p.ClaimTTL) {
-			return false, nil
-		}
-	}
-	return true, nil
+	return r.probe.IsLive(ctx)
 }
 
 // WaitUntil blocks until the projection has processed the log up to and
-// including position on every segment, or until ctx is done.
+// including position on every segment.
 //
 // position is an [eventsourcing.Envelope.GlobalPosition], typically from the
 // [eventsourcing.AppendResult] of the command whose effects the caller
@@ -102,7 +92,11 @@ func (r *Runner) IsLive(ctx context.Context) (bool, error) {
 // Events the projection does not handle count as processed. On segments
 // this instance owns, WaitUntil watches memory; on segments another
 // instance owns, it polls [Store.LoadStatuses] at [Definition.PollInterval].
+// When ctx is done first, it returns a [*NotReachedError] carrying the
+// segment statuses it last saw. A process that only reads the projection
+// can wait the same way with a [Probe], without a Runner.
 func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
+	bo := r.probe.newBackoff()
 	for {
 		// Take the change signal before checking, so a change that lands
 		// between the check and the wait still wakes us.
@@ -110,7 +104,7 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 		changed := r.changed
 		r.mu.Unlock()
 
-		ok, allLocal, err := r.reached(ctx, position)
+		ok, allLocal, statuses, err := r.reached(ctx, position)
 		if err != nil {
 			return err
 		}
@@ -124,7 +118,11 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 			pollC <-chan time.Time
 		)
 		if !allLocal {
-			poll = time.NewTimer(r.p.PollInterval)
+			wait := bo.NextBackOff()
+			if wait == backoff.Stop {
+				return r.probe.notReached(position, statuses, nil)
+			}
+			poll = time.NewTimer(wait)
 			pollC = poll.C
 		}
 		select {
@@ -136,44 +134,43 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 			poll.Stop()
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return r.probe.notReached(position, statuses, err)
 		}
 	}
 }
 
 // reached reports whether every segment has processed the log up to
-// position, and whether this instance owns every segment.
-func (r *Runner) reached(ctx context.Context, position uint64) (ok, allLocal bool, err error) {
+// position, whether this instance owns every segment, and the statuses it
+// judged by: from memory when a segment this instance owns is behind or it
+// owns them all, otherwise from the store.
+func (r *Runner) reached(ctx context.Context, position uint64) (ok, allLocal bool, statuses []Status, err error) {
 	r.mu.Lock()
+	statuses = make([]Status, len(r.segs))
 	allLocal = true
-	for _, s := range r.segs {
+	behind := false
+	for i, s := range r.segs {
+		statuses[i] = s.status
 		if s.status.Owner != r.p.Owner {
 			allLocal = false
 			continue
 		}
 		if s.status.Position < position {
-			r.mu.Unlock()
-			return false, allLocal, nil
+			behind = true
 		}
 	}
 	r.mu.Unlock()
+	if behind {
+		return false, allLocal, statuses, nil
+	}
 	if allLocal {
-		return true, true, nil
+		return true, true, statuses, nil
 	}
 
-	statuses, err := r.store.LoadStatuses(ctx, r.p.Name)
+	stored, err := r.probe.Statuses(ctx)
 	if err != nil {
-		return false, false, err
+		return false, false, nil, err
 	}
-	if len(statuses) < r.segments {
-		return false, false, nil
-	}
-	for _, s := range statuses {
-		if s.Position < position {
-			return false, false, nil
-		}
-	}
-	return true, false, nil
+	return r.probe.reached(stored, position), false, stored, nil
 }
 
 // setStatus replaces seg's status after a commit or a status publish.

@@ -9,10 +9,25 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `projection.Probe` follows a projection from its store and name alone,
+  for a process that reads a read model another process keeps up to date:
+  `WaitUntil`, `IsLive` and `Statuses`, with `WithPollBackoff` and
+  `WithClaimTTL`. A wait that ends early returns a
+  `*projection.NotReachedError` naming the segment that is behind and, if
+  it stalled, why. `Runner.WaitUntil` returns it too, still wrapping the
+  context's error.
+
 - `telemetry.WithProjectionStoreTelemetry` traces each projection batch
   and rebuild and counts claims, and `telemetry.ObserveProjection` reports
   a runner's lag, position, phase and skipped events as gauges. Handlers
   wrapped with `WithEventTelemetry` show up as children of the batch.
+
+### Fixed
+
+- A stalled projection segment now publishes `Stalled` and its error to
+  the store. Before, other instances kept seeing the phase of its last
+  commit, usually `Live`, for as long as the stall lasted, as its claim
+  stayed fresh while it retried.
 
 ## [0.2.0] - 2026-10-18
 

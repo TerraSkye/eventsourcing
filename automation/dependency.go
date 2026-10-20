@@ -45,35 +45,10 @@ type Watcher interface {
 // Use it in an automation whose todo-list projection lives in another
 // service: the dependency pauses the automation until that projection has
 // caught up.
+//
+// It is a [projection.Probe]; use one directly to also wait for a position.
 func Remote(name string, store projection.Store, claimTTL time.Duration) Dependency {
-	if claimTTL <= 0 {
-		claimTTL = projection.DefaultClaimTTL
-	}
-	return &remote{name: name, store: store, claimTTL: claimTTL}
+	return projection.NewProbe(store, name, projection.WithClaimTTL(claimTTL))
 }
 
-type remote struct {
-	name     string
-	store    projection.Store
-	claimTTL time.Duration
-}
-
-func (r *remote) Name() string { return r.name }
-
-func (r *remote) IsLive(ctx context.Context) (bool, error) {
-	statuses, err := r.store.LoadStatuses(ctx, r.name)
-	if err != nil || len(statuses) == 0 {
-		return false, err
-	}
-	for _, s := range statuses {
-		if !s.IsLive(r.claimTTL) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-var (
-	_ Dependency = (*projection.Runner)(nil)
-	_ Watcher    = (*projection.Runner)(nil)
-)
+var _ Dependency = (*projection.Probe)(nil)

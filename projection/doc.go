@@ -105,6 +105,12 @@
 // to gate work that must not run on a half-built read model: a readiness
 // probe, an automation, or a test's wait with [Runner.WaitUntil].
 //
+// A process that reads a read model but does not run its projection, such
+// as an API in front of a worker, follows it with a [Probe] instead: it
+// needs only the [Store] and the projection's name, and offers the same
+// [Probe.WaitUntil] and [Probe.IsLive] from the status the runners
+// publish, including a [Stalled] segment and why it stalled.
+//
 // # Replaying
 //
 // Catching up and replaying are different things. A projection catches up
