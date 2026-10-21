@@ -271,6 +271,15 @@ if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
 
 `taskList.IsLive(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
 
+If the projection runs in another process, such as a worker, there is no runner to call. Wait on the projection store instead, with a `projection.Probe`; it needs only the store and the projection's name:
+
+```go
+probe := projection.NewProbe(store, "task-list")
+if err := probe.WaitUntil(ctx, res.GlobalPosition); err != nil {
+    return err // a *projection.NotReachedError says which segment is behind, and why if it stalled
+}
+```
+
 ## Going further
 
 - **A durable read model.** Keep the task list in Postgres with `postgres.NewProjectionStore`: the handler's writes and the checkpoint commit in one transaction, so a restart resumes where it left off instead of starting over.

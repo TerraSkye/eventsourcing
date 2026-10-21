@@ -69,6 +69,9 @@ type Runner struct {
 	store    Store
 	segments int // normalized: at least 1
 
+	// probe reads the status other instances publish for their segments.
+	probe *Probe
+
 	// fingerprint identifies p.EventTypes; see Checkpoint.Fingerprint.
 	fingerprint string
 
@@ -193,6 +196,11 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		pendingReplays: map[int][]*replayRequest{},
 		changed:        make(chan struct{}),
 	}
+	r.probe = NewProbe(store, p.Name,
+		WithPollInterval(p.PollInterval),
+		WithClaimTTL(p.ClaimTTL),
+	)
+	r.probe.segments = segments
 	for i := range r.segs {
 		r.segs[i] = &segmentState{
 			status: Status{Phase: Starting, Version: p.Version, Segment: i},

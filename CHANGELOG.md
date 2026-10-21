@@ -7,12 +7,36 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Breaking
+
+- `automation.Remote` is removed. Pass a `projection.Probe` instead, which
+  implements `automation.Dependency`:
+  `projection.NewProbe(store, name, projection.WithClaimTTL(claimTTL))`.
+
 ### Added
+
+- `projection.Probe` follows a projection from its store and name alone,
+  for a process that reads a read model another process keeps up to date:
+  `WaitUntil` and `IsLive`, with `WithPollInterval` and
+  `WithClaimTTL`. Concurrent waits share one read of the store per
+  interval, and a failing store delays waits rather than ending them. A
+  wait its context ends returns a `*projection.NotReachedError`, whose
+  `Behind` names the segment that held it up and whose `StoreErr` holds a
+  store failure. `Runner.WaitUntil` returns it too, still matching the
+  context's error with `errors.Is`. A `Probe` is an
+  `automation.Dependency`.
 
 - `telemetry.WithProjectionStoreTelemetry` traces each projection batch
   and rebuild and counts claims, and `telemetry.ObserveProjection` reports
   a runner's lag, position, phase and skipped events as gauges. Handlers
   wrapped with `WithEventTelemetry` show up as children of the batch.
+
+### Fixed
+
+- A stalled projection segment now publishes `Stalled` and its error to
+  the store. Before, other instances kept seeing the phase of its last
+  commit, usually `Live`, for as long as the stall lasted, as its claim
+  stayed fresh while it retried.
 
 ## [0.2.0] - 2026-10-18
 
