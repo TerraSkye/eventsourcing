@@ -87,8 +87,18 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // event into initialState with evolve; passes the resulting state and the
 // command to decide to get the events to persist; wraps them in
 // [Envelope]s, stamping each with a new UUID, the next sequential version,
-// the current time, and any metadata from functions added via
-// [WithMetadataExtractor]; and saves them with [EventStore.Save].
+// the current time, and metadata; and saves them with [EventStore.Save].
+//
+// The metadata holds the command's type under "command_type" and an ID for
+// the call under "command_id", the same across retries, overlaid with
+// whatever functions added via [WithMetadataExtractor] return.
+//
+// Each event joins the chain of whatever caused the command:
+// [Envelope.CorrelationID] and [Envelope.CausationID] are copied from ctx
+// ([CorrelationIDFromContext], [CausationIDFromContext]), which every event
+// bus and the projection runner fill in for the event being handled. With
+// no correlation in ctx, as for a command from an API request, the events
+// start a chain named after the first of them, with no causation.
 //
 // The [StreamState] configured via [WithStreamState] (default [Any])
 // determines how a save conflict is handled. [Any] and [StreamExists] don't
@@ -168,6 +178,9 @@ func NewCommandHandler[T any, C Command](
 	return func(ctx context.Context, command C) (AppendResult, error) {
 		// the stream ID for the given command
 		var streamID = options.StreamNamer(ctx, command)
+		// identifies this call in the events' metadata, the same across
+		// retries
+		var commandID = uuid.NewString()
 		// the state we will decide against
 		var state = initialState()
 		// where the next read starts; advances with each event folded, so a
@@ -220,7 +233,10 @@ func NewCommandHandler[T any, C Command](
 
 			// --- Wrap events in envelopes ---
 			envelopes := make([]Envelope, len(events))
-			baseMetadata := make(map[string]any)
+			baseMetadata := map[string]any{
+				"command_type": command.CommandType(),
+				"command_id":   commandID,
+			}
 			for _, fn := range options.MetadataFuncs {
 				maps.Copy(baseMetadata, fn(ctx))
 			}
@@ -236,6 +252,18 @@ func NewCommandHandler[T any, C Command](
 					Version:    nextVersion + uint64(i),
 					OccurredAt: time.Now(),
 				}
+			}
+
+			// The events join the chain of whatever caused the command;
+			// without one, they start a chain named after the first event.
+			correlationID := CorrelationIDFromContext(ctx)
+			if correlationID == "" {
+				correlationID = envelopes[0].EventID.String()
+			}
+			causationID := CausationIDFromContext(ctx)
+			for i := range envelopes {
+				envelopes[i].CorrelationID = correlationID
+				envelopes[i].CausationID = causationID
 			}
 
 			// --- Persist events ---

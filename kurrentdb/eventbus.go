@@ -296,6 +296,7 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 			}
 		}
 
+		correlationID, causationID := splitChain(metaData)
 		envelope := &cqrs.Envelope{
 			EventID:        kEvent.Event.Event.EventID, // or use kEvent.ID if available
 			StreamID:       kEvent.Event.Event.StreamID,
@@ -304,6 +305,8 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 			Version:        kEvent.Event.Event.EventNumber,
 			GlobalPosition: kEvent.Event.Event.Position.Commit,
 			OccurredAt:     kEvent.Event.Event.CreatedDate,
+			CorrelationID:  correlationID,
+			CausationID:    causationID,
 		}
 
 		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, envelope), envelope.Event); err != nil {

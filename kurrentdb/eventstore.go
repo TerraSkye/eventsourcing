@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"strings"
 	"time"
@@ -136,7 +137,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			)
 		}
 
-		metaData, err := json.Marshal(ev.Metadata)
+		metaData, err := encodeMetadata(ev)
 
 		if err != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
@@ -491,9 +492,10 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 	}
 
 	var metadata map[string]any
-	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil {
+	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any) // fallback to empty map
 	}
+	correlationID, causationID := splitChain(metadata)
 
 	return &eventsourcing.Envelope{
 		EventID:        rec.EventID,
@@ -503,7 +505,40 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 		Version:        rec.EventNumber + 1,
 		GlobalPosition: rec.Position.Commit,
 		OccurredAt:     rec.CreatedDate,
+		CorrelationID:  correlationID,
+		CausationID:    causationID,
 	}, nil
+}
+
+// KurrentDB's own metadata keys for an event's chain, which its tooling and
+// its $by_correlation_id projection read.
+const (
+	correlationIDKey = "$correlationId"
+	causationIDKey   = "$causationId"
+)
+
+// encodeMetadata returns env's Metadata as JSON, with its chain IDs added
+// under KurrentDB's keys.
+func encodeMetadata(env eventsourcing.Envelope) ([]byte, error) {
+	md := make(map[string]any, len(env.Metadata)+2)
+	maps.Copy(md, env.Metadata)
+	if env.CorrelationID != "" {
+		md[correlationIDKey] = env.CorrelationID
+	}
+	if env.CausationID != "" {
+		md[causationIDKey] = env.CausationID
+	}
+	return json.Marshal(md)
+}
+
+// splitChain removes the chain IDs from md, decoded from an event's
+// metadata, and returns them.
+func splitChain(md map[string]any) (correlationID, causationID string) {
+	correlationID, _ = md[correlationIDKey].(string)
+	causationID, _ = md[causationIDKey].(string)
+	delete(md, correlationIDKey)
+	delete(md, causationIDKey)
+	return correlationID, causationID
 }
 
 // Close closes the underlying KurrentDB client connection.

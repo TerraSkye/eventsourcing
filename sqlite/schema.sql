@@ -12,10 +12,13 @@ CREATE TABLE IF NOT EXISTS events (
     payload         BLOB    NOT NULL,
     metadata        BLOB,
     occurred_at     INTEGER NOT NULL, -- Unix time in nanoseconds, UTC
+    correlation_id  TEXT    NOT NULL DEFAULT '',
+    causation_id    TEXT    NOT NULL DEFAULT '',
     UNIQUE (stream_id, stream_position)
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type, id);
+CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events (correlation_id);
 
 -- Event bus: the position each subscription has delivered up to.
 CREATE TABLE IF NOT EXISTS event_subscriptions (

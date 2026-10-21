@@ -328,6 +328,8 @@ func (f *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			Version:        events[i].Version,
 			GlobalPosition: events[i].GlobalPosition,
 			OccurredAt:     events[i].OccurredAt,
+			CorrelationID:  events[i].CorrelationID,
+			CausationID:    events[i].CausationID,
 		}
 
 		serializedData, err := json.Marshal(z)
@@ -508,6 +510,8 @@ func readEventFile(path string) (*cqrs.Envelope, error) {
 		Version:        stored.Version,
 		GlobalPosition: stored.GlobalPosition,
 		OccurredAt:     stored.OccurredAt,
+		CorrelationID:  stored.CorrelationID,
+		CausationID:    stored.CausationID,
 	}, nil
 }
 
@@ -620,6 +624,8 @@ func (f *EventStore) loadFromDir(ctx context.Context, dir string, from cqrs.Stre
 				Version:        storedEv.Version,
 				GlobalPosition: storedEv.GlobalPosition,
 				OccurredAt:     storedEv.OccurredAt,
+				CorrelationID:  storedEv.CorrelationID,
+				CausationID:    storedEv.CausationID,
 			}
 
 			return &envelope, nil
@@ -681,4 +687,6 @@ type storedEvent struct {
 	Version        uint64          `json:"version"`
 	GlobalPosition uint64          `json:"global_version"` // JSON name predates the rename; kept for files on disk
 	OccurredAt     time.Time       `json:"occurred_at"`
+	CorrelationID  string          `json:"correlation_id,omitempty"`
+	CausationID    string          `json:"causation_id,omitempty"`
 }

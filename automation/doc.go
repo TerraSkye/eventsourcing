@@ -104,9 +104,10 @@
 // work that may hang should set its own deadline well below
 // [Definition.Lease].
 //
-// The work function receives a ctx carrying the automation's name as
-// causation (see eventsourcing.CausationFromContext), so events recorded
-// by its commands can be traced back to it.
+// The events Work's commands record join the chain of the event that put
+// the item on the todo list when [Definition.Chain] says which that was;
+// otherwise each item's work starts a new chain. See
+// eventsourcing.Envelope.CorrelationID.
 //
 // # Waking up
 //

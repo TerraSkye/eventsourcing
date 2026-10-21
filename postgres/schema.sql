@@ -11,10 +11,17 @@ CREATE TABLE IF NOT EXISTS events (
     payload         BYTEA       NOT NULL,
     metadata        BYTEA,
     occurred_at     TIMESTAMPTZ NOT NULL,
+    correlation_id  TEXT        NOT NULL DEFAULT '',
+    causation_id    TEXT        NOT NULL DEFAULT '',
     UNIQUE (stream_id, stream_position)
 );
 
+-- Added after v0.2.0; adds the chain columns to an existing events table.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS causation_id   TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_events_stream_id ON events (stream_id);
+CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events (correlation_id);
 
 -- Event bus: subscription positions, and a NOTIFY after every insert so
 -- subscribers wake up without waiting for their poll.

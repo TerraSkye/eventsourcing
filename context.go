@@ -17,14 +17,21 @@ const (
 	globalPositionKey ctxKey = "global_position"
 	occurredAtKey     ctxKey = "occurredAt"
 	metadataKey       ctxKey = "metadata"
+	correlationIDKey  ctxKey = "correlationID"
 	causationIDKey    ctxKey = "causationID"
 )
 
 // WithEnvelope returns a copy of ctx carrying env's stream ID, aggregate ID,
 // event ID, version, global position, occurred-at time, and metadata,
-// retrievable via the *FromContext functions below. It does not carry a
-// causation ID; use [WithCausation] for that. The aggregate ID is "" if
-// env.Event is nil.
+// retrievable via the *FromContext functions below. The aggregate ID is ""
+// if env.Event is nil.
+//
+// It also puts the work done under ctx in env's chain: the causation ID
+// becomes env's EventID and the correlation ID env's CorrelationID, so a
+// command sent while handling env produces events caused by it. An event
+// stored without a CorrelationID counts as the root of its chain, its own
+// EventID the correlation. Every event bus and the projection runner call
+// WithEnvelope before a handler runs.
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	var aggregateID string
 	if env.Event != nil {
@@ -38,6 +45,17 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = context.WithValue(ctx, globalPositionKey, env.GlobalPosition)
 	ctx = context.WithValue(ctx, occurredAtKey, env.OccurredAt)
 	ctx = context.WithValue(ctx, metadataKey, env.Metadata)
+
+	var eventID, correlationID string
+	if env.EventID != uuid.Nil {
+		eventID = env.EventID.String()
+	}
+	correlationID = env.CorrelationID
+	if correlationID == "" {
+		correlationID = eventID
+	}
+	ctx = WithCorrelationID(ctx, correlationID)
+	ctx = WithCausationID(ctx, eventID)
 	return ctx
 }
 
@@ -118,20 +136,40 @@ func MetadataFromContext(ctx context.Context) map[string]any {
 	return nil
 }
 
-// WithCausation returns a copy of ctx carrying causation, the identifier of
-// whatever caused the work now happening under ctx — for example, a
-// command's type name — for handlers to attach to events or log entries.
-func WithCausation(ctx context.Context, causation string) context.Context {
-	ctx = context.WithValue(ctx, causationIDKey, causation)
-	return ctx
+// WithCorrelationID returns a copy of ctx carrying correlationID, the chain
+// the work under ctx belongs to; see [Envelope.CorrelationID]. Use it to
+// start a chain deliberately, for example from an API request's ID. Pass
+// "" to start a new chain, which [NewCommandHandler] then names after the
+// first event it appends.
+func WithCorrelationID(ctx context.Context, correlationID string) context.Context {
+	return context.WithValue(ctx, correlationIDKey, correlationID)
 }
 
-// CausationFromContext returns the causation ID set by [WithCausation], or
-// "" if ctx carries none.
-func CausationFromContext(ctx context.Context) string {
+// CorrelationIDFromContext returns the correlation ID set by
+// [WithCorrelationID] or [WithEnvelope], or "" if ctx carries none.
+func CorrelationIDFromContext(ctx context.Context) string {
+	if v := ctx.Value(correlationIDKey); v != nil {
+		if id, ok := v.(string); ok {
+			return id
+		}
+	}
+	return ""
+}
+
+// WithCausationID returns a copy of ctx carrying causationID, the EventID of
+// the event that caused the work under ctx; see [Envelope.CausationID].
+// [WithEnvelope] sets it for every handled event, so call it only for work
+// that event handling does not deliver, such as an automation's.
+func WithCausationID(ctx context.Context, causationID string) context.Context {
+	return context.WithValue(ctx, causationIDKey, causationID)
+}
+
+// CausationIDFromContext returns the causation ID set by [WithCausationID]
+// or [WithEnvelope], or "" if ctx carries none.
+func CausationIDFromContext(ctx context.Context) string {
 	if v := ctx.Value(causationIDKey); v != nil {
-		if causation, ok := v.(string); ok {
-			return causation
+		if id, ok := v.(string); ok {
+			return id
 		}
 	}
 	return ""

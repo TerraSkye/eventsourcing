@@ -34,6 +34,11 @@ const (
 	AttrEventGlobalPos = attribute.Key("eventsourcing.event.global_position")
 	AttrEventStreamPos = attribute.Key("eventsourcing.event.stream_position")
 
+	// Chain attributes: see eventsourcing.Envelope.CorrelationID and
+	// CausationID.
+	AttrCorrelationID = attribute.Key("eventsourcing.correlation.id")
+	AttrCausationID   = attribute.Key("eventsourcing.causation.id")
+
 	// Query attributes
 	AttrQueryType   = attribute.Key("eventsourcing.query.type")
 	AttrQueryID     = attribute.Key("eventsourcing.query.id")
@@ -235,3 +240,16 @@ var (
 		metric.WithUnit("{rebuild}"),
 	)
 )
+
+// chainAttrs returns the chain attributes for the correlation and causation
+// IDs that are set.
+func chainAttrs(correlationID, causationID string) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if correlationID != "" {
+		attrs = append(attrs, AttrCorrelationID.String(correlationID))
+	}
+	if causationID != "" {
+		attrs = append(attrs, AttrCausationID.String(causationID))
+	}
+	return attrs
+}

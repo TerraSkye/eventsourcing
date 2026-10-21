@@ -51,12 +51,10 @@ func (t TelemetryStore) baseAttrs() []attribute.KeyValue {
 }
 
 // Save appends events to the underlying [eventsourcing.EventStore] inside a
-// client span tagged with the stream ID and requested revision. Before
-// saving, it stamps each event's Metadata with the current trace's
-// causation ID (from [eventsourcing.CausationFromContext]), correlation ID
-// (the trace ID, if the span has one), and injected trace-propagation
-// headers, so a later [TelemetryEventBus] or event handler can link back to
-// this trace. It records [EventStoreDuration], [EventStoreSaves], and
+// client span tagged with the stream ID, the requested revision, and the
+// events' correlation and causation IDs. Before saving, it stamps each
+// event's Metadata with injected trace-propagation headers, so a later
+// [TelemetryEventBus] or event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
 // [EventsAppended] for every call, and [EventStoreErrors] if the underlying
 // store returns an error.
 func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
@@ -71,6 +69,9 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 		AttrStreamID.String(streamID),
 		AttrStreamVersion.Int64(revision.ToRawInt64()),
 	)
+	if len(events) > 0 {
+		spanAttrs = append(spanAttrs, chainAttrs(events[0].CorrelationID, events[0].CausationID)...)
+	}
 
 	spanName := "append eventstore"
 	if t.cfg.Operation != "" {
@@ -90,23 +91,11 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 
 	{
 		carrier := propagation.MapCarrier{}
-
-		causationId := eventsourcing.CausationFromContext(ctx)
-
 		otel.GetTextMapPropagator().Inject(ctx, carrier)
 		for i := range events {
-
-			md := make(map[string]any, len(events[i].Metadata)+len(carrier)+2)
+			md := make(map[string]any, len(events[i].Metadata)+len(carrier))
 			maps.Copy(md, events[i].Metadata)
 			events[i].Metadata = md
-
-			if causationId != "" {
-				events[i].Metadata["causation_id"] = causationId
-			}
-
-			if span.SpanContext().HasTraceID() {
-				events[i].Metadata["correlation_id"] = span.SpanContext().TraceID().String()
-			}
 
 			for key, value := range carrier {
 				events[i].Metadata[key] = value

@@ -27,12 +27,11 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 
 	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
 		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
-			ctx = eventsourcing.WithCausation(ctx, cmd.CommandType())
-
 			attr := []attribute.KeyValue{
 				AttrCommandType.String(cmd.CommandType()),
 				AttrAggregateID.String(cmd.AggregateID()),
 			}
+			attr = append(attr, chainAttrs(eventsourcing.CorrelationIDFromContext(ctx), eventsourcing.CausationIDFromContext(ctx))...)
 			attr = append(attr, cfg.Attributes...)
 
 			if cfg.GetAttributes != nil {
@@ -138,7 +137,6 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 	}
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
-		ctx = eventsourcing.WithCausation(ctx, cmd.CommandType())
 		// Clone before appending: baseAttributes is shared across every call
 		// to this handler, and appending directly to it would alias its
 		// backing array across concurrent calls whenever it has spare
@@ -147,6 +145,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 			AttrAggregateID.String(cmd.AggregateID()),
 			AttrCommandType.String(cmd.CommandType()),
 		)
+		attr = append(attr, chainAttrs(eventsourcing.CorrelationIDFromContext(ctx), eventsourcing.CausationIDFromContext(ctx))...)
 
 		if cfg.GetAttributes != nil {
 			attr = append(attr, cfg.GetAttributes(ctx)...)

@@ -304,7 +304,7 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 	}
 
 	query := `
-		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 		FROM events
 		WHERE id > $1
 		  AND xmin::text::bigint < pg_snapshot_xmin(pg_current_snapshot())::text::bigint`

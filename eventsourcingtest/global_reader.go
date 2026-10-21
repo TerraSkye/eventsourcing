@@ -81,6 +81,7 @@ func GlobalReaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, re
 		"AtEnd":            g.atEnd,
 		"Head":             g.head,
 		"AppendResult":     g.appendResult,
+		"ChainRoundTrip":   g.chainRoundTrip,
 		"ConcurrentSaves":  g.concurrentSaves,
 	})
 }
@@ -353,6 +354,27 @@ func (g *globalAcceptance) appendResult(t *testing.T) {
 	}
 	if want := got[2].GlobalPosition; res.GlobalPosition != want {
 		t.Errorf("AppendResult.GlobalPosition = %d, want %d, the GlobalPosition of the last event appended", res.GlobalPosition, want)
+	}
+}
+
+// chainRoundTrip covers that ReadAll returns the CorrelationID and
+// CausationID each event was saved with, which an event bus or projection
+// passes on to the commands its handlers send.
+func (g *globalAcceptance) chainRoundTrip(t *testing.T) {
+	start := g.headNow(t)
+	id := newStreamID()
+	in := envelopes(id, 1, 2)
+	in[1].CausationID = ""
+	g.save(t, in, eventsourcing.NoStream{})
+
+	got := g.readToEnd(t, start, eventsourcing.ReadOptions{}, id)
+	if len(got) != 2 {
+		t.Fatalf("ReadAll returned %d of this test's events, want 2", len(got))
+	}
+	for i, e := range got {
+		if e.CorrelationID != in[i].CorrelationID || e.CausationID != in[i].CausationID {
+			t.Errorf("event %d chain = %q/%q, want %q/%q", i, e.CorrelationID, e.CausationID, in[i].CorrelationID, in[i].CausationID)
+		}
 	}
 }
 
