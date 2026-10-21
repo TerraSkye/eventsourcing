@@ -355,13 +355,6 @@ func TestRunner_Panics(t *testing.T) {
 			c := newCounter()
 			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewProjectionStore())
 		}},
-		{"segments with version", func() {
-			c := newCounter()
-			projection.NewRunner(projection.Definition{
-				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents,
-				Segments: 2, SegmentKey: projection.ByStreamID, Version: 1, Reset: c.Reset,
-			}, &nopReader{}, memory.NewProjectionStore())
-		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

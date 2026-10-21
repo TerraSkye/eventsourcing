@@ -202,10 +202,19 @@ type Store interface {
 	// postgres.Tx.
 	Commit(ctx context.Context, l Lease, cp Checkpoint, status Status, fn func(ctx context.Context) error) error
 
-	// Reset runs wipe to empty the read model and, in the same unit of
-	// work, moves the segment's checkpoint back to Position 0 with
-	// Version newVersion, ReplayUntil set to the position it had reached,
-	// and an empty Fingerprint. It is fenced like Commit.
+	// Reset rebuilds the whole projection l.Name, every segment at once,
+	// as the read model is one and wipe empties all of it. In one unit of
+	// work it runs wipe and moves every segment's checkpoint back to
+	// Position 0 with Version newVersion, ReplayUntil set to the position
+	// that segment had reached, and an empty Fingerprint. It releases every
+	// segment's claim except l's, so an instance still working one gets
+	// [ErrClaimLost] on its next Commit instead of writing into the wiped
+	// read model, and claims it again at the new checkpoint. A store that
+	// implements [DeadLetterStore] also deletes every dead letter of the
+	// projection in that unit of work: the replay runs each event through
+	// the handler again, and records the ones that still fail afresh.
+	// Reset waits for Commits already in progress to finish, so none of
+	// their writes lands after wipe. It is fenced on l like Commit.
 	Reset(ctx context.Context, l Lease, newVersion int, wipe func(ctx context.Context) error) error
 
 	// Release gives the segment up at once instead of waiting for its

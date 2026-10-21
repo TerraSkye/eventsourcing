@@ -145,27 +145,62 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 	})
 }
 
-// Reset implements [projection.Store], in one transaction that locks the
-// segment's row like Commit does.
+// Reset implements [projection.Store], in one transaction that first locks
+// every segment row of the projection in segment order: Commits in
+// progress finish first, and concurrent Resets cannot deadlock. On the
+// right-hand side of SET, position and owner are the row's values before
+// the update.
 func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	return s.runTx(ctx, "reset", l, func(ctx context.Context, tx pgx.Tx) error {
-		oldPos, err := lockOwned(ctx, tx, l)
+		rows, err := tx.Query(ctx,
+			`SELECT segment, owner, epoch FROM projection_segments
+			 WHERE name = $1 ORDER BY segment FOR UPDATE`,
+			l.Name,
+		)
 		if err != nil {
-			return err
+			return fmt.Errorf("postgres: lock segments of %q: %w", l.Name, err)
 		}
+		held := false
+		for rows.Next() {
+			var (
+				segment int
+				owner   *string
+				epoch   uint64
+			)
+			if err := rows.Scan(&segment, &owner, &epoch); err != nil {
+				rows.Close()
+				return fmt.Errorf("postgres: lock segments of %q: %w", l.Name, err)
+			}
+			if segment == l.Segment && owner != nil && *owner == l.Owner && epoch == l.Epoch {
+				held = true
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("postgres: lock segments of %q: %w", l.Name, err)
+		}
+		if !held {
+			return projection.ErrClaimLost
+		}
+
 		if err := wipe(ctx); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = $3, replay_until = $4, fingerprint = '',
-			    phase = 'starting', head = 0, last_error = NULL,
-			    heartbeat = clock_timestamp()
-			WHERE name = $1 AND segment = $2 AND owner = $5 AND epoch = $6`,
-			l.Name, l.Segment, newVersion, oldPos, l.Owner, l.Epoch,
+			SET replay_until = position, position = 0, version = $2, fingerprint = '',
+			    head = 0, last_error = NULL,
+			    phase = CASE WHEN segment = $3 THEN 'starting' ELSE 'standby' END,
+			    owner = CASE WHEN segment = $3 THEN owner END,
+			    heartbeat = CASE WHEN segment = $3 THEN clock_timestamp() ELSE heartbeat END
+			WHERE name = $1`,
+			l.Name, newVersion, l.Segment,
 		)
 		if err != nil {
-			return fmt.Errorf("postgres: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+			return fmt.Errorf("postgres: reset checkpoints of %q: %w", l.Name, err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM projection_dead_letters WHERE projection = $1`, l.Name); err != nil {
+			return fmt.Errorf("postgres: clear dead letters of %q: %w", l.Name, err)
 		}
 		return nil
 	})

@@ -12,9 +12,24 @@ release may break the API; every break is listed under **Breaking**.
 - `automation.Remote` is removed. Pass a `projection.Probe` instead, which
   implements `automation.Dependency`:
   `projection.NewProbe(store, name, projection.WithClaimTTL(claimTTL))`.
+- `projection.Store.Reset` now resets every segment of the projection, not
+  only the caller's: in one unit of work it runs wipe, moves every
+  segment's checkpoint back, keeps the caller's claim and releases the
+  others, and it waits for Commits in progress. A store that implements
+  `DeadLetterStore` also deletes the projection's dead letters in that
+  unit of work. The memory, Postgres and SQLite stores do this; a store
+  outside this module must too, and `projectiontest.StoreAcceptanceTest`
+  checks it.
+- `projection.ErrRebuildSegmented` is removed, as segmented projections
+  can now be rebuilt.
 
 ### Added
 
+- Segmented projections rebuild in place. A `Definition.Version` bump or
+  `Runner.Rebuild` wipes the read model once and moves every segment back
+  to the start, and instances still working a segment are fenced off and
+  resume from there. An `EventTypes` change still stalls a segmented
+  projection unless `Version` is bumped with it.
 - `projection.Probe` follows a projection from its store and name alone,
   for a process that reads a read model another process keeps up to date:
   `WaitUntil` and `IsLive`, with `WithPollInterval` and
@@ -32,6 +47,20 @@ release may break the API; every break is listed under **Breaking**.
   wrapped with `WithEventTelemetry` show up as children of the batch.
 
 ### Fixed
+
+- A rebuild runs a parked stream through the handler again. Before, the
+  dead letters survived the reset and kept the stream parked for the
+  whole replay, so even the events applied before the failure were left
+  out of the rebuilt read model, and every event of the stream was
+  recorded as a dead letter a second time.
+- `Runner.ReplayStream` applies an event once when its position carries
+  more than one dead letter, as the memory store can leave when a Commit
+  fails after recording one.
+
+- A runner whose `Definition.Version` is below the stored one, such as an
+  instance of the previous deployment during a rollout, now stands by.
+  Before, it rebuilt the projection back to its own version, and old and
+  new instances kept resetting each other until the rollout finished.
 
 - A stalled projection segment now publishes `Stalled` and its error to
   the store. Before, other instances kept seeing the phase of its last

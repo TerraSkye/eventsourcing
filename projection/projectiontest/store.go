@@ -102,6 +102,8 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"WipeErrorKeepsState": s.resetWipeErrorKeepsState,
 		"NotOwner":            s.resetNotOwner,
 		"StaleEpoch":          s.resetStaleEpoch,
+		"CoversEverySegment":  s.resetCoversEverySegment,
+		"WaitsForCommit":      s.resetWaitsForCommit,
 	})
 	s.group(t, "Release", map[string]func(*testing.T){
 		"LetsOtherClaim": s.releaseLetsOtherClaim,
@@ -127,6 +129,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 			"Delete":              s.deadLetterDelete,
 			"SegmentsIndependent": s.deadLetterSegmentsIndependent,
 			"UnknownName":         s.deadLetterUnknownName,
+			"ClearedByReset":      s.deadLetterClearedByReset,
 		})
 	}
 }
@@ -512,6 +515,88 @@ func (s *storeAcceptance) resetNotOwner(t *testing.T) {
 	}
 }
 
+// resetCoversEverySegment covers that Reset rebuilds the whole projection:
+// every segment's checkpoint moves back, the caller keeps its claim, and
+// every other claim is released, so its holder can no longer commit into
+// the wiped read model but can claim the segment again at once.
+func (s *storeAcceptance) resetCoversEverySegment(t *testing.T) {
+	name := s.newProjection(t, 3)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, other, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, Fingerprint: "fp-all"})
+	s.commit(t, name, 1, other, projection.Checkpoint{Position: 6, Version: 1, Fingerprint: "fp-all"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	for _, st := range s.statuses(t, name) {
+		if st.Position != 0 || st.Version != 2 {
+			t.Errorf("segment %d after Reset: Position %d, Version %d; want 0, 2", st.Segment, st.Position, st.Version)
+		}
+		if st.Segment != 0 && (st.Owner != "" || st.Phase != projection.Standby) {
+			t.Errorf("segment %d after Reset: Owner %q, Phase %s; want released and standby", st.Segment, st.Owner, st.Phase)
+		}
+	}
+
+	err := s.store.Commit(t.Context(), s.lease(name, 1, other), projection.Checkpoint{Position: 9, Version: 1}, projection.Status{}, nop)
+	if !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("Commit by the other segment's holder after Reset: got %v, want ErrClaimLost", err)
+	}
+
+	for seg, want := range map[int]projection.Checkpoint{
+		1: {Version: 2, ReplayUntil: 6},
+		2: {Version: 2},
+	} {
+		if got := s.claim(t, name, seg, other, longTTL); got != want {
+			t.Errorf("segment %d claimed after Reset: got %+v, want %+v", seg, got, want)
+		}
+	}
+	if got := s.claim(t, name, 0, owner, longTTL); got != (projection.Checkpoint{Version: 2, ReplayUntil: 8}) {
+		t.Errorf("segment 0 after Reset: got %+v, want its caller to keep it at the new checkpoint", got)
+	}
+}
+
+// resetWaitsForCommit covers that a Reset does not run while another
+// segment's Commit is in progress, so no batch writes into the read model
+// after wipe has emptied it.
+func (s *storeAcceptance) resetWaitsForCommit(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, other, longTTL)
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		committed <- s.store.Commit(t.Context(), s.lease(name, 1, other), projection.Checkpoint{Position: 4, Version: 1}, projection.Status{}, func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	reset := make(chan error, 1)
+	go func() { reset <- s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop) }()
+	select {
+	case err := <-reset:
+		close(release)
+		t.Fatalf("Reset returned %v while another segment's Commit was in progress, want it to wait", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-committed; err != nil {
+		t.Fatalf("Commit that started before the Reset: %v", err)
+	}
+	if err := <-reset; err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if got := s.claim(t, name, 1, other, longTTL); got != (projection.Checkpoint{Version: 2, ReplayUntil: 4}) {
+		t.Fatalf("segment 1 after the Reset: got %+v, want it reset after the Commit landed", got)
+	}
+}
+
 func (s *storeAcceptance) resetStaleEpoch(t *testing.T) {
 	name := s.newProjection(t, 1)
 	stale, _ := s.staleLease(t, name)
@@ -732,6 +817,27 @@ func (s *storeAcceptance) deadLetterUnknownName(t *testing.T) {
 }
 
 // saveDeadLetters records ds for segment in one Commit by owner.
+// deadLetterClearedByReset covers that Reset deletes the dead letters of
+// every segment: the replay runs those events through the handler again,
+// so letters left behind would park their streams for the whole replay and
+// be recorded a second time.
+func (s *storeAcceptance) deadLetterClearedByReset(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, owner, longTTL)
+	s.saveDeadLetters(t, name, 0, projection.DeadLetter{Position: 1, StreamID: "order-1", EventType: "projectiontest.Event", Error: "a"})
+	s.saveDeadLetters(t, name, 1, projection.DeadLetter{Position: 1, StreamID: "order-2", EventType: "projectiontest.Event", Error: "b"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	for seg := range 2 {
+		if got := s.deadLetters(t, name, seg); len(got) != 0 {
+			t.Errorf("segment %d dead letters after Reset = %+v, want none", seg, got)
+		}
+	}
+}
+
 func (s *storeAcceptance) saveDeadLetters(t *testing.T, name string, segment int, ds ...projection.DeadLetter) {
 	t.Helper()
 	dls := s.store.(projection.DeadLetterStore)

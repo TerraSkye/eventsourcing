@@ -128,12 +128,18 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 	}
 }
 
-// setStatus replaces seg's status after a commit or a status publish.
-func (r *Runner) setStatus(seg int, s Status) {
+// setStatus replaces seg's status after a commit or a status publish made
+// under l. It does nothing when l is no longer seg's lease: a rebuild reset
+// the projection after the call reached the store, and the position it
+// reports was wiped.
+func (r *Runner) setStatus(seg int, l Lease, s Status) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.segs[seg].lease != l {
+		return
+	}
 	r.segs[seg].status = s
 	r.signalChange()
-	r.mu.Unlock()
 }
 
 // setPhase moves seg to phase p, recording lastErr for [Stalled], and
