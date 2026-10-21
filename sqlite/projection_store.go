@@ -148,28 +148,33 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 }
 
 // Reset implements [projection.Store], in one transaction fenced like
-// Commit.
+// Commit. The transaction holds the database's write lock, so Commits run
+// before or after it, never during. On the right-hand side of SET,
+// position and owner are the row's values before the update.
 func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	return s.runTx(ctx, "reset", l.Name, func(ctx context.Context, tx *sql.Tx) error {
-		oldPos, err := ownedPosition(ctx, tx, l)
-		if err != nil {
+		if _, err := ownedPosition(ctx, tx, l); err != nil {
 			return err
 		}
 		if err := wipe(ctx); err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = ?, replay_until = ?, fingerprint = '',
-			    phase = 'starting', head = 0, last_error = NULL,
-			    heartbeat = `+nowMS+`
-			WHERE name = ? AND segment = ? AND owner = ? AND epoch = ?`,
-			newVersion, int64(oldPos), l.Name, l.Segment, l.Owner, int64(l.Epoch),
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+			SET replay_until = position, position = 0, version = ?2, fingerprint = '',
+			    head = 0, last_error = NULL,
+			    phase = CASE WHEN segment = ?3 THEN 'starting' ELSE 'standby' END,
+			    owner = CASE WHEN segment = ?3 THEN owner END,
+			    heartbeat = CASE WHEN segment = ?3 THEN `+nowMS+` ELSE heartbeat END
+			WHERE name = ?1`,
+			l.Name, newVersion, l.Segment,
+		); err != nil {
+			return fmt.Errorf("sqlite: reset checkpoints of %q: %w", l.Name, err)
 		}
-		return claimHeld(res)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM projection_dead_letters WHERE projection = ?`, l.Name); err != nil {
+			return fmt.Errorf("sqlite: clear dead letters of %q: %w", l.Name, err)
+		}
+		return nil
 	})
 }
 

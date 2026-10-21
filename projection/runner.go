@@ -30,17 +30,13 @@ var (
 	// Reset function registered.
 	ErrNoReset = errors.New("projection: rebuild requires a Reset function")
 
-	// ErrRebuildSegmented is returned by [Runner.Rebuild] on a segmented
-	// projection. A segmented projection is rebuilt by running it under a
-	// new name; see [Definition.Version].
-	ErrRebuildSegmented = errors.New("projection: segmented projections are rebuilt under a new name")
-
 	// ErrEventTypesChanged stalls a segment whose stored checkpoint was
 	// written for a different [Definition.EventTypes] than the runner's,
 	// when the runner cannot rebuild: the projection has no Reset, or it is
-	// segmented. Carrying on would never apply the history of an added
-	// type. Bump [Definition.Version], or run the projection under a new
-	// Name.
+	// segmented, where old and new instances of a rollout would otherwise
+	// reset each other. Carrying on would never apply the history of an
+	// added type. Bump [Definition.Version] with the change, or run the
+	// projection under a new Name.
 	ErrEventTypesChanged = errors.New("projection: EventTypes changed since the checkpoint was written")
 
 	// ErrStreamParked is the cause recorded for an event that was skipped
@@ -136,8 +132,7 @@ func (req *rebuildRequest) finish(err error) {
 //
 // It panics on wiring mistakes that would otherwise fail silently: an empty
 // Name, nil Handler/reader/store, no EventTypes or an unregistered one,
-// Version > 0 without Reset, or Segments > 1 without SegmentKey or with a
-// Version.
+// Version > 0 without Reset, or Segments > 1 without SegmentKey.
 func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Runner {
 	switch {
 	case p.Name == "":
@@ -157,9 +152,6 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 	segments := max(p.Segments, 1)
 	if segments > 1 && p.SegmentKey == nil {
 		panic(fmt.Sprintf("projection %q: Segments > 1 requires SegmentKey", p.Name))
-	}
-	if segments > 1 && p.Version != 0 {
-		panic(fmt.Sprintf("projection %q: a segmented projection cannot have a Version; rebuild it under a new Name", p.Name))
 	}
 	for _, name := range p.EventTypes {
 		if _, err := eventsourcing.NewEventByName(name); err != nil {
@@ -284,15 +276,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // ctx only bounds how long Rebuild waits: once requested, the rebuild runs
 // even if ctx ends first. Concurrent calls share one rebuild.
 //
-// Rebuild returns [ErrRebuildSegmented] on a segmented projection, [ErrNoReset]
-// when the projection has no Reset, and [ErrNotActive] when this instance
-// is not processing the projection, or stops before the rebuild ran. To
-// rebuild wherever the projection runs, bump [Definition.Version]; to
-// rebuild a segmented projection, run it under a new Name.
+// A rebuild covers every segment. The instance holding segment 0 runs it,
+// and the others claim their segments again at the reset checkpoint.
+//
+// Rebuild returns [ErrNoReset] when the projection has no Reset, and
+// [ErrNotActive] when this instance does not hold segment 0, or stops
+// before the rebuild ran. To rebuild wherever the projection runs, bump
+// [Definition.Version].
 func (r *Runner) Rebuild(ctx context.Context) error {
-	if r.segments > 1 {
-		return ErrRebuildSegmented
-	}
 	if r.p.Reset == nil {
 		return ErrNoReset
 	}
@@ -321,7 +312,7 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 // takeRebuild returns the pending rebuild request for seg, or nil, and
 // clears it.
 func (r *Runner) takeRebuild(seg int) *rebuildRequest {
-	if r.segments > 1 || seg != 0 {
+	if seg != 0 {
 		return nil
 	}
 	r.mu.Lock()
