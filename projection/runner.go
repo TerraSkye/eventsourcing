@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -198,7 +197,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		changed:        make(chan struct{}),
 	}
 	r.probe = NewProbe(store, p.Name,
-		WithPollBackoff(func() backoff.BackOff { return backoff.NewConstantBackOff(p.PollInterval) }),
+		WithPollInterval(p.PollInterval),
 		WithClaimTTL(p.ClaimTTL),
 	)
 	r.probe.segments = segments

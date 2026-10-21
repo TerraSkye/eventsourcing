@@ -129,7 +129,8 @@ type Definition[T any] struct {
 
 	// TodoList is the projection Claim reads from. The automation only
 	// claims work while it is live; pass a *projection.Runner when the
-	// projection runs in this program, or [Remote] when it runs elsewhere.
+	// projection runs in this program, or a *projection.Probe when it runs
+	// elsewhere.
 	TodoList Dependency
 
 	// Claim leases pending items; see [ClaimFunc].
@@ -158,7 +159,7 @@ type Definition[T any] struct {
 
 	// Interval is how long an idle automation waits before checking for
 	// work again when nothing nudges it. With a todo list in the same
-	// program nudges usually come first; with a [Remote] todo list the
+	// program nudges usually come first; with a todo list run elsewhere the
 	// interval decides how quickly new work is picked up. Default
 	// [DefaultInterval].
 	Interval time.Duration
