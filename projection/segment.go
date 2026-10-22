@@ -144,7 +144,9 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		switch {
 		case upgraded, typesChanged && r.p.Reset != nil && r.segments == 1:
 			var err error
-			if cp, err = r.rebuild(ctx, seg); err != nil {
+			cp, err = r.rebuild(ctx, seg)
+			r.rebuildTried(ctx, 0, err) // its Reset serves requests made meanwhile
+			if err != nil {
 				return err
 			}
 		case typesChanged:
@@ -283,6 +285,7 @@ func (r *Runner) reclaim(ctx context.Context, seg int) (Checkpoint, error) {
 func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
 	r.mu.Lock()
+	r.resetting = true // until the caller's rebuildTried
 	before := make([]Lease, len(r.segs))
 	for i, s := range r.segs {
 		before[i] = s.lease
@@ -291,18 +294,17 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
-	cp, err := r.reclaim(ctx, seg)
-	if err != nil {
-		return Checkpoint{}, err
-	}
+	// The read model is wiped now, whether or not the reclaim below
+	// succeeds: put every segment back at position 0 first, so no
+	// WaitUntil sees a position from before the wipe.
 	r.mu.Lock()
 	head := r.segs[seg].status.Head
 	for i, s := range r.segs {
-		if i == seg {
-			continue
-		}
 		s.status.Position = 0
 		s.status.Version = r.p.Version
+		if i == seg {
+			continue // Reset kept seg's claim
+		}
 		// The store released the segment. Retire the lease it was held
 		// under, so a commit that reached the store before the reset
 		// cannot write its wiped position back through setStatus. A
@@ -311,11 +313,16 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 			s.lease.Epoch = 0
 		}
 	}
+	r.signalChange()
 	r.mu.Unlock()
 	r.segs[seg].rebuilding = true
 	// The replay runs every event through the handler again, so nothing
 	// stays parked; Reset deleted the dead letters that parked it.
 	r.segs[seg].parked = map[string]bool{}
+	cp, err := r.reclaim(ctx, seg)
+	if err != nil {
+		return Checkpoint{}, err
+	}
 	r.setStatus(seg, r.lease(seg), Status{
 		Phase:    CatchingUp,
 		Position: cp.Position,

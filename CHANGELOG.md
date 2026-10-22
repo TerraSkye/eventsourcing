@@ -101,6 +101,11 @@ release may break the API; every break is listed under **Breaking**.
   moves to the end of the read, past events the segment does not handle.
   Before, it stayed at the last handled event, and waits on the store for
   the scanned positions hung until a new event arrived.
+- A rebuild whose reclaim fails after `Store.Reset` committed, and a
+  `Rebuild` that returns while its rebuild is still under way on this
+  instance, no longer let `WaitUntil` see positions from before the
+  wipe. A `Probe` wait no longer answers from statuses read before a
+  rebuild by an earlier wait.
 - `Store.Reset` keeps the larger of the current `ReplayUntil` and the
   position reached. Before, a rebuild during the replay lowered it, and
   `IsReplaying` reported events already in the log as new.

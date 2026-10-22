@@ -89,6 +89,9 @@ type Runner struct {
 	// rebuilt is closed and replaced after every rebuild segment 0 tries
 	// on this instance, for Rebuild to look at the store again.
 	rebuilt chan struct{}
+	// resetting reports that a rebuild on this instance is under way: its
+	// Store.Reset may have committed before the runner caught up in memory.
+	resetting bool
 	// rebuildFailed is the last rebuild request a rebuild on this
 	// instance failed to serve, and rebuildErr why.
 	rebuildFailed uint64
@@ -322,13 +325,18 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
 		}
-		if done >= n {
-			return nil
-		}
 		r.mu.Lock()
-		failed, failErr := r.rebuildFailed, r.rebuildErr
+		resetting, failed, failErr := r.resetting, r.rebuildFailed, r.rebuildErr
 		r.mu.Unlock()
-		if failed >= n {
+		switch {
+		case done >= n && !resetting:
+			return nil
+		case done >= n:
+			// Served by the rebuild under way here, whose Reset has
+			// committed: wait until the runner has caught up with it, so
+			// a WaitUntil after Rebuild does not see positions from
+			// before the wipe.
+		case failed >= n:
 			return failErr
 		}
 		select {
@@ -340,14 +348,16 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 	}
 }
 
-// rebuildTried records that segment 0 tried to serve rebuild request
-// requested, failing with err, and wakes the Rebuild calls waiting on this
+// rebuildTried records that a rebuild on this instance is over, having
+// tried to serve rebuild request requested (0 for one a Version change
+// started), failing with err, and wakes the Rebuild calls waiting on this
 // instance. A rebuild cut short by the claim moving or Run stopping has not
 // failed: whichever runner holds segment 0 next serves the request.
 func (r *Runner) rebuildTried(ctx context.Context, requested uint64, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err != nil && ctx.Err() == nil && !errors.Is(err, ErrClaimLost) {
+	r.resetting = false
+	if requested > 0 && err != nil && ctx.Err() == nil && !errors.Is(err, ErrClaimLost) {
 		r.rebuildFailed, r.rebuildErr = requested, err
 	}
 	close(r.rebuilt)

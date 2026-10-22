@@ -422,3 +422,86 @@ func TestRunner_ReplayRequestsFinishAfterClaimLost(t *testing.T) {
 		}
 	}
 }
+
+// flakyReclaimStore fails the first Claim after a successful Reset, as a
+// store with a transient connection error would.
+type flakyReclaimStore struct {
+	projection.Store
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (s *flakyReclaimStore) Reset(ctx context.Context, l projection.Lease, v int, wipe func(context.Context) error) error {
+	err := s.Store.Reset(ctx, l, v, wipe)
+	if err == nil {
+		s.mu.Lock()
+		s.failNext = true
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *flakyReclaimStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+	s.mu.Lock()
+	fail := s.failNext
+	s.failNext = false
+	s.mu.Unlock()
+	if fail {
+		return projection.Lease{}, projection.Checkpoint{}, false, errors.New("transient claim failure")
+	}
+	return s.Store.Claim(ctx, l, ttl)
+}
+
+// TestRunner_RebuildFailedReclaimResetsPositions covers a rebuild whose
+// Store.Reset commits but whose reclaim then fails: WaitUntil after Rebuild
+// waits for the replay instead of seeing the positions from before the
+// wipe.
+func TestRunner_RebuildFailedReclaimResetsPositions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		segments int
+	}{
+		{"single segment", 1},
+		{"two segments", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			es := &testStore{}
+			c := newCounter()
+			ps := &flakyReclaimStore{Store: memory.NewProjectionStore()}
+			p := projection.Definition{
+				Name:         "test",
+				Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+				EventTypes:   counterEvents,
+				Reset:        c.Reset,
+				Version:      1,
+				PollInterval: 10 * time.Millisecond,
+				ClaimTTL:     time.Second,
+			}
+			if tc.segments > 1 {
+				p.Segments, p.SegmentKey = tc.segments, projection.ByStreamID
+			}
+			r := projection.NewRunner(p, es, ps)
+			last := save(t, es, 5)
+			stop := runRunner(t, r)
+			defer stop()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			if err := r.WaitUntil(ctx, last); err != nil {
+				t.Fatalf("WaitUntil before rebuild: %v", err)
+			}
+			if err := r.Rebuild(ctx); err != nil {
+				t.Fatalf("Rebuild = %v", err)
+			}
+			if err := r.WaitUntil(ctx, last); err != nil {
+				t.Fatalf("WaitUntil after rebuild: %v", err)
+			}
+			c.mu.Lock()
+			n := len(c.applied)
+			c.mu.Unlock()
+			if n != 5 {
+				t.Errorf("after Rebuild, WaitUntil(%d) returned with %d of 5 events applied to the wiped read model", last, n)
+			}
+		})
+	}
+}
