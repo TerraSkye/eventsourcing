@@ -104,7 +104,54 @@ func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
 	if !errors.As(err, &skipped) {
 		t.Fatalf("expected skipped event, got %v", err)
 	}
+	if skipped.Expected != "*eventsourcing.CartCreated" {
+		t.Errorf("Expected = %q, want %q", skipped.Expected, "*eventsourcing.CartCreated")
+	}
+	if skipped.Envelope != nil {
+		t.Errorf("Envelope = %+v, want nil: ctx carries none", skipped.Envelope)
+	}
+}
 
+// TestSkippedEventError_CarriesTheEnvelope covers a skip under a ctx built
+// by WithEnvelope, as every event bus builds it: the error carries the
+// envelope the event arrived in, from a typed handler and from a group.
+func TestSkippedEventError_CarriesTheEnvelope(t *testing.T) {
+	env := &Envelope{StreamID: "cart-1", Version: 3, Event: &ItemAdded{ID: "xyz"}}
+	ctx := WithEnvelope(context.Background(), env)
+
+	tests := []struct {
+		name         string
+		handler      EventHandler
+		wantExpected string
+	}{
+		{
+			name:         "typed handler",
+			handler:      OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
+			wantExpected: "*eventsourcing.CartCreated",
+		},
+		{
+			name: "group processor",
+			handler: NewEventGroupProcessor(
+				OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
+			),
+			wantExpected: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.handler.Handle(ctx, env.Event)
+			var skipped *SkippedEventError
+			if !errors.As(err, &skipped) {
+				t.Fatalf("Handle = %v, want a *SkippedEventError", err)
+			}
+			if skipped.Envelope != env {
+				t.Errorf("Envelope = %+v, want the envelope WithEnvelope put on ctx", skipped.Envelope)
+			}
+			if skipped.Expected != tt.wantExpected {
+				t.Errorf("Expected = %q, want %q", skipped.Expected, tt.wantExpected)
+			}
+		})
+	}
 }
 
 func TestEventGroupProcessor_RoutesEvents(t *testing.T) {

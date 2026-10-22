@@ -78,6 +78,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `SkippedEventError` carries `Expected`, the type a handler built with
+  `OnEvent` processes, and `Envelope`, the envelope the skipped event
+  arrived in when `WithEnvelope` put one on the handler's ctx. Its message
+  names both.
 - `Envelope.CorrelationID` and `Envelope.CausationID` record the chain an
   event belongs to: the ID of the chain's first message, and the ID of the
   event whose handling produced it. `NewCommandHandler` copies both from

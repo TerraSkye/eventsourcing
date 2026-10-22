@@ -59,13 +59,29 @@ func (s *StreamRevisionConflictError) Error() string {
 }
 
 // SkippedEventError is returned when an [EventHandler] declines to process an
-// [Event] because it is not the type the handler expects.
+// [Event]: by a handler built with [OnEvent] when the event is not its type,
+// and by an [EventGroupProcessor] when it has no handler for the event's
+// type.
 type SkippedEventError struct {
+	// Event is the event that was skipped.
 	Event Event
+	// Expected is the type the handler processes, such as "*orders.Placed",
+	// or "" when it processes several, as an EventGroupProcessor does.
+	Expected string
+	// Envelope is the envelope the event arrived in, as [WithEnvelope] put
+	// it on the handler's ctx, or nil when ctx carries none.
+	Envelope *Envelope
 }
 
 func (e *SkippedEventError) Error() string {
-	return fmt.Sprintf("skipped event of type %T", e.Event)
+	msg := fmt.Sprintf("skipped event of type %T", e.Event)
+	if e.Expected != "" {
+		msg += fmt.Sprintf(", handler processes %s", e.Expected)
+	}
+	if e.Envelope != nil {
+		msg += fmt.Sprintf(" (stream %q, version %d)", e.Envelope.StreamID, e.Envelope.Version)
+	}
+	return msg
 }
 
 // BusinessRuleViolationError wraps an error returned when a [Command] violates
