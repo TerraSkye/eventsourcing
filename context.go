@@ -19,6 +19,8 @@ const (
 	metadataKey       ctxKey = "metadata"
 	correlationIDKey  ctxKey = "correlationID"
 	causationIDKey    ctxKey = "causationID"
+	// envelopeKey holds the *Envelope itself, for a [SkippedEventError].
+	envelopeKey ctxKey = "envelope"
 )
 
 // WithEnvelope returns a copy of ctx carrying env's stream ID, aggregate ID,
@@ -45,6 +47,7 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = context.WithValue(ctx, globalPositionKey, env.GlobalPosition)
 	ctx = context.WithValue(ctx, occurredAtKey, env.OccurredAt)
 	ctx = context.WithValue(ctx, metadataKey, env.Metadata)
+	ctx = context.WithValue(ctx, envelopeKey, env)
 
 	var eventID, correlationID string
 	if env.EventID != uuid.Nil {
@@ -57,6 +60,13 @@ func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	ctx = WithCorrelationID(ctx, correlationID)
 	ctx = WithCausationID(ctx, eventID)
 	return ctx
+}
+
+// envelopeFromContext returns the envelope set by [WithEnvelope], or nil if
+// ctx carries none.
+func envelopeFromContext(ctx context.Context) *Envelope {
+	env, _ := ctx.Value(envelopeKey).(*Envelope)
+	return env
 }
 
 // AggregateIDFromContext returns the aggregate ID set by [WithEnvelope], or

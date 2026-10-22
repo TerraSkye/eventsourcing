@@ -85,7 +85,9 @@ if errors.As(err, &conflict) {
 
 ```go
 type SkippedEventError struct {
-    Event Event
+    Event    Event     // the event that was skipped
+    Expected string    // the type the handler processes, "" for an EventGroupProcessor
+    Envelope *Envelope // the envelope it arrived in, nil when ctx carries none
 }
 ```
 

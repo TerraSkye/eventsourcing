@@ -36,6 +36,15 @@ func TestErrorStrings(t *testing.T) {
 			want: "skipped event of type *eventsourcing.event",
 		},
 		{
+			name: "SkippedEventError with Expected and Envelope",
+			err: &SkippedEventError{
+				Event:    &event{},
+				Expected: "*eventsourcing.CartCreated",
+				Envelope: &Envelope{StreamID: "cart-1", Version: 3},
+			},
+			want: `skipped event of type *eventsourcing.event, handler processes *eventsourcing.CartCreated (stream "cart-1", version 3)`,
+		},
+		{
 			// A store can report a conflict without knowing either revision
 			// — the KurrentDB one does. Formatting that must not panic on
 			// the nil StreamStates.

@@ -80,7 +80,11 @@ func (h typedEventHandler[T, PT]) EventInstance() Event {
 func (h typedEventHandler[T, PT]) Handle(ctx context.Context, event Event) error {
 	ev, ok := event.(PT)
 	if !ok {
-		return &SkippedEventError{Event: event}
+		return &SkippedEventError{
+			Event:    event,
+			Expected: reflect.TypeFor[PT]().String(),
+			Envelope: envelopeFromContext(ctx),
+		}
 	}
 	return h(ctx, ev)
 }
@@ -164,7 +168,7 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 	h, ok := p.handlers[eventTypeKey(ev)]
 
 	if !ok {
-		return &SkippedEventError{Event: ev}
+		return &SkippedEventError{Event: ev, Envelope: envelopeFromContext(ctx)}
 	}
 	return h.Handle(ctx, ev)
 }
