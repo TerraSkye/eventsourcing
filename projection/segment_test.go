@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -503,5 +504,75 @@ func TestRunner_RebuildFailedReclaimResetsPositions(t *testing.T) {
 				t.Errorf("after Rebuild, WaitUntil(%d) returned with %d of 5 events applied to the wiped read model", last, n)
 			}
 		})
+	}
+}
+
+// TestRunner_PublishesStall covers that a stall reaches the store: while a
+// segment retries, it still holds its claim, so without publishing other
+// instances would keep seeing the phase of its last commit. A Probe waiting
+// past the stall reports why, and sees it clear once the runner recovers.
+func TestRunner_PublishesStall(t *testing.T) {
+	es := &testStore{}
+	ps := memory.NewProjectionStore()
+
+	var failing atomic.Bool
+	failing.Store(true)
+	c := newCounter()
+	c.fail = func(gv uint64) error {
+		if gv == 2 && failing.Load() {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	save(t, es, 1)
+	r := newSharedRunner(c, es, ps)
+	defer runRunner(t, r)()
+
+	probe := fastProbe(ps)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := probe.WaitUntil(ctx, 1); err != nil {
+		t.Fatalf("WaitUntil(1): %v", err)
+	}
+	last := save(t, es, 1)
+
+	for {
+		statuses, err := ps.LoadStatuses(ctx, "test")
+		if err != nil {
+			t.Fatalf("Statuses: %v", err)
+		}
+		if len(statuses) == 1 && statuses[0].Phase == projection.Stalled {
+			if !strings.Contains(statuses[0].LastError, "boom") {
+				t.Fatalf("stored LastError = %q, want the handler's error", statuses[0].LastError)
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("stored status never showed the stall; last %+v", statuses)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	short, cancelShort := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancelShort()
+	err := probe.WaitUntil(short, last)
+	var nr *projection.NotReachedError
+	if !errors.As(err, &nr) {
+		t.Fatalf("WaitUntil past the stall = %v, want a *NotReachedError", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "stalled") || !strings.Contains(msg, "boom") {
+		t.Errorf("Error() = %q, want it to name the stall and its cause", msg)
+	}
+
+	failing.Store(false)
+	if err := probe.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil after recovery: %v", err)
+	}
+	statuses, err := ps.LoadStatuses(ctx, "test")
+	if err != nil {
+		t.Fatalf("Statuses: %v", err)
+	}
+	if statuses[0].LastError != "" {
+		t.Errorf("stored LastError = %q after recovery, want empty", statuses[0].LastError)
 	}
 }
