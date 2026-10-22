@@ -173,10 +173,15 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 				}
 			}
 		}
-		for _, req := range r.takeReplays(seg) {
+		reqs := r.takeReplays(seg)
+		for i, req := range reqs {
 			err := r.replayStream(ctx, seg, cp, req.streamID)
 			req.finish(err)
 			if errors.Is(err, ErrClaimLost) {
+				// The segment is no longer this instance's to replay on.
+				for _, rest := range reqs[i+1:] {
+					rest.finish(ErrNotActive)
+				}
 				return err
 			}
 		}

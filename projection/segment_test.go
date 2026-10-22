@@ -331,3 +331,94 @@ func TestRunner_OneByOneRetryCommitsScannedPosition(t *testing.T) {
 		})
 	}
 }
+
+// replayDroppedGateReader blocks the first ReadAll after armed is set
+// until release is closed, so ReplayStream requests can queue up.
+type replayDroppedGateReader struct {
+	*testStore
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *replayDroppedGateReader) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
+	if g.armed.CompareAndSwap(true, false) {
+		close(g.entered)
+		<-g.release
+	}
+	return g.testStore.ReadAll(ctx, after, opts)
+}
+
+// replayDroppedLosingStore fails the next Commit with ErrClaimLost once
+// lose is set, as when another instance took the segment.
+type replayDroppedLosingStore struct {
+	*memory.ProjectionStore
+	lose atomic.Bool
+}
+
+func (s *replayDroppedLosingStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+	if s.lose.CompareAndSwap(true, false) {
+		return projection.ErrClaimLost
+	}
+	return s.ProjectionStore.Commit(ctx, l, cp, status, fn)
+}
+
+// TestRunner_ReplayRequestsFinishAfterClaimLost covers that every queued
+// ReplayStream call returns when one replay loses the claim, instead of
+// the ones behind it waiting until their ctx ends.
+func TestRunner_ReplayRequestsFinishAfterClaimLost(t *testing.T) {
+	es := &testStore{}
+	var last uint64
+	for _, e := range []eventsourcing.Event{&taskCreated{ID: "1"}, &taskCreated{ID: "2"}} {
+		res, err := es.Save(t.Context(), []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: "s1", Event: e}}, eventsourcing.Any{})
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		last = res.GlobalPosition
+	}
+	reader := &replayDroppedGateReader{testStore: es, entered: make(chan struct{}), release: make(chan struct{})}
+	ps := &replayDroppedLosingStore{ProjectionStore: memory.NewProjectionStore()}
+	h := &streamLog{}
+	h.failing.Store(true) // s1's events become dead letters
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      h,
+		EventTypes:   []string{"projection_test.TaskCreated"},
+		OnError:      projection.SkipAlways,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, reader, ps)
+	defer runRunner(t, r)()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+	h.failing.Store(false)
+
+	// Hold the segment in a read, queue two replays for it, then make the
+	// first replay's commit lose the claim.
+	reader.armed.Store(true)
+	select {
+	case <-reader.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner never read")
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- r.ReplayStream(ctx, "s1") }()
+	}
+	time.Sleep(200 * time.Millisecond) // let both requests queue
+	ps.lose.Store(true)
+	close(reader.release)
+
+	for i := range 2 {
+		select {
+		case err := <-results:
+			t.Logf("ReplayStream call %d returned %v", i+1, err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("ReplayStream call %d has not returned 2s after the claim was lost and the segment reclaimed; it waits until its ctx ends", i+1)
+		}
+	}
+}

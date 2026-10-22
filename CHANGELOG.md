@@ -104,6 +104,8 @@ release may break the API; every break is listed under **Breaking**.
 - `Store.Reset` keeps the larger of the current `ReplayUntil` and the
   position reached. Before, a rebuild during the replay lowered it, and
   `IsReplaying` reported events already in the log as new.
+- `ReplayStream` calls queued behind a replay that lost the claim return
+  `ErrNotActive`. Before, they waited until their ctx ended.
 
 ## [0.2.0] - 2026-10-18
 
