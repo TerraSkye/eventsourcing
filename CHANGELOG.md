@@ -83,6 +83,10 @@ release may break the API; every break is listed under **Breaking**.
   commit, usually `Live`, for as long as the stall lasted, as its claim
   stayed fresh while it retried.
 
+- `Store.Reset` keeps the larger of the current `ReplayUntil` and the
+  position reached. Before, a rebuild during the replay lowered it, and
+  `IsReplaying` reported events already in the log as new.
+
 ## [0.2.0] - 2026-10-18
 
 ### Breaking

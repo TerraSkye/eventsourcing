@@ -98,6 +98,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	})
 	s.group(t, "Reset", map[string]func(*testing.T){
 		"MovesCheckpoint":     s.resetMovesCheckpoint,
+		"KeepsReplayUntil":    s.resetKeepsReplayUntil,
 		"RunsWipeOnce":        s.resetRunsWipeOnce,
 		"WipeErrorKeepsState": s.resetWipeErrorKeepsState,
 		"NotOwner":            s.resetNotOwner,
@@ -473,6 +474,23 @@ func (s *storeAcceptance) resetMovesCheckpoint(t *testing.T) {
 	}
 	if got := s.statuses(t, name)[0]; got.Position != 0 || got.Version != 2 {
 		t.Fatalf("status after Reset: got Position %d, Version %d; want 0, 2", got.Position, got.Version)
+	}
+}
+
+// resetKeepsReplayUntil covers a Reset before the segment got through its
+// replay: the boundary stays where it was, as a rebuild can only add events
+// to the replayed ones.
+func (s *storeAcceptance) resetKeepsReplayUntil(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 3, Version: 1, ReplayUntil: 9, Fingerprint: "fp-reset"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	want := projection.Checkpoint{Position: 0, Version: 2, ReplayUntil: 9}
+	if got := s.claim(t, name, 0, owner, longTTL); got != want {
+		t.Fatalf("checkpoint after a Reset at 3 with ReplayUntil 9: got %+v, want %+v", got, want)
 	}
 }
 

@@ -191,7 +191,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 	p.rebuildsDone = p.rebuildsRequested
 	for seg, row := range p.rows {
 		row.deadLetters = nil
-		row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: row.cp.Position}
+		row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: max(row.cp.ReplayUntil, row.cp.Position)}
 		row.status.Position = 0
 		row.status.Version = newVersion
 		row.status.Head = 0

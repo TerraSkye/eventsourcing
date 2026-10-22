@@ -34,8 +34,8 @@ type Checkpoint struct {
 
 	// ReplayUntil is the position up to which events count as replayed; see
 	// [IsReplaying]. It is set when [Store.Declare] creates the segment (to the
-	// head of the log at that moment) and on every rebuild (to the position
-	// the segment had reached before it).
+	// head of the log at that moment) and raised on every rebuild (to the
+	// position the segment had reached before it, if that is higher).
 	ReplayUntil uint64
 
 	// Fingerprint identifies the [Definition.EventTypes] the checkpoint was
@@ -218,8 +218,9 @@ type Store interface {
 	// Reset rebuilds the whole projection l.Name, every segment at once,
 	// as the read model is one and wipe empties all of it. In one unit of
 	// work it runs wipe, moves every segment's checkpoint back to
-	// Position 0 with Version newVersion, ReplayUntil set to the position
-	// that segment had reached, and an empty Fingerprint, and marks every
+	// Position 0 with Version newVersion, ReplayUntil set to the larger of
+	// its current value and the position that segment had reached, and an
+	// empty Fingerprint, and marks every
 	// rebuild requested so far with RequestRebuild as done. It releases every
 	// segment's claim except l's, so an instance still working one gets
 	// [ErrClaimLost] on its next Commit instead of writing into the wiped

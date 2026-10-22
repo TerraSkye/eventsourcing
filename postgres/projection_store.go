@@ -188,7 +188,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET replay_until = position, position = 0, version = $2, fingerprint = '',
+			SET replay_until = GREATEST(replay_until, position), position = 0, version = $2, fingerprint = '',
 			    head = 0, last_error = NULL,
 			    phase = CASE WHEN segment = $3 THEN 'starting' ELSE 'standby' END,
 			    owner = CASE WHEN segment = $3 THEN owner END,
