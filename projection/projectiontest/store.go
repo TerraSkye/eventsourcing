@@ -30,6 +30,10 @@ const (
 	// shortTTL lets a subtest wait a claim out. Stores may track heartbeats
 	// at a coarse resolution, so expiry is checked after twice this long.
 	shortTTL = 300 * time.Millisecond
+
+	// waitTimeout bounds a wait on a store call running in a goroutine, so
+	// a store that breaks the contract fails the subtest instead of hanging.
+	waitTimeout = 10 * time.Second
 )
 
 var errWrite = errors.New("projectiontest: fn failed")
@@ -599,7 +603,13 @@ func (s *storeAcceptance) resetWaitsForCommit(t *testing.T) {
 			return nil
 		})
 	}()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-committed:
+		t.Fatalf("Commit returned %v without running fn", err)
+	case <-time.After(waitTimeout):
+		t.Fatal("Commit did not run fn")
+	}
 
 	reset := make(chan error, 1)
 	go func() { reset <- s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop) }()
@@ -611,11 +621,18 @@ func (s *storeAcceptance) resetWaitsForCommit(t *testing.T) {
 	}
 
 	close(release)
-	if err := <-committed; err != nil {
-		t.Fatalf("Commit that started before the Reset: %v", err)
-	}
-	if err := <-reset; err != nil {
-		t.Fatalf("Reset: %v", err)
+	for _, step := range []struct {
+		name string
+		done chan error
+	}{{"Commit that started before the Reset", committed}, {"Reset", reset}} {
+		select {
+		case err := <-step.done:
+			if err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("%s did not return", step.name)
+		}
 	}
 	if got := s.claim(t, name, 1, other, longTTL); got != (projection.Checkpoint{Version: 2, ReplayUntil: 4}) {
 		t.Fatalf("segment 1 after the Reset: got %+v, want it reset after the Commit landed", got)
