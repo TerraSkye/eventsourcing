@@ -495,7 +495,10 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any) // fallback to empty map
 	}
-	correlationID, causationID := splitChain(metadata)
+	correlationID, _ := metadata[correlationIDKey].(string)
+	causationID, _ := metadata[causationIDKey].(string)
+	delete(metadata, correlationIDKey)
+	delete(metadata, causationIDKey)
 
 	return &eventsourcing.Envelope{
 		EventID:        rec.EventID,
@@ -529,16 +532,6 @@ func encodeMetadata(env eventsourcing.Envelope) ([]byte, error) {
 		md[causationIDKey] = env.CausationID
 	}
 	return json.Marshal(md)
-}
-
-// splitChain removes the chain IDs from md, decoded from an event's
-// metadata, and returns them.
-func splitChain(md map[string]any) (correlationID, causationID string) {
-	correlationID, _ = md[correlationIDKey].(string)
-	causationID, _ = md[causationIDKey].(string)
-	delete(md, correlationIDKey)
-	delete(md, causationIDKey)
-	return correlationID, causationID
 }
 
 // Close closes the underlying KurrentDB client connection.

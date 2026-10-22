@@ -296,7 +296,10 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 			}
 		}
 
-		correlationID, causationID := splitChain(metaData)
+		correlationID, _ := metaData[correlationIDKey].(string)
+		causationID, _ := metaData[causationIDKey].(string)
+		delete(metaData, correlationIDKey)
+		delete(metaData, causationIDKey)
 		envelope := &cqrs.Envelope{
 			EventID:        kEvent.Event.Event.EventID, // or use kEvent.ID if available
 			StreamID:       kEvent.Event.Event.StreamID,
