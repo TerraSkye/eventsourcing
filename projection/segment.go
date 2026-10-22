@@ -59,6 +59,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 				held = false
 			}
+			retry.Reset()
 			r.setPhase(seg, Standby, "")
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
@@ -79,12 +80,12 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			continue
 		}
 		outdated = false
-		retry.Reset()
 		if !held {
 			r.log(ctx, slog.LevelInfo, seg, cp.Position, "projection segment claimed")
 			held = true
 		}
 
+		before := r.position(seg)
 		r.setActive(seg, true)
 		err = r.work(ctx, seg, cp)
 		r.setActive(seg, false)
@@ -95,7 +96,14 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			// Another instance took the segment; compete for it again.
 			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 			held = false
+			retry.Reset()
 		default:
+			// A stalled segment keeps its claim, so the next Claim
+			// succeeds: only a segment that moved before failing starts
+			// its backoff over.
+			if r.position(seg) != before {
+				retry.Reset()
+			}
 			r.setPhase(seg, Stalled, err.Error())
 			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()

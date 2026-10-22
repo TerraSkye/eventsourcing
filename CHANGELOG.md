@@ -83,6 +83,9 @@ release may break the API; every break is listed under **Breaking**.
   commit, usually `Live`, for as long as the stall lasted, as its claim
   stayed fresh while it retried.
 
+- The stall backoff grows from 0.5s to 30s as documented. Before, every
+  retry claimed the segment again, which reset it, so a failing handler
+  was retried about twice a second forever.
 - `Runner.Nudge` wakes every segment. Before, it woke one, and the others
   waited out their `PollInterval`, so `WaitUntil` after a `Nudge` on a
   segmented projection took up to a full interval.
