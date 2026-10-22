@@ -243,27 +243,25 @@ func NewCommandHandler[T any, C Command](
 
 			nextVersion := lastVersion + 1
 
-			for i, event := range events {
-				envelopes[i] = Envelope{
-					EventID:    uuid.New(),
-					StreamID:   streamID,
-					Event:      event,
-					Metadata:   maps.Clone(baseMetadata),
-					Version:    nextVersion + uint64(i),
-					OccurredAt: time.Now(),
-				}
-			}
-
 			// The events join the chain of whatever caused the command;
 			// without one, they start a chain named after the first event.
 			correlationID := CorrelationIDFromContext(ctx)
-			if correlationID == "" {
-				correlationID = envelopes[0].EventID.String()
-			}
 			causationID := CausationIDFromContext(ctx)
-			for i := range envelopes {
-				envelopes[i].CorrelationID = correlationID
-				envelopes[i].CausationID = causationID
+			for i, event := range events {
+				eventID := uuid.New()
+				if correlationID == "" {
+					correlationID = eventID.String()
+				}
+				envelopes[i] = Envelope{
+					EventID:       eventID,
+					StreamID:      streamID,
+					Event:         event,
+					Metadata:      maps.Clone(baseMetadata),
+					Version:       nextVersion + uint64(i),
+					OccurredAt:    time.Now(),
+					CorrelationID: correlationID,
+					CausationID:   causationID,
+				}
 			}
 
 			// --- Persist events ---
