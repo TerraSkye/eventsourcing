@@ -138,8 +138,12 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		}
 
 		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
+		// Those keys come only from the Envelope's fields: the same keys in
+		// Metadata would be read back as the chain.
 		metadata := make(map[string]any, len(ev.Metadata)+2)
 		maps.Copy(metadata, ev.Metadata)
+		delete(metadata, correlationIDKey)
+		delete(metadata, causationIDKey)
 		if ev.CorrelationID != "" {
 			metadata[correlationIDKey] = ev.CorrelationID
 		}

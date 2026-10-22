@@ -356,6 +356,44 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 	}
 }
 
+// TestSave_ChainKeysInMetadataDoNotBecomeTheChain covers metadata that
+// already holds KurrentDB's chain keys: Save keeps them out of what it
+// writes, so they never come back as the event's CorrelationID or
+// CausationID, whose only source is the Envelope's own fields.
+func TestSave_ChainKeysInMetadataDoNotBecomeTheChain(t *testing.T) {
+	store := kdb.NewEventStore(testDB)
+	ctx := context.Background()
+	streamID := "check-chain-keys"
+
+	if _, err := store.Save(ctx, []cqrs.Envelope{{
+		StreamID: streamID,
+		Event:    &CheckEvent{N: 1},
+		Metadata: map[string]any{
+			"$correlationId": "from-metadata",
+			"$causationId":   "from-metadata",
+			"tenant":         "t1",
+		},
+		OccurredAt: time.Now(),
+	}}, cqrs.NoStream{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	iter, err := store.LoadStream(ctx, streamID)
+	if err != nil {
+		t.Fatalf("LoadStream: %v", err)
+	}
+	got := collectAll(t, iter)
+	if len(got) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(got))
+	}
+	if got[0].CorrelationID != "" || got[0].CausationID != "" {
+		t.Errorf("chain = %q/%q, want empty: the envelope had none", got[0].CorrelationID, got[0].CausationID)
+	}
+	if got[0].Metadata["tenant"] != "t1" {
+		t.Errorf("Metadata = %v, want the other keys kept", got[0].Metadata)
+	}
+}
+
 // TestAcceptance does not Close the store: that would close testDB, which
 // every other test in this package shares.
 func TestAcceptance(t *testing.T) {
