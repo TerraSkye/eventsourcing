@@ -128,39 +128,14 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	var kEvents = make([]kurrentdb.EventData, len(events))
 
 	for i, ev := range events {
-		eventData, err := json.Marshal(ev.Event)
-
+		data, err := toEventData(ev)
 		if err != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
-				"save events to stream %q: %w: event %d failed to marshal event data %s",
-				streamID, err, i, ev.Event.EventType(),
+				"save events to stream %q: event %d (%s): %w",
+				streamID, i, ev.Event.EventType(), err,
 			)
 		}
-
-		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
-		metadata := make(map[string]any, len(ev.Metadata)+2)
-		maps.Copy(metadata, ev.Metadata)
-		if ev.CorrelationID != "" {
-			metadata[correlationIDKey] = ev.CorrelationID
-		}
-		if ev.CausationID != "" {
-			metadata[causationIDKey] = ev.CausationID
-		}
-		metadataJSON, err := json.Marshal(metadata)
-		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
-				"save events to stream %q: %w: event %d failed to marshal meta data %s",
-				streamID, err, i, ev.Event.EventType(),
-			)
-		}
-
-		kEvents[i] = kurrentdb.EventData{
-			EventID:     ev.EventID,
-			EventType:   ev.Event.EventType(),
-			ContentType: kurrentdb.ContentTypeJson,
-			Data:        eventData,
-			Metadata:    metadataJSON,
-		}
+		kEvents[i] = data
 	}
 
 	var streamState kurrentdb.StreamState
@@ -484,6 +459,37 @@ func hasPrefix(streamID string, prefixes []string) bool {
 // system event type such as $metadata or the $> of a link.
 func isSystemRecord(rec *kurrentdb.RecordedEvent) bool {
 	return strings.HasPrefix(rec.StreamID, "$") || strings.HasPrefix(rec.EventType, "$")
+}
+
+// toEventData encodes env as KurrentDB event data, with its chain IDs
+// added to the metadata under KurrentDB's keys. It is the reverse of
+// [toEnvelope].
+func toEventData(env eventsourcing.Envelope) (kurrentdb.EventData, error) {
+	data, err := json.Marshal(env.Event)
+	if err != nil {
+		return kurrentdb.EventData{}, fmt.Errorf("cannot marshal event data: %w", err)
+	}
+
+	metadata := make(map[string]any, len(env.Metadata)+2)
+	maps.Copy(metadata, env.Metadata)
+	if env.CorrelationID != "" {
+		metadata[correlationIDKey] = env.CorrelationID
+	}
+	if env.CausationID != "" {
+		metadata[causationIDKey] = env.CausationID
+	}
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return kurrentdb.EventData{}, fmt.Errorf("cannot marshal metadata: %w", err)
+	}
+
+	return kurrentdb.EventData{
+		EventID:     env.EventID,
+		EventType:   env.Event.EventType(),
+		ContentType: kurrentdb.ContentTypeJson,
+		Data:        data,
+		Metadata:    metadataJSON,
+	}, nil
 }
 
 // toEnvelope decodes rec into an [eventsourcing.Envelope], converting
