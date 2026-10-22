@@ -19,8 +19,9 @@ func EventLogging(logger *slog.Logger) eventsourcing.EventHandlerMiddleware {
 }
 
 // WithEventLogging wraps next so that every event it handles is logged. It
-// logs a debug message before and after the call, both carrying the stream
-// ID, causation, version, global position, and aggregate ID found on ctx, plus
+// logs a debug message before and after the call, both carrying the event
+// ID, correlation ID, stream ID, version, global position, and aggregate ID
+// found on ctx, plus
 // the event's [eventsourcing.Event.EventType]. If next returns an error, that
 // error is logged at error level instead of the second debug message.
 // Attributes are only built when the logger is enabled for the level. A nil
@@ -66,6 +67,7 @@ func eventAttrs(ctx context.Context, event eventsourcing.Event) []slog.Attr {
 		slog.String("aggregate_id", eventsourcing.AggregateIDFromContext(ctx)),
 		slog.Uint64("version", eventsourcing.VersionFromContext(ctx)),
 		slog.Uint64("global_position", eventsourcing.GlobalPositionFromContext(ctx)),
-		slog.String("causation", eventsourcing.CausationFromContext(ctx)),
+		slog.String("event_id", eventsourcing.EventIDFromContext(ctx).String()),
+		slog.String("correlation_id", eventsourcing.CorrelationIDFromContext(ctx)),
 	}
 }

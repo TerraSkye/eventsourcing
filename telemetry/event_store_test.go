@@ -12,8 +12,8 @@ import (
 
 // TestSave_ConcurrentCallsSharingMetadataMapRace verifies that
 // TelemetryStore.Save clones each Envelope's Metadata map before stamping
-// tracing/causation data into it, rather than mutating the caller-supplied
-// map in place (events[i].Metadata["causation_id"] = ..., etc.). Callers
+// trace-propagation headers into it, rather than mutating the
+// caller-supplied map in place (events[i].Metadata["traceparent"] = ...). Callers
 // commonly build one "base" metadata map once (e.g. a tenant or request ID)
 // and attach it, unmodified, to several Envelopes — cqrs.NewCommandHandler's
 // own WithMetadataExtractor relies on exactly this being safe, calling
@@ -33,7 +33,7 @@ func TestSave_ConcurrentCallsSharingMetadataMapRace(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			ctx := eventsourcing.WithCausation(context.Background(), "causation-id")
+			ctx := context.Background()
 			events := []eventsourcing.Envelope{
 				{
 					StreamID: "agg-1",

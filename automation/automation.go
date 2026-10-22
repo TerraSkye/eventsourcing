@@ -123,8 +123,7 @@ type Status struct {
 //		}
 //	}
 type Definition[T any] struct {
-	// Name identifies the automation in logs and as the causation of the
-	// commands it sends.
+	// Name identifies the automation in logs and in its [Status].
 	Name string
 
 	// TodoList is the projection Claim reads from. The automation only
@@ -138,6 +137,14 @@ type Definition[T any] struct {
 
 	// Work processes one claimed item; see [WorkFunc].
 	Work WorkFunc[T]
+
+	// Chain returns the chain an item belongs to: the CorrelationID of the
+	// event that put the item on the todo list, and that event's EventID
+	// as the causation. Keep both on the todo-list row. The ctx Work gets
+	// carries them, so the events its commands record join that chain;
+	// see [eventsourcing.Envelope.CorrelationID]. Without Chain, the work
+	// on each item starts a new chain.
+	Chain func(item T) (correlationID, causationID string)
 
 	// WaitFor lists projections that must be live, besides the todo list,
 	// before the automation claims work. Use it when the work reads other
@@ -264,12 +271,11 @@ func (a *Automation[T]) Run(ctx context.Context) error {
 		}
 
 		a.setPhase(Working, "")
-		workCtx := eventsourcing.WithCausation(ctx, a.d.Name)
 		for _, item := range items {
 			if ctx.Err() != nil {
 				break
 			}
-			a.doWork(workCtx, item)
+			a.doWork(ctx, item)
 		}
 		if len(items) < a.d.BatchSize {
 			a.setPhase(Idle, "")
@@ -297,7 +303,12 @@ func (a *Automation[T]) notLive(ctx context.Context) (string, error) {
 
 // doWork runs the work for one item and records the outcome.
 func (a *Automation[T]) doWork(ctx context.Context, item T) {
-	err := a.d.Work(ctx, item)
+	var correlationID, causationID string
+	if a.d.Chain != nil {
+		correlationID, causationID = a.d.Chain(item)
+	}
+	workCtx := eventsourcing.WithCausationID(eventsourcing.WithCorrelationID(ctx, correlationID), causationID)
+	err := a.d.Work(workCtx, item)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err == nil {

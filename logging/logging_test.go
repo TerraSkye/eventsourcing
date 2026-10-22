@@ -85,15 +85,17 @@ func assertRecord(t *testing.T, r map[string]any, level, msg string, attrs map[s
 	}
 }
 
+var eventID = uuid.MustParse("6f1d0c2e-3b7a-4c55-9a1e-2d4f8b0c9e11")
+
 func eventContext() context.Context {
-	ctx := eventsourcing.WithEnvelope(context.Background(), &eventsourcing.Envelope{
-		EventID:        uuid.New(),
+	return eventsourcing.WithEnvelope(context.Background(), &eventsourcing.Envelope{
+		EventID:        eventID,
 		StreamID:       "order-1",
 		Event:          testEvent{},
 		Version:        3,
 		GlobalPosition: 42,
+		CorrelationID:  "chain-1",
 	})
-	return eventsourcing.WithCausation(ctx, "cmd-1")
 }
 
 // ---- Command logging ----
@@ -196,7 +198,8 @@ func TestWithEventLogging_Success(t *testing.T) {
 		"aggregate_id":    "order-1",
 		"version":         float64(3),
 		"global_position": float64(42),
-		"causation":       "cmd-1",
+		"event_id":        eventID.String(),
+		"correlation_id":  "chain-1",
 	}
 	assertRecord(t, rs[0], "DEBUG", "handling event", attrs)
 	assertRecord(t, rs[1], "DEBUG", "event handled", attrs)

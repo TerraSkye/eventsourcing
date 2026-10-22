@@ -40,19 +40,31 @@ func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) er
 }
 ```
 
-## Causation
+## Correlation and causation
 
 ```go
-func WithCausation(ctx context.Context, causation string) context.Context
-func CausationFromContext(ctx context.Context) string
+func WithCorrelationID(ctx context.Context, correlationID string) context.Context
+func CorrelationIDFromContext(ctx context.Context) string
+func WithCausationID(ctx context.Context, causationID string) context.Context
+func CausationIDFromContext(ctx context.Context) string
 ```
 
-Propagate a causation ID (e.g., the originating command or event ID) through the context for correlation in event chains.
+Every event records the chain it belongs to in two `Envelope` fields:
+
+- `CorrelationID` is the ID of the chain's first message, copied unchanged to every event it caused, directly or not.
+- `CausationID` is the `EventID` of the event whose handling produced this one, or `""` for the root of a chain, such as an event from a command an API request sent.
+
+You rarely set them yourself. `WithEnvelope` puts a handler's work in the handled event's chain (causation = that event's ID, correlation = its `CorrelationID`), and `NewCommandHandler` copies both from the context onto the events it appends. With no correlation in the context, the events start a chain named after the first of them.
+
+To tie a chain to an API request, start it with the request's ID:
 
 ```go
-ctx = eventsourcing.WithCausation(ctx, commandID.String())
-_, err := handler(ctx, cmd)
+ctx = eventsourcing.WithCorrelationID(r.Context(), requestID)
+_, err := bus.Dispatch(ctx, cmd)
+```
 
-// In event handler:
-cause := eventsourcing.CausationFromContext(ctx)
+Find every event of a chain with one query on the indexed column, for example in Postgres:
+
+```sql
+SELECT * FROM events WHERE correlation_id = $1 ORDER BY id;
 ```

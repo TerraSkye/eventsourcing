@@ -322,6 +322,12 @@ func (a *acceptance) loadStreamRoundTrip(t *testing.T) {
 	if got, want := out.Metadata["acceptance"], in[0].Metadata["acceptance"]; got != want {
 		t.Errorf(`Metadata["acceptance"] = %v, want %v`, got, want)
 	}
+	if len(out.Metadata) != len(in[0].Metadata) {
+		t.Errorf("Metadata = %v, want %v: the chain is kept in its own fields", out.Metadata, in[0].Metadata)
+	}
+	if out.CorrelationID != in[0].CorrelationID || out.CausationID != in[0].CausationID {
+		t.Errorf("chain = %q/%q, want %q/%q", out.CorrelationID, out.CausationID, in[0].CorrelationID, in[0].CausationID)
+	}
 	if out.OccurredAt.IsZero() {
 		t.Errorf("OccurredAt is zero")
 	}
@@ -448,12 +454,14 @@ func envelopes(id string, from uint64, count int) []eventsourcing.Envelope {
 	for i := range out {
 		v := from + uint64(i)
 		out[i] = eventsourcing.Envelope{
-			EventID:    uuid.New(),
-			StreamID:   id,
-			Event:      &acceptanceEvent{ID: id, N: int(v)},
-			Metadata:   map[string]any{"acceptance": "yes"},
-			Version:    v,
-			OccurredAt: time.Now(),
+			EventID:       uuid.New(),
+			StreamID:      id,
+			Event:         &acceptanceEvent{ID: id, N: int(v)},
+			Metadata:      map[string]any{"acceptance": "yes"},
+			Version:       v,
+			OccurredAt:    time.Now(),
+			CorrelationID: "chain-" + id,
+			CausationID:   uuid.NewString(),
 		}
 	}
 	return out

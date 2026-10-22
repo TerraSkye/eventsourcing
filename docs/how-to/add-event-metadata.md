@@ -1,10 +1,10 @@
 # How to add metadata to events
 
-Use `WithMetadataExtractor` to attach contextual information (user ID, correlation ID, tenant) to every event envelope at the time it is saved.
+Use `WithMetadataExtractor` to attach contextual information (user ID, tenant) to every event envelope at the time it is saved. The chain an event belongs to is not metadata: it has its own `CorrelationID` and `CausationID` fields, which the library fills in; see [context helpers](../reference/context.md#correlation-and-causation).
 
 ## The problem
 
-Event envelopes include a `Metadata map[string]any` field. You want to populate it automatically — for example with the authenticated user or a trace correlation ID — without cluttering your `decide` function.
+Event envelopes include a `Metadata map[string]any` field. You want to populate it automatically — for example with the authenticated user — without cluttering your `decide` function. `NewCommandHandler` already records the command in it, under `command_type` and a per-call `command_id`.
 
 ## Solution: metadata extractors
 
@@ -37,15 +37,15 @@ handler := eventsourcing.NewCommandHandler(
     evolve,
     decide,
     eventsourcing.WithMetadataExtractor(userMetadata),
-    eventsourcing.WithMetadataExtractor(correlationMetadata),
+    eventsourcing.WithMetadataExtractor(tenantMetadata),
 )
 
 func userMetadata(ctx context.Context) map[string]any {
     return map[string]any{"user_id": ctx.Value("user_id")}
 }
 
-func correlationMetadata(ctx context.Context) map[string]any {
-    return map[string]any{"correlation_id": ctx.Value("correlation_id")}
+func tenantMetadata(ctx context.Context) map[string]any {
+    return map[string]any{"tenant_id": ctx.Value("tenant_id")}
 }
 ```
 

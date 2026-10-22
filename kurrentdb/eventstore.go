@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"strings"
 	"time"
@@ -136,8 +137,20 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			)
 		}
 
-		metaData, err := json.Marshal(ev.Metadata)
-
+		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
+		// Those keys come only from the Envelope's fields: the same keys in
+		// Metadata would be read back as the chain.
+		metadata := make(map[string]any, len(ev.Metadata)+2)
+		maps.Copy(metadata, ev.Metadata)
+		delete(metadata, correlationIDKey)
+		delete(metadata, causationIDKey)
+		if ev.CorrelationID != "" {
+			metadata[correlationIDKey] = ev.CorrelationID
+		}
+		if ev.CausationID != "" {
+			metadata[causationIDKey] = ev.CausationID
+		}
+		metadataJSON, err := json.Marshal(metadata)
 		if err != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal meta data %s",
@@ -150,7 +163,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			EventType:   ev.Event.EventType(),
 			ContentType: kurrentdb.ContentTypeJson,
 			Data:        eventData,
-			Metadata:    metaData,
+			Metadata:    metadataJSON,
 		}
 	}
 
@@ -491,9 +504,13 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 	}
 
 	var metadata map[string]any
-	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil {
+	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil || metadata == nil {
 		metadata = make(map[string]any) // fallback to empty map
 	}
+	correlationID, _ := metadata[correlationIDKey].(string)
+	causationID, _ := metadata[causationIDKey].(string)
+	delete(metadata, correlationIDKey)
+	delete(metadata, causationIDKey)
 
 	return &eventsourcing.Envelope{
 		EventID:        rec.EventID,
@@ -503,8 +520,17 @@ func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
 		Version:        rec.EventNumber + 1,
 		GlobalPosition: rec.Position.Commit,
 		OccurredAt:     rec.CreatedDate,
+		CorrelationID:  correlationID,
+		CausationID:    causationID,
 	}, nil
 }
+
+// KurrentDB's own metadata keys for an event's chain, which its tooling and
+// its $by_correlation_id projection read.
+const (
+	correlationIDKey = "$correlationId"
+	causationIDKey   = "$causationId"
+)
 
 // Close closes the underlying KurrentDB client connection.
 func (e EventStore) Close() error {

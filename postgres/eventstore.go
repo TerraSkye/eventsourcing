@@ -86,11 +86,13 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	// Encode before taking any lock, so the locks cover only the database
 	// work.
 	type row struct {
-		eventID    uuid.UUID
-		eventType  string
-		payload    []byte
-		metadata   []byte
-		occurredAt time.Time
+		eventID       uuid.UUID
+		eventType     string
+		payload       []byte
+		metadata      []byte
+		occurredAt    time.Time
+		correlationID string
+		causationID   string
 	}
 	rows := make([]row, len(events))
 	for i, e := range events {
@@ -120,7 +122,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 			eventID = uuid.New()
 		}
 
-		rows[i] = row{eventID, e.Event.EventType(), payload, metadataJSON, occurredAt}
+		rows[i] = row{eventID, e.Event.EventType(), payload, metadataJSON, occurredAt, e.CorrelationID, e.CausationID}
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -184,10 +186,10 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	for i, r := range rows {
 		pos := int64(nextPosition) + int64(i)
 		err = tx.QueryRow(ctx, `
-			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			RETURNING id`,
-			r.eventID, streamID, pos, r.eventType, r.payload, r.metadata, r.occurredAt,
+			r.eventID, streamID, pos, r.eventType, r.payload, r.metadata, r.occurredAt, r.correlationID, r.causationID,
 		).Scan(&lastID)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -231,7 +233,7 @@ func (s *EventStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[
 	}
 
 	return s.queryRows(ctx, `
-		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 		FROM events WHERE stream_id = $1 ORDER BY stream_position ASC`, id)
 }
 
@@ -266,19 +268,19 @@ func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 			return nil, fmt.Errorf("load stream %q: expected existing stream: %w", id, cqrs.ErrStreamNotFound)
 		}
 		return s.queryRows(ctx, `
-			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 			FROM events WHERE stream_id = $1 ORDER BY stream_position ASC`, id)
 
 	case cqrs.Any:
 		return s.queryRows(ctx, `
-			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 			FROM events WHERE stream_id = $1 ORDER BY stream_position ASC`, id)
 
 	default:
 		// Revision: start after the given position
 		fromPos := version.ToRawInt64()
 		return s.queryRows(ctx, `
-			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+			SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 			FROM events WHERE stream_id = $1 AND stream_position > $2 ORDER BY stream_position ASC`,
 			id, fromPos)
 	}
@@ -322,7 +324,7 @@ func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 		prefixes = []string{}
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 		FROM events
 		WHERE id > $1 AND id <= $2
 		  AND (cardinality($3::text[]) = 0 OR event_type = ANY($3::text[]))
@@ -411,9 +413,11 @@ func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
 		payload        []byte
 		metadata       []byte
 		occurredAt     time.Time
+		correlationID  string
+		causationID    string
 	)
 
-	if err := rows.Scan(&globalID, &rawUUID, &streamID, &streamPosition, &eventType, &payload, &metadata, &occurredAt); err != nil {
+	if err := rows.Scan(&globalID, &rawUUID, &streamID, &streamPosition, &eventType, &payload, &metadata, &occurredAt, &correlationID, &causationID); err != nil {
 		return nil, fmt.Errorf("scan envelope: %w", err)
 	}
 
@@ -443,5 +447,7 @@ func scanEnvelope(rows pgx.Rows) (*cqrs.Envelope, error) {
 		Version:        uint64(streamPosition),
 		GlobalPosition: uint64(globalID),
 		OccurredAt:     occurredAt,
+		CorrelationID:  correlationID,
+		CausationID:    causationID,
 	}, nil
 }

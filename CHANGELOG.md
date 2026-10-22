@@ -9,6 +9,46 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- Correlation and causation are fields of `Envelope`, set by the library,
+  instead of a free-text label. `WithCausation` and `CausationFromContext`
+  are removed; use `WithCorrelationID`, `CorrelationIDFromContext`,
+  `WithCausationID` and `CausationIDFromContext`. `CausationID` is now
+  the `EventID` of the event whose handling produced an event, never a
+  command type or an automation's name.
+- `WithEnvelope` sets the causation ID to the handled event's ID and the
+  correlation ID to its `CorrelationID`, so the commands a handler sends
+  join that event's chain.
+- The telemetry wrappers no longer write `correlation_id` (the trace ID)
+  or `causation_id` into `Metadata`; they record the chain as the span
+  attributes `eventsourcing.correlation.id` and
+  `eventsourcing.causation.id`. `logging.WithEventLogging` logs
+  `event_id` and `correlation_id` instead of `causation`.
+- The Postgres and SQLite `events` tables gain `correlation_id` and
+  `causation_id` columns. The Postgres schema adds them to an existing
+  table itself. For an existing SQLite database, run this once before
+  applying the new schema, which otherwise fails with
+  `no such column: correlation_id`:
+
+  ```sql
+  ALTER TABLE events ADD COLUMN correlation_id TEXT NOT NULL DEFAULT '';
+  ALTER TABLE events ADD COLUMN causation_id   TEXT NOT NULL DEFAULT '';
+  ```
+
+  Rows written through the old telemetry wrapper carry the trace ID in
+  their metadata. To keep it as their correlation in Postgres:
+
+  ```sql
+  UPDATE events
+  SET correlation_id = convert_from(metadata, 'UTF8')::jsonb ->> 'correlation_id'
+  WHERE correlation_id = ''
+    AND metadata IS NOT NULL
+    AND convert_from(metadata, 'UTF8')::jsonb ? 'correlation_id';
+  ```
+
+  The old `causation_id` metadata held a label, not an event ID, so it is
+  not copied.
+- `automation.Definition.Name` is no longer the causation of the work's
+  commands.
 - Package `file` is removed, as deprecated in v0.2.0. Before upgrading,
   copy a file store's events into SQLite with `sqlite.Import` on v0.2.0.
 - `projection.Store` has two more methods, `RequestRebuild` and
@@ -38,6 +78,18 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `Envelope.CorrelationID` and `Envelope.CausationID` record the chain an
+  event belongs to: the ID of the chain's first message, and the ID of the
+  event whose handling produced it. `NewCommandHandler` copies both from
+  the context onto the events it appends, and starts a chain named after
+  the first event when the context has none. Postgres and SQLite store
+  them in indexed columns, KurrentDB under its `$correlationId` and
+  `$causationId` metadata keys (so `$by_correlation_id` works), and the
+  memory store as fields.
+- `NewCommandHandler` records the command in each event's `Metadata`, as
+  `command_type` and a per-call `command_id`.
+- `automation.Definition.Chain` returns the chain of the event that put an
+  item on the todo list, so the events of its work join that chain.
 - `Store.RequestRebuild` asks for a rebuild from any program with the
   store, such as a web process, without running the projection.
   `Status.RebuildRequested` shows a pending one and `Status.ReplayUntil`

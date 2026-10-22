@@ -24,7 +24,6 @@ func TestContextGetters(t *testing.T) {
 
 	eventID := uuid.New()
 	occurredAt := time.Now()
-	causationID := "cause-123"
 	metadata := map[string]any{"key": "value"}
 
 	env := &Envelope{
@@ -35,11 +34,11 @@ func TestContextGetters(t *testing.T) {
 		GlobalPosition: 42,
 		OccurredAt:     occurredAt,
 		Metadata:       metadata,
+		CorrelationID:  "corr-123",
+		CausationID:    "cause-of-env",
 	}
 
 	ctxWithEnv := WithEnvelope(t.Context(), env)
-
-	ctxWithEnv = WithCausation(ctxWithEnv, causationID)
 	emptyCtx := t.Context()
 
 	tests := []struct {
@@ -133,16 +132,44 @@ func TestContextGetters(t *testing.T) {
 			want: map[string]any{},
 		},
 		{
-			name: "MetadataFromContext without value",
+			name: "CausationIDFromContext without value",
 			ctx:  emptyCtx,
-			fn:   func(ctx context.Context) any { return CausationFromContext(ctx) },
+			fn:   func(ctx context.Context) any { return CausationIDFromContext(ctx) },
 			want: "",
 		},
 		{
-			name: "OccurredAtFromContext with value",
+			// Work under the envelope is caused by the envelope's event,
+			// not by whatever caused that event.
+			name: "CausationIDFromContext is the handled event's ID",
 			ctx:  ctxWithEnv,
-			fn:   func(ctx context.Context) any { return CausationFromContext(ctx) },
-			want: causationID,
+			fn:   func(ctx context.Context) any { return CausationIDFromContext(ctx) },
+			want: eventID.String(),
+		},
+		{
+			name: "CorrelationIDFromContext without value",
+			ctx:  emptyCtx,
+			fn:   func(ctx context.Context) any { return CorrelationIDFromContext(ctx) },
+			want: "",
+		},
+		{
+			name: "CorrelationIDFromContext is the handled event's chain",
+			ctx:  ctxWithEnv,
+			fn:   func(ctx context.Context) any { return CorrelationIDFromContext(ctx) },
+			want: "corr-123",
+		},
+		{
+			name: "CorrelationIDFromContext of an event stored without one",
+			ctx:  WithEnvelope(t.Context(), &Envelope{EventID: eventID, Event: &event{}}),
+			fn:   func(ctx context.Context) any { return CorrelationIDFromContext(ctx) },
+			want: eventID.String(),
+		},
+		{
+			name: "WithCorrelationID and WithCausationID override",
+			ctx:  WithCausationID(WithCorrelationID(ctxWithEnv, "request-1"), "cause-1"),
+			fn: func(ctx context.Context) any {
+				return CorrelationIDFromContext(ctx) + "/" + CausationIDFromContext(ctx)
+			},
+			want: "request-1/cause-1",
 		},
 	}
 

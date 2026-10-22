@@ -59,6 +59,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			AttrEventGlobalPos.Int64(int64(eventsourcing.GlobalPositionFromContext(ctx))),
 			AttrEventStreamPos.Int64(int64(eventsourcing.VersionFromContext(ctx))),
 			AttrStreamID.String(eventsourcing.StreamIDFromContext(ctx)),
+			AttrCorrelationID.String(eventsourcing.CorrelationIDFromContext(ctx)),
 		}
 
 		metricAttr := []attribute.KeyValue{AttrEventType.String(event.EventType())}

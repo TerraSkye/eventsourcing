@@ -140,10 +140,12 @@ func eventually(t *testing.T, what string, cond func() bool) {
 
 // completing returns work that completes each item on list and records the
 // causation it ran under.
-func completing(list *memTodoList, causation *atomic.Value) automation.WorkFunc[string] {
+// completing returns work that completes the item, recording the chain its
+// ctx carries as "item=correlation/causation" when chains is not nil.
+func completing(list *memTodoList, chains *atomic.Value) automation.WorkFunc[string] {
 	return func(ctx context.Context, id string) error {
-		if causation != nil {
-			causation.Store(eventsourcing.CausationFromContext(ctx))
+		if chains != nil {
+			chains.Store(id + "=" + eventsourcing.CorrelationIDFromContext(ctx) + "/" + eventsourcing.CausationIDFromContext(ctx))
 		}
 		return list.Complete(ctx, id)
 	}
@@ -154,12 +156,15 @@ func TestRun_ProcessesTheTodoList(t *testing.T) {
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
 		list.Add(t.Context(), id)
 	}
-	var causation atomic.Value
+	var chain atomic.Value
 	a := automation.New(automation.Definition[string]{
-		Name:      "ship-orders",
-		TodoList:  newDep("orders-to-ship", true),
-		Claim:     list.Claim,
-		Work:      completing(list, &causation),
+		Name:     "ship-orders",
+		TodoList: newDep("orders-to-ship", true),
+		Claim:    list.Claim,
+		Work:     completing(list, &chain),
+		Chain: func(id string) (string, string) {
+			return "chain-" + id, "event-" + id
+		},
 		BatchSize: 2,
 		Interval:  10 * time.Millisecond,
 		Logger:    quiet,
@@ -171,8 +176,10 @@ func TestRun_ProcessesTheTodoList(t *testing.T) {
 	if st := a.Status(); st.Processed != 5 || st.Failed != 0 {
 		t.Fatalf("Status() = %+v, want 5 processed and none failed", st)
 	}
-	if got := causation.Load(); got != "ship-orders" {
-		t.Fatalf("work ran with causation %q, want the automation's name", got)
+	got, _ := chain.Load().(string)
+	id, _, _ := strings.Cut(got, "=")
+	if want := id + "=chain-" + id + "/event-" + id; got != want {
+		t.Fatalf("work ran with chain %q, want %q, the item's own from Definition.Chain", got, want)
 	}
 }
 

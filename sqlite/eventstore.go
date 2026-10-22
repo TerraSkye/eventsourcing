@@ -71,11 +71,13 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 	// Encode before the transaction, so it covers only the database work.
 	type row struct {
-		eventID    string
-		eventType  string
-		payload    []byte
-		metadata   []byte
-		occurredAt int64
+		eventID       string
+		eventType     string
+		payload       []byte
+		metadata      []byte
+		occurredAt    int64
+		correlationID string
+		causationID   string
 	}
 	rows := make([]row, len(events))
 	for i, e := range events {
@@ -101,7 +103,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		if eventID == uuid.Nil {
 			eventID = uuid.New()
 		}
-		rows[i] = row{eventID.String(), e.Event.EventType(), payload, metadataJSON, occurredAt.UnixNano()}
+		rows[i] = row{eventID.String(), e.Event.EventType(), payload, metadataJSON, occurredAt.UnixNano(), e.CorrelationID, e.CausationID}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -148,10 +150,10 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	for i, r := range rows {
 		pos := int64(currentVersion) + int64(i) + 1
 		err := tx.QueryRowContext(ctx, `
-			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO events (event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id`,
-			r.eventID, streamID, pos, r.eventType, r.payload, r.metadata, r.occurredAt,
+			r.eventID, streamID, pos, r.eventType, r.payload, r.metadata, r.occurredAt, r.correlationID, r.causationID,
 		).Scan(&lastID)
 		if err != nil {
 			if isUniqueViolation(err) {
@@ -331,7 +333,7 @@ func (s *EventStore) exists(ctx context.Context, id string) (bool, error) {
 // selectEvents is the column list scanEnvelope reads, without a WHERE
 // clause.
 const selectEvents = `
-	SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at
+	SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
 	FROM events`
 
 // query runs a SELECT built on selectEvents and returns every row, read in
@@ -374,8 +376,10 @@ func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
 		payload        []byte
 		metadata       []byte
 		occurredAt     int64
+		correlationID  string
+		causationID    string
 	)
-	if err := rows.Scan(&globalID, &eventID, &streamID, &streamPosition, &eventType, &payload, &metadata, &occurredAt); err != nil {
+	if err := rows.Scan(&globalID, &eventID, &streamID, &streamPosition, &eventType, &payload, &metadata, &occurredAt, &correlationID, &causationID); err != nil {
 		return nil, fmt.Errorf("scan envelope: %w", err)
 	}
 
@@ -405,6 +409,8 @@ func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
 		Version:        uint64(streamPosition),
 		GlobalPosition: uint64(globalID),
 		OccurredAt:     time.Unix(0, occurredAt),
+		CorrelationID:  correlationID,
+		CausationID:    causationID,
 	}, nil
 }
 
