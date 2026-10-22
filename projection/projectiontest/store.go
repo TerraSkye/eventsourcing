@@ -6,6 +6,9 @@
 //	func TestAcceptance(t *testing.T) {
 //		projectiontest.StoreAcceptanceTest(t, memory.NewProjectionStore())
 //	}
+//
+// [Benchmark] measures a projection runner on top of a store, so that
+// numbers compare across backends.
 package projectiontest
 
 import (

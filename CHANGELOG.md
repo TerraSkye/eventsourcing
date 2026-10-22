@@ -110,6 +110,14 @@ release may break the API; every break is listed under **Breaking**.
   store failure. `Runner.WaitUntil` returns it too, still matching the
   context's error with `errors.Is`. A `Probe` is an
   `automation.Dependency`.
+- `eventsourcingtest.Benchmark` and `projectiontest.Benchmark` measure an
+  event store and a projection store with the same code on every backend:
+  append throughput on one stream and on 1,000 streams from 32 writers,
+  `LoadStream` by stream length, `ReadAll` by page size, projection
+  catch-up by segment count, and the time from an append to a live
+  projection having processed it. The memory, SQLite, Postgres and
+  KurrentDB benchmarks run behind the `bench` build tag; `BENCHMARKS.md`
+  explains them and records results.
 
 - `telemetry.WithProjectionStoreTelemetry` traces each projection batch
   and rebuild and counts claims, and `telemetry.ObserveProjection` reports

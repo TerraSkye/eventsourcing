@@ -24,6 +24,10 @@ type leakEvent struct{}
 func (leakEvent) AggregateID() string { return "leak" }
 func (leakEvent) EventType() string   { return "leakEvent" }
 
+func init() {
+	cqrs.RegisterEventByType(func() cqrs.Event { return &leakEvent{} })
+}
+
 func countGoroutinesCreatedBy(substr string) int {
 	buf := make([]byte, 4<<20)
 	n := runtime.Stack(buf, true)
