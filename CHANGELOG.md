@@ -9,6 +9,17 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `projection.Store` has two more methods, `RequestRebuild` and
+  `Rebuilds`, and `Reset` marks the requests it serves as done. The memory,
+  Postgres and SQLite stores and the telemetry wrapper implement them; a
+  store of your own needs them too. The Postgres and SQLite schemas add a
+  `projection_rebuilds` table, which applying the schema creates on an
+  existing database.
+- `Runner.Rebuild` works from any instance and no longer returns
+  `ErrNotActive`. It records a request in the store, which the runner
+  holding segment 0 serves wherever it runs, and the request survives
+  restarts and claims moving. Before any runner declared the projection
+  it returns `ErrUnknownProjection`.
 - `automation.Remote` is removed. Pass a `projection.Probe` instead, which
   implements `automation.Dependency`:
   `projection.NewProbe(store, name, projection.WithClaimTTL(claimTTL))`.
@@ -25,6 +36,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `Store.RequestRebuild` asks for a rebuild from any program with the
+  store, such as a web process, without running the projection.
+  `Status.RebuildRequested` shows a pending one and `Status.ReplayUntil`
+  how far a rebuilt segment is replaying. `Runner.CanRebuild` reports
+  whether a projection has a Reset.
 - Segmented projections rebuild in place. A `Definition.Version` bump or
   `Runner.Rebuild` wipes the read model once and moves every segment back
   to the start, and instances still working a segment are fenced off and
@@ -66,6 +82,35 @@ release may break the API; every break is listed under **Breaking**.
   the store. Before, other instances kept seeing the phase of its last
   commit, usually `Live`, for as long as the stall lasted, as its claim
   stayed fresh while it retried.
+
+- The stall backoff grows from 0.5s to 30s as documented. Before, every
+  retry claimed the segment again, which reset it, so a failing handler
+  was retried about twice a second forever.
+- `Runner.Nudge` wakes every segment. Before, it woke one, and the others
+  waited out their `PollInterval`, so `WaitUntil` after a `Nudge` on a
+  segmented projection took up to a full interval.
+- `Watch` callbacks run when a segment goes `Live` without applying
+  events, such as on a restart with the checkpoint at the head. Before,
+  an `automation` waiting on such a projection idled for its `Interval`.
+- After `Run` returns, `IsLive` and `WaitUntil` ask the store. Before, the
+  stopped runner kept reporting itself as the live owner.
+- A `Claim` that fails with a store error no longer makes the runner
+  report itself as the segment's owner, so `IsLive` and `WaitUntil` ask
+  the store, where the real owner's progress is.
+- When a batch is retried event by event, the store's checkpoint now
+  moves to the end of the read, past events the segment does not handle.
+  Before, it stayed at the last handled event, and waits on the store for
+  the scanned positions hung until a new event arrived.
+- A rebuild whose reclaim fails after `Store.Reset` committed, and a
+  `Rebuild` that returns while its rebuild is still under way on this
+  instance, no longer let `WaitUntil` see positions from before the
+  wipe. A `Probe` wait no longer answers from statuses read before a
+  rebuild by an earlier wait.
+- `Store.Reset` keeps the larger of the current `ReplayUntil` and the
+  position reached. Before, a rebuild during the replay lowered it, and
+  `IsReplaying` reported events already in the log as new.
+- `ReplayStream` calls queued behind a replay that lost the claim return
+  `ErrNotActive`. Before, they waited until their ctx ended.
 
 ## [0.2.0] - 2026-10-18
 

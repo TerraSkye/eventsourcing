@@ -129,29 +129,35 @@ func (r *Runner) WaitUntil(ctx context.Context, position uint64) error {
 }
 
 // setStatus replaces seg's status after a commit or a status publish made
-// under l. It does nothing when l is no longer seg's lease: a rebuild reset
-// the projection after the call reached the store, and the position it
-// reports was wiped.
+// under l, and notifies watchers when the phase changed. It does nothing
+// when l is no longer seg's lease: a rebuild reset the projection after the
+// call reached the store, and the position it reports was wiped.
 func (r *Runner) setStatus(seg int, l Lease, s Status) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.segs[seg].lease != l {
+		r.mu.Unlock()
 		return
 	}
+	phaseChanged := r.segs[seg].status.Phase != s.Phase
 	r.segs[seg].status = s
 	r.signalChange()
+	r.mu.Unlock()
+	if phaseChanged {
+		r.notifyWatchers()
+	}
 }
 
 // setPhase moves seg to phase p, recording lastErr for [Stalled], and
-// notifies watchers.
-func (r *Runner) setPhase(seg int, p Phase, lastErr string) {
+// notifies watchers. owned reports whether this instance holds the
+// segment's claim; when it does not, the status names no owner, so
+// [Runner.IsLive] and [Runner.WaitUntil] ask the store about the segment.
+func (r *Runner) setPhase(seg int, p Phase, lastErr string, owned bool) {
 	r.mu.Lock()
 	st := &r.segs[seg].status
 	st.Phase = p
 	st.LastError = lastErr
-	if p == Standby {
-		st.Owner = ""
-	} else {
+	st.Owner = ""
+	if owned {
 		st.Owner = r.p.Owner
 	}
 	r.signalChange()

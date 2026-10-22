@@ -133,8 +133,12 @@
 //     its configured one rebuilds automatically. A segmented projection is
 //     rebuilt as a whole: every segment starts over, whichever instance
 //     holds it.
-//   - Call [Runner.Rebuild] on the instance that holds segment 0, the
-//     only segment of an unsegmented projection.
+//   - Call [Runner.Rebuild] on any instance, or [Store.RequestRebuild]
+//     from any program that has the store, such as an admin endpoint in a
+//     web process. The request is kept in the store, and the runner that
+//     holds segment 0 serves it between two batches, wherever it runs.
+//     Requests made before that rebuild runs are all served by it.
+//     [Status.RebuildRequested] shows one that is pending.
 //
 // Changing [Definition.EventTypes] counts as a change too. The checkpoint
 // records which types it was written for, so a runner started with a

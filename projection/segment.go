@@ -39,6 +39,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
 		_ = r.store.Release(relCtx, r.lease(seg))
+		// This instance no longer processes the segment, so IsLive and
+		// WaitUntil must ask the store rather than trust its last status.
+		r.setPhase(seg, Standby, "", false)
 		if held {
 			r.log(relCtx, slog.LevelInfo, seg, r.position(seg), "projection segment released")
 		}
@@ -48,7 +51,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 	for ctx.Err() == nil {
 		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
-			r.setPhase(seg, Stalled, err.Error())
+			// The claim failed, so this instance does not know it holds
+			// the segment: leave the owner to the store.
+			r.setPhase(seg, Stalled, err.Error(), false)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
 			sleepCtx(ctx, wait)
@@ -59,7 +64,8 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 				held = false
 			}
-			r.setPhase(seg, Standby, "")
+			retry.Reset()
+			r.setPhase(seg, Standby, "", false)
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
@@ -74,17 +80,17 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				outdated = true
 			}
 			held = false
-			r.setPhase(seg, Standby, "")
+			r.setPhase(seg, Standby, "", false)
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
 		outdated = false
-		retry.Reset()
 		if !held {
 			r.log(ctx, slog.LevelInfo, seg, cp.Position, "projection segment claimed")
 			held = true
 		}
 
+		before := r.position(seg)
 		r.setActive(seg, true)
 		err = r.work(ctx, seg, cp)
 		r.setActive(seg, false)
@@ -95,8 +101,16 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			// Another instance took the segment; compete for it again.
 			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 			held = false
+			retry.Reset()
+			r.setPhase(seg, Standby, "", false)
 		default:
-			r.setPhase(seg, Stalled, err.Error())
+			// A stalled segment keeps its claim, so the next Claim
+			// succeeds: only a segment that moved before failing starts
+			// its backoff over.
+			if r.position(seg) != before {
+				retry.Reset()
+			}
+			r.setPhase(seg, Stalled, err.Error(), true)
 			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
@@ -130,7 +144,9 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		switch {
 		case upgraded, typesChanged && r.p.Reset != nil && r.segments == 1:
 			var err error
-			if cp, err = r.rebuild(ctx, seg); err != nil {
+			cp, err = r.rebuild(ctx, seg)
+			r.rebuildTried(ctx, 0, err) // its Reset serves requests made meanwhile
+			if err != nil {
 				return err
 			}
 		case typesChanged:
@@ -138,23 +154,36 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		}
 	}
 
+	var rebuildChecked time.Time
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		if req := r.takeRebuild(seg); req != nil {
-			var err error
-			cp, err = r.rebuild(ctx, seg)
-			req.finish(err)
+		// Segment 0 serves rebuild requests, from this instance or any
+		// other, between two batches.
+		if seg == 0 {
+			requested, err := r.rebuildDue(ctx, &rebuildChecked)
 			if err != nil {
 				return err
 			}
+			if requested > 0 {
+				cp, err = r.rebuild(ctx, seg)
+				r.rebuildTried(ctx, requested, err)
+				if err != nil {
+					return err
+				}
+			}
 		}
-		for _, req := range r.takeReplays(seg) {
+		reqs := r.takeReplays(seg)
+		for i, req := range reqs {
 			err := r.replayStream(ctx, seg, cp, req.streamID)
 			req.finish(err)
 			if errors.Is(err, ErrClaimLost) {
+				// The segment is no longer this instance's to replay on.
+				for _, rest := range reqs[i+1:] {
+					rest.finish(ErrNotActive)
+				}
 				return err
 			}
 		}
@@ -227,7 +256,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			r.segs[seg].rebuilding = false
 			r.log(ctx, slog.LevelInfo, seg, next, "projection rebuild finished")
 		}
-		if res.AtEnd && !r.waitLive(ctx) {
+		if res.AtEnd && !r.waitLive(ctx, seg) {
 			return ctx.Err()
 		}
 	}
@@ -256,6 +285,7 @@ func (r *Runner) reclaim(ctx context.Context, seg int) (Checkpoint, error) {
 func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
 	r.mu.Lock()
+	r.resetting = true // until the caller's rebuildTried
 	before := make([]Lease, len(r.segs))
 	for i, s := range r.segs {
 		before[i] = s.lease
@@ -264,18 +294,17 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
-	cp, err := r.reclaim(ctx, seg)
-	if err != nil {
-		return Checkpoint{}, err
-	}
+	// The read model is wiped now, whether or not the reclaim below
+	// succeeds: put every segment back at position 0 first, so no
+	// WaitUntil sees a position from before the wipe.
 	r.mu.Lock()
 	head := r.segs[seg].status.Head
 	for i, s := range r.segs {
-		if i == seg {
-			continue
-		}
 		s.status.Position = 0
 		s.status.Version = r.p.Version
+		if i == seg {
+			continue // Reset kept seg's claim
+		}
 		// The store released the segment. Retire the lease it was held
 		// under, so a commit that reached the store before the reset
 		// cannot write its wiped position back through setStatus. A
@@ -284,11 +313,16 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 			s.lease.Epoch = 0
 		}
 	}
+	r.signalChange()
 	r.mu.Unlock()
 	r.segs[seg].rebuilding = true
 	// The replay runs every event through the handler again, so nothing
 	// stays parked; Reset deleted the dead letters that parked it.
 	r.segs[seg].parked = map[string]bool{}
+	cp, err := r.reclaim(ctx, seg)
+	if err != nil {
+		return Checkpoint{}, err
+	}
 	r.setStatus(seg, r.lease(seg), Status{
 		Phase:    CatchingUp,
 		Position: cp.Position,
@@ -373,6 +407,14 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 			}
 			r.segs[seg].parked[env.StreamID] = true
 		default:
+			return err
+		}
+	}
+	// The read may have scanned past the last event, over events this
+	// segment does not handle: commit up to where it scanned, as the batch
+	// would have.
+	if last := events[len(events)-1].GlobalPosition; batchCP.Position > last {
+		if err := r.commit(ctx, seg, batchCP, batchStatus, func(context.Context) error { return nil }); err != nil {
 			return err
 		}
 	}
@@ -533,15 +575,15 @@ func (r *Runner) commit(ctx context.Context, seg int, cp Checkpoint, status Stat
 	return nil
 }
 
-// waitLive blocks at the head of the log until a nudge or the poll
+// waitLive blocks seg at the head of the log until a nudge or the poll
 // interval elapses. It reports false if ctx is done.
-func (r *Runner) waitLive(ctx context.Context) bool {
+func (r *Runner) waitLive(ctx context.Context, seg int) bool {
 	t := time.NewTimer(r.p.PollInterval)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-r.nudge:
+	case <-r.segs[seg].nudge:
 	case <-t.C:
 	}
 	return true

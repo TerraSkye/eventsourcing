@@ -93,6 +93,16 @@ func TestProjectionTelemetry_Runner(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Read the gauges while the runner is live: once Run returns, it no
+	// longer processes the projection and reports Standby.
+	observed := map[string]float64{}
+	for _, rec := range forProjection(durationRecorder.collect(t.Context()), name) {
+		key := rec.name
+		if phase := attrString(rec.attrs, AttrProjectionPhase); phase != "" {
+			key += "/" + phase
+		}
+		observed[key] = rec.value
+	}
 	cancel()
 	<-done
 
@@ -120,14 +130,6 @@ func TestProjectionTelemetry_Runner(t *testing.T) {
 		t.Errorf("batch durations = %v, want the first with result success", batches)
 	}
 
-	observed := map[string]float64{}
-	for _, rec := range forProjection(durationRecorder.collect(t.Context()), name) {
-		key := rec.name
-		if phase := attrString(rec.attrs, AttrProjectionPhase); phase != "" {
-			key += "/" + phase
-		}
-		observed[key] = rec.value
-	}
 	want := map[string]float64{
 		"eventsourcing.projection.lag":               0,
 		"eventsourcing.projection.position":          3,

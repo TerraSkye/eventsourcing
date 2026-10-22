@@ -188,7 +188,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		_, err = tx.Exec(ctx, `
 			UPDATE projection_segments
-			SET replay_until = position, position = 0, version = $2, fingerprint = '',
+			SET replay_until = GREATEST(replay_until, position), position = 0, version = $2, fingerprint = '',
 			    head = 0, last_error = NULL,
 			    phase = CASE WHEN segment = $3 THEN 'starting' ELSE 'standby' END,
 			    owner = CASE WHEN segment = $3 THEN owner END,
@@ -201,6 +201,11 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM projection_dead_letters WHERE projection = $1`, l.Name); err != nil {
 			return fmt.Errorf("postgres: clear dead letters of %q: %w", l.Name, err)
+		}
+		// Every rebuild requested so far is served by this one. A request
+		// made after this statement waits for the row and stays pending.
+		if _, err := tx.Exec(ctx, `UPDATE projection_rebuilds SET done = requested WHERE name = $1`, l.Name); err != nil {
+			return fmt.Errorf("postgres: mark rebuild requests of %q done: %w", l.Name, err)
 		}
 		return nil
 	})
@@ -270,11 +275,13 @@ func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, st
 // LoadStatuses returns the status of every segment of name.
 func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT segment, phase, position, version, head, last_error, owner,
-		       EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat))
-		FROM projection_segments
-		WHERE name = $1
-		ORDER BY segment`,
+		SELECT s.segment, s.phase, s.position, s.version, s.head, s.last_error, s.owner,
+		       EXTRACT(EPOCH FROM (clock_timestamp() - s.heartbeat)),
+		       s.replay_until, COALESCE(r.requested > r.done, false)
+		FROM projection_segments s
+		LEFT JOIN projection_rebuilds r ON r.name = s.name
+		WHERE s.name = $1
+		ORDER BY s.segment`,
 		name,
 	)
 	if err != nil {
@@ -293,8 +300,10 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 			lastErr    *string
 			owner      *string
 			ageSeconds float64
+			replay     uint64
+			pending    bool
 		)
-		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds); err != nil {
+		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds, &replay, &pending); err != nil {
 			return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 		}
 		st := projection.Status{
@@ -304,6 +313,9 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 			Version:  version,
 			Segment:  seg,
 			Age:      time.Duration(ageSeconds * float64(time.Second)),
+
+			ReplayUntil:      replay,
+			RebuildRequested: pending,
 		}
 		if lastErr != nil {
 			st.LastError = *lastErr
@@ -317,6 +329,40 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 	}
 	return out, nil
+}
+
+// RequestRebuild implements [projection.Store].
+func (s *ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+	var n uint64
+	err := s.db.QueryRow(ctx, `
+		INSERT INTO projection_rebuilds (name, requested)
+		SELECT $1, 1 WHERE EXISTS (SELECT 1 FROM projection_segments WHERE name = $1)
+		ON CONFLICT (name) DO UPDATE SET requested = projection_rebuilds.requested + 1
+		RETURNING requested`,
+		name,
+	).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, projection.ErrUnknownProjection
+	}
+	if err != nil {
+		return 0, fmt.Errorf("postgres: request rebuild of %q: %w", name, err)
+	}
+	return n, nil
+}
+
+// Rebuilds implements [projection.Store].
+func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+	err = s.db.QueryRow(ctx, `
+		SELECT requested, done FROM projection_rebuilds WHERE name = $1`,
+		name,
+	).Scan(&requested, &done)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("postgres: read rebuild requests of %q: %w", name, err)
+	}
+	return requested, done, nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called

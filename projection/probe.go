@@ -126,9 +126,12 @@ func (p *Probe) IsLive(ctx context.Context) (bool, error) {
 // model, so a wait that returns just before a rebuild starts may be
 // followed by reads that miss the write until the rebuild catches up.
 func (p *Probe) WaitUntil(ctx context.Context, position uint64) error {
-	// The first wait starts the poller and the last one stops it.
+	// The first wait starts the poller and the last one stops it. Statuses
+	// a stopped poller read may be from before a rebuild, so a new poller
+	// answers only from its own reads.
 	p.mu.Lock()
 	if p.waiters++; p.waiters == 1 {
+		p.statuses = nil
 		pollCtx, cancel := context.WithCancel(context.Background())
 		p.stop = cancel
 		go p.poll(pollCtx)
