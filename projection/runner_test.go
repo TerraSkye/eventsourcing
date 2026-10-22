@@ -488,8 +488,6 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 	}
 }
 
-// TestRunner_RebuildNotActive covers that Rebuild on a runner that is not
-// running returns ErrNotActive instead of blocking until ctx is done.
 // TestRunner_SkipWhenLiveAfterRestart covers that SkipWhenLive skips a
 // failing new event even when the runner meets it right after a restart,
 // before it has reported Live in this process.
@@ -1010,5 +1008,57 @@ func TestRunner_LogsLifecycle(t *testing.T) {
 	recs := logs.snapshot()
 	if lastRec := recs[len(recs)-1]; lastRec.Level != slog.LevelInfo || !strings.Contains(lastRec.Message, "released") {
 		t.Fatalf("last record = %q (%s), want the Info for the release on shutdown", lastRec.Message, lastRec.Level)
+	}
+}
+
+// TestRunner_RebuildResetFails covers a Reset that fails on the instance
+// Rebuild is called on: Rebuild returns the error instead of waiting until
+// ctx ends, and the request stays pending until a retry serves it.
+func TestRunner_RebuildResetFails(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	c := newCounter()
+	var mu sync.Mutex
+	failing := true
+	p := projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Owner:        "a",
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+		Version:      1,
+		Reset: func(ctx context.Context) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if failing {
+				return errors.New("wipe failed")
+			}
+			return c.Reset(ctx)
+		},
+	}
+	r := projection.NewRunner(p, es, ps)
+	defer runRunner(t, r)()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+
+	err := r.Rebuild(ctx)
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("Rebuild with a failing Reset = %v, want the Reset's error before ctx ends", err)
+	}
+	if requested, done, _ := ps.Rebuilds(ctx, "test"); requested != 1 || done != 0 {
+		t.Fatalf("Rebuilds = %d, %d; want 1, 0: the request stays pending", requested, done)
+	}
+
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	waitRebuilt(t, ps, 1)
+	if got := resets(c); got != 1 {
+		t.Errorf("Reset ran %d times once it worked, want once", got)
 	}
 }

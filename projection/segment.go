@@ -147,12 +147,14 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		// Segment 0 serves rebuild requests, from this instance or any
 		// other, between two batches.
 		if seg == 0 {
-			due, err := r.rebuildDue(ctx, &rebuildChecked)
+			requested, err := r.rebuildDue(ctx, &rebuildChecked)
 			if err != nil {
 				return err
 			}
-			if due {
-				if cp, err = r.rebuild(ctx, seg); err != nil {
+			if requested > 0 {
+				cp, err = r.rebuild(ctx, seg)
+				r.rebuildTried(ctx, requested, err)
+				if err != nil {
 					return err
 				}
 			}

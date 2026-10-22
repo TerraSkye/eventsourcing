@@ -88,6 +88,13 @@ type Runner struct {
 	// warnedRebuild is the last rebuild request logged as impossible for
 	// want of a Reset. Only segment 0's goroutine uses it.
 	warnedRebuild uint64
+	// rebuilt is closed and replaced after every rebuild segment 0 tries
+	// on this instance, for Rebuild to look at the store again.
+	rebuilt chan struct{}
+	// rebuildFailed is the last rebuild request a rebuild on this
+	// instance failed to serve, and rebuildErr why.
+	rebuildFailed uint64
+	rebuildErr    error
 
 	skipped atomic.Int64
 }
@@ -183,6 +190,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 
 		pendingReplays: map[int][]*replayRequest{},
 		changed:        make(chan struct{}),
+		rebuilt:        make(chan struct{}),
 	}
 	r.probe = NewProbe(store, p.Name,
 		WithPollInterval(p.PollInterval),
@@ -283,6 +291,11 @@ func (r *Runner) Run(ctx context.Context) error {
 // served by it. Any process with the store can request one the same way
 // with [Store.RequestRebuild], without running the projection.
 //
+// When the reset fails, the request stays pending and segment 0 stalls and
+// tries again after its backoff, as [Status] shows with its LastError. If
+// the reset failed on this instance, Rebuild returns that error; if it
+// failed on another, Rebuild keeps waiting until ctx ends.
+//
 // Rebuild returns [ErrNoReset] when the projection has no Reset, and an
 // error wrapping [ErrUnknownProjection] before any runner declared it.
 func (r *Runner) Rebuild(ctx context.Context) error {
@@ -302,7 +315,7 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		r.mu.Lock()
-		changed := r.changed
+		rebuilt := r.rebuilt
 		r.mu.Unlock()
 		_, done, err := r.store.Rebuilds(ctx, r.p.Name)
 		if err != nil {
@@ -311,35 +324,55 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 		if done >= n {
 			return nil
 		}
+		r.mu.Lock()
+		failed, failErr := r.rebuildFailed, r.rebuildErr
+		r.mu.Unlock()
+		if failed >= n {
+			return failErr
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-changed: // the reset on this instance changes every status
-		case <-tick.C: // a reset elsewhere only shows in the store
+		case <-rebuilt: // a rebuild on this instance served or failed it
+		case <-tick.C: // a rebuild elsewhere only shows in the store
 		}
 	}
 }
 
-// rebuildDue reports whether segment 0 should rebuild now: a rebuild was
-// requested and Reset has not served it. It asks the store at most once per
-// PollInterval, and at once after a Rebuild on this instance. last is when
-// the segment last asked.
-func (r *Runner) rebuildDue(ctx context.Context, last *time.Time) (bool, error) {
+// rebuildTried records that segment 0 tried to serve rebuild request
+// requested, failing with err, and wakes the Rebuild calls waiting on this
+// instance. A rebuild cut short by the claim moving or Run stopping has not
+// failed: whichever runner holds segment 0 next serves the request.
+func (r *Runner) rebuildTried(ctx context.Context, requested uint64, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err != nil && ctx.Err() == nil && !errors.Is(err, ErrClaimLost) {
+		r.rebuildFailed, r.rebuildErr = requested, err
+	}
+	close(r.rebuilt)
+	r.rebuilt = make(chan struct{})
+}
+
+// rebuildDue returns the last rebuild request when segment 0 should rebuild
+// now, as it was requested and Reset has not served it, and 0 otherwise.
+// It asks the store at most once per PollInterval, and at once after a
+// Rebuild on this instance. last is when the segment last asked.
+func (r *Runner) rebuildDue(ctx context.Context, last *time.Time) (uint64, error) {
 	r.mu.Lock()
 	asked := r.checkRebuild
 	r.checkRebuild = false
 	r.mu.Unlock()
 	if !asked && !last.IsZero() && time.Since(*last) < r.p.PollInterval {
-		return false, nil
+		return 0, nil
 	}
 	*last = time.Now()
 
 	requested, done, err := r.store.Rebuilds(ctx, r.p.Name)
 	if err != nil {
-		return false, fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
+		return 0, fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
 	}
 	if requested <= done {
-		return false, nil
+		return 0, nil
 	}
 	if r.p.Reset == nil {
 		// Another program asked through the store, not knowing there is
@@ -351,9 +384,9 @@ func (r *Runner) rebuildDue(ctx context.Context, last *time.Time) (bool, error) 
 				slog.Uint64("request", requested))
 			r.warnedRebuild = requested
 		}
-		return false, nil
+		return 0, nil
 	}
-	return true, nil
+	return requested, nil
 }
 
 // setActive records whether this instance is processing seg. When seg stops
