@@ -82,3 +82,96 @@ func TestRunner_StallBackoffGrows(t *testing.T) {
 		})
 	}
 }
+
+// claimErrStore fails the first fails calls to Claim, as a store with a
+// transient connection error would.
+type claimErrStore struct {
+	projection.Store
+	mu    sync.Mutex
+	fails int
+}
+
+func (s *claimErrStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+	s.mu.Lock()
+	fail := s.fails > 0
+	if fail {
+		s.fails--
+	}
+	s.mu.Unlock()
+	if fail {
+		return projection.Lease{}, projection.Checkpoint{}, false, errors.New("connection reset")
+	}
+	return s.Store.Claim(ctx, l, ttl)
+}
+
+// TestRunner_ClaimErrorLeavesOwnerToStore covers a Runner whose Claim fails
+// with a store error while another instance holds the segment: it does not
+// report itself as the owner, so IsLive and WaitUntil ask the store, where
+// the real owner's progress is.
+func TestRunner_ClaimErrorLeavesOwnerToStore(t *testing.T) {
+	newDef := func(owner string, segments int) projection.Definition {
+		d := projection.Definition{
+			Name:         "test",
+			Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+			EventTypes:   counterEvents,
+			Owner:        owner,
+			PollInterval: 10 * time.Millisecond,
+			ClaimTTL:     time.Second,
+		}
+		if segments > 1 {
+			d.Segments, d.SegmentKey = segments, projection.ByStreamID
+		}
+		return d
+	}
+
+	tests := []struct {
+		name     string
+		segments int
+	}{
+		{name: "one segment", segments: 1},
+		{name: "two segments", segments: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			es := &testStore{}
+			ps := memory.NewProjectionStore()
+
+			// b owns every segment and processes the log.
+			b := projection.NewRunner(newDef("b", tt.segments), es, ps)
+			defer runRunner(t, b)()
+			pos := save(t, es, 3)
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			if err := b.WaitUntil(ctx, pos); err != nil {
+				t.Fatalf("b.WaitUntil(%d): %v", pos, err)
+			}
+
+			// a's first Claim on each segment fails with a store error.
+			as := &claimErrStore{Store: ps, fails: tt.segments}
+			a := projection.NewRunner(newDef("a", tt.segments), es, as)
+			defer runRunner(t, a)()
+			for a.Status().Phase != projection.Stalled {
+				if ctx.Err() != nil {
+					t.Fatal("a never stalled on its failing Claim")
+				}
+				time.Sleep(time.Millisecond)
+			}
+
+			if st := a.Status(); st.Owner == "a" {
+				t.Errorf("a.Status().Owner = %q after a Claim error, while b holds every segment; Status() = %+v", st.Owner, st)
+			}
+			if tt.segments == 1 {
+				live, err := a.IsLive(t.Context())
+				if err != nil || !live {
+					t.Errorf("a.IsLive() = %v, %v; want true, nil: b owns the segment and is live", live, err)
+				}
+			}
+			// 200ms is 20 PollIntervals, well before a's retry backoff ends.
+			wctx, wcancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer wcancel()
+			if err := a.WaitUntil(wctx, pos); err != nil {
+				t.Errorf("a.WaitUntil(%d) = %v; b already processed it", pos, err)
+			}
+		})
+	}
+}

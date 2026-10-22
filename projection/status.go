@@ -143,15 +143,16 @@ func (r *Runner) setStatus(seg int, l Lease, s Status) {
 }
 
 // setPhase moves seg to phase p, recording lastErr for [Stalled], and
-// notifies watchers.
-func (r *Runner) setPhase(seg int, p Phase, lastErr string) {
+// notifies watchers. owned reports whether this instance holds the
+// segment's claim; when it does not, the status names no owner, so
+// [Runner.IsLive] and [Runner.WaitUntil] ask the store about the segment.
+func (r *Runner) setPhase(seg int, p Phase, lastErr string, owned bool) {
 	r.mu.Lock()
 	st := &r.segs[seg].status
 	st.Phase = p
 	st.LastError = lastErr
-	if p == Standby {
-		st.Owner = ""
-	} else {
+	st.Owner = ""
+	if owned {
 		st.Owner = r.p.Owner
 	}
 	r.signalChange()

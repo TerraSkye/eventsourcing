@@ -48,7 +48,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 	for ctx.Err() == nil {
 		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
-			r.setPhase(seg, Stalled, err.Error())
+			// The claim failed, so this instance does not know it holds
+			// the segment: leave the owner to the store.
+			r.setPhase(seg, Stalled, err.Error(), false)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
 			sleepCtx(ctx, wait)
@@ -60,7 +62,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				held = false
 			}
 			retry.Reset()
-			r.setPhase(seg, Standby, "")
+			r.setPhase(seg, Standby, "", false)
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
@@ -75,7 +77,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				outdated = true
 			}
 			held = false
-			r.setPhase(seg, Standby, "")
+			r.setPhase(seg, Standby, "", false)
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
@@ -104,7 +106,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			if r.position(seg) != before {
 				retry.Reset()
 			}
-			r.setPhase(seg, Stalled, err.Error())
+			r.setPhase(seg, Stalled, err.Error(), true)
 			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)

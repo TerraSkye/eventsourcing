@@ -89,6 +89,9 @@ release may break the API; every break is listed under **Breaking**.
 - `Runner.Nudge` wakes every segment. Before, it woke one, and the others
   waited out their `PollInterval`, so `WaitUntil` after a `Nudge` on a
   segmented projection took up to a full interval.
+- A `Claim` that fails with a store error no longer makes the runner
+  report itself as the segment's owner, so `IsLive` and `WaitUntil` ask
+  the store, where the real owner's progress is.
 - `Store.Reset` keeps the larger of the current `ReplayUntil` and the
   position reached. Before, a rebuild during the replay lowered it, and
   `IsReplaying` reported events already in the log as new.
