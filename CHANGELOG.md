@@ -9,6 +9,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- Package `file` is removed, as deprecated in v0.2.0. Before upgrading,
+  copy a file store's events into SQLite with `sqlite.Import` on v0.2.0.
 - `projection.Store` has two more methods, `RequestRebuild` and
   `Rebuilds`, and `Reset` marks the requests it serves as done. The memory,
   Postgres and SQLite stores and the telemetry wrapper implement them; a
