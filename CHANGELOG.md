@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
 ### Breaking
 
 - Correlation and causation are fields of `Envelope`, set by the library,
