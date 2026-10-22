@@ -370,6 +370,15 @@ release may break the API; every break is listed under **Breaking**.
   `command_type` and a per-call `command_id`.
 - `automation.Definition.Chain` returns the chain of the event that put an
   item on the todo list, so the events of its work join that chain.
+- The `dashboard` package serves a page that shows every projection's
+  progress live: how far each segment is, how far behind, how fast it
+  catches up, and why a stalled segment stalled. It reads the status
+  runners publish to the projection store, so it shows projections
+  wherever they run; mount it with `dashboard.New(store, ...)` on any
+  `http.ServeMux`. `WithReset` adds a rebuild button to every projection
+  shown, also from a process that does not run it: it requests the
+  rebuild through the store and shows it pending until it starts.
+  `go run ./examples/dashboard` starts a demo.
 - `Store.RequestRebuild` asks for a rebuild from any program with the
   store, such as a web process, without running the projection.
   `Status.RebuildRequested` shows a pending one and `Status.ReplayUntil`
