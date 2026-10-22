@@ -16,7 +16,9 @@
 //
 // The handler serves the page at its root, so mount it on a path ending in
 // a slash. It has no authentication of its own: wrap it in the program's
-// own auth middleware before exposing it.
+// own auth middleware before exposing it. It answers only requests for
+// localhost or an IP address; name the host it is reached under with
+// [WithAllowedHosts], as in dashboard.WithAllowedHosts("ops.example.com").
 //
 // # Rebuilding
 //
@@ -33,7 +35,9 @@
 //
 // The rebuild endpoint only accepts requests from the dashboard's own page
 // (checked through the Origin and Sec-Fetch-Site headers), so another site
-// cannot trigger one from a visitor's browser.
+// cannot trigger one from a visitor's browser. The check on the Host header
+// keeps a site that rebinds its own name to the dashboard's address from
+// passing for it.
 //
 // # Updates
 //
