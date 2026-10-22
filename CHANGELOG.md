@@ -97,6 +97,10 @@ release may break the API; every break is listed under **Breaking**.
 - A `Claim` that fails with a store error no longer makes the runner
   report itself as the segment's owner, so `IsLive` and `WaitUntil` ask
   the store, where the real owner's progress is.
+- When a batch is retried event by event, the store's checkpoint now
+  moves to the end of the read, past events the segment does not handle.
+  Before, it stayed at the last handled event, and waits on the store for
+  the scanned positions hung until a new event arrived.
 - `Store.Reset` keeps the larger of the current `ReplayUntil` and the
   position reached. Before, a rebuild during the replay lowered it, and
   `IsReplaying` reported events already in the log as new.

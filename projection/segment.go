@@ -398,6 +398,14 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 			return err
 		}
 	}
+	// The read may have scanned past the last event, over events this
+	// segment does not handle: commit up to where it scanned, as the batch
+	// would have.
+	if last := events[len(events)-1].GlobalPosition; batchCP.Position > last {
+		if err := r.commit(ctx, seg, batchCP, batchStatus, func(context.Context) error { return nil }); err != nil {
+			return err
+		}
+	}
 	r.notifyWatchers()
 	return nil
 }

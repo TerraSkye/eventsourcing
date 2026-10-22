@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -250,6 +251,83 @@ func TestRunner_NotOwnerAfterRunReturns(t *testing.T) {
 			a := projection.NewRunner(newDef("a"), es, ps)
 			startAndStop(t, a)
 			tt.check(t, es, ps, a)
+		})
+	}
+}
+
+type oneByOneUnhandled struct{}
+
+func (oneByOneUnhandled) AggregateID() string { return "other" }
+func (oneByOneUnhandled) EventType() string   { return "projection_test.OneByOneUnhandled" }
+
+// TestRunner_OneByOneRetryCommitsScannedPosition covers a batch whose
+// handler fails once and succeeds when the runner retries it event by
+// event, where the read also scanned events the projection does not handle
+// past the last handled one. The store's checkpoint moves to the end of the
+// read too, so a wait on the store sees the scanned position.
+func TestRunner_OneByOneRetryCommitsScannedPosition(t *testing.T) {
+	tests := []struct {
+		name     string
+		segments int
+		envs     []eventsourcing.Envelope
+	}{
+		{
+			// Position 2 is filtered out by EventTypes.
+			name:     "unhandled event type after the failing event",
+			segments: 1,
+			envs: []eventsourcing.Envelope{
+				{EventID: uuid.New(), StreamID: "s", Event: &taskCreated{ID: "s"}, Version: 1},
+				{EventID: uuid.New(), StreamID: "other", Event: oneByOneUnhandled{}, Version: 1},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			es := &testStore{}
+			ps := memory.NewProjectionStore()
+			res, err := es.Save(t.Context(), tt.envs, eventsourcing.Any{})
+			if err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			last := res.GlobalPosition
+
+			// The first batch fails; the event-by-event retry succeeds.
+			var calls atomic.Int32
+			h := eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error {
+				if calls.Add(1) == 1 {
+					return errors.New("transient")
+				}
+				return nil
+			})
+			r := projection.NewRunner(projection.Definition{
+				Name:         "p",
+				Owner:        "a",
+				Handler:      h,
+				EventTypes:   counterEvents,
+				PollInterval: 10 * time.Millisecond,
+				ClaimTTL:     time.Second,
+			}, es, ps)
+			defer runRunner(t, r)()
+
+			// The runner itself gets past the whole read.
+			deadline := time.After(2 * time.Second)
+			for r.Status().Position < last {
+				select {
+				case <-deadline:
+					t.Fatalf("runner never reached %d in memory: %+v", last, r.Status())
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+
+			// Every event up to last is processed, so a wait on the store
+			// must return within a few poll intervals.
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			probe := projection.NewProbe(ps, "p", projection.WithPollInterval(5*time.Millisecond))
+			if err := probe.WaitUntil(ctx, last); err != nil {
+				statuses, _ := ps.LoadStatuses(t.Context(), "p")
+				t.Fatalf("Probe.WaitUntil(%d) = %v\nin memory: %+v\nin store: %+v", last, err, r.Status(), statuses)
+			}
 		})
 	}
 }
