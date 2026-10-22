@@ -1322,7 +1322,7 @@ func TestRunner_RebuildMidReplayKeepsReplayUntil(t *testing.T) {
 	c.mu.Lock()
 	for gv := uint64(1); gv <= 4; gv++ {
 		if !c.replayed[gv] {
-			t.Fatalf("IsReplaying for event %d before Rebuild = false, want true", gv)
+			t.Errorf("IsReplaying for event %d before Rebuild = false, want true", gv)
 		}
 	}
 	c.mu.Unlock()

@@ -960,8 +960,8 @@ func (s *storeAcceptance) rebuildCounted(t *testing.T) {
 	if requested, done, err := s.store.Rebuilds(t.Context(), name); err != nil || requested != 2 || done != 0 {
 		t.Fatalf("Rebuilds = %d, %d, %v; want 2, 0, nil", requested, done, err)
 	}
-	other := s.newProjection(t, 1)
-	if requested, _, _ := s.store.Rebuilds(t.Context(), other); requested != 0 {
+	unrelated := s.newProjection(t, 1)
+	if requested, _, _ := s.store.Rebuilds(t.Context(), unrelated); requested != 0 {
 		t.Errorf("another projection's requests = %d, want 0: requests are per projection", requested)
 	}
 }

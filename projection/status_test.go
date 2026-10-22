@@ -26,6 +26,7 @@ func TestRunner_WatchCalledWhenPhaseGoesLiveWithoutEvents(t *testing.T) {
 	// runUntilLive runs r until it reports Live and returns the phase seen
 	// by each watcher call.
 	runUntilLive := func(t *testing.T, r *projection.Runner) []projection.Phase {
+		t.Helper()
 		var mu sync.Mutex
 		var phases []projection.Phase
 		r.Watch(func() {
