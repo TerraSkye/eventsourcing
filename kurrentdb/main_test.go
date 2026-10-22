@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || bench
 
 package kurrentdb_test
 
@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
-
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -19,12 +17,10 @@ import (
 
 var testDB *kurrentdb.Client
 
-// TestMain starts a single kurrentdb container for every test in this
-// package, so each test doesn't pay its own container-startup cost.
+// TestMain starts a single kurrentdb container for every test and
+// benchmark in this package, so each doesn't pay its own container-startup
+// cost.
 func TestMain(m *testing.M) {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &CheckEvent{} })
-	cqrs.RegisterEventByType(func() cqrs.Event { return &leakEvent{} })
-
 	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
 		Image:        "kurrentplatform/kurrentdb:latest",

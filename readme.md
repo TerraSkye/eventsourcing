@@ -268,6 +268,9 @@ go test -race ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... 
 # integration tests (Postgres and KurrentDB via testcontainers; needs Docker)
 go test -race -tags=integration -timeout 20m ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/...
 
+# benchmarks (Postgres and KurrentDB via testcontainers; see BENCHMARKS.md)
+go test -tags=bench -run '^$' -bench . -benchmem -timeout 60m ./memory/ ./sqlite/ ./postgres/ ./kurrentdb/
+
 # root module alone, on its minimum Go version
 GOWORK=off go test -race ./...
 

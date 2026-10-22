@@ -23,6 +23,10 @@ type CheckEvent struct {
 func (CheckEvent) AggregateID() string { return "check" }
 func (CheckEvent) EventType() string   { return "CheckEvent" }
 
+func init() {
+	cqrs.RegisterEventByType(func() cqrs.Event { return &CheckEvent{} })
+}
+
 func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
 	t.Helper()
 	var out []*cqrs.Envelope

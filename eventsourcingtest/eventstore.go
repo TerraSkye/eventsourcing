@@ -6,6 +6,9 @@
 //	func TestAcceptance(t *testing.T) {
 //		eventsourcingtest.AcceptanceTest(t, memory.NewEventStore(100))
 //	}
+//
+// [Benchmark] measures a store the same way, so that numbers compare across
+// backends.
 package eventsourcingtest
 
 import (
