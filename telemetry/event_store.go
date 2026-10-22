@@ -70,7 +70,10 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 		AttrStreamVersion.Int64(revision.ToRawInt64()),
 	)
 	if len(events) > 0 {
-		spanAttrs = append(spanAttrs, chainAttrs(events[0].CorrelationID, events[0].CausationID)...)
+		spanAttrs = append(spanAttrs,
+			AttrCorrelationID.String(events[0].CorrelationID),
+			AttrCausationID.String(events[0].CausationID),
+		)
 	}
 
 	spanName := "append eventstore"

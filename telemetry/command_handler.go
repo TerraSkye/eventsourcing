@@ -30,8 +30,9 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 			attr := []attribute.KeyValue{
 				AttrCommandType.String(cmd.CommandType()),
 				AttrAggregateID.String(cmd.AggregateID()),
+				AttrCorrelationID.String(eventsourcing.CorrelationIDFromContext(ctx)),
+				AttrCausationID.String(eventsourcing.CausationIDFromContext(ctx)),
 			}
-			attr = append(attr, chainAttrs(eventsourcing.CorrelationIDFromContext(ctx), eventsourcing.CausationIDFromContext(ctx))...)
 			attr = append(attr, cfg.Attributes...)
 
 			if cfg.GetAttributes != nil {
@@ -144,8 +145,9 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 		attr := append(slices.Clone(baseAttributes),
 			AttrAggregateID.String(cmd.AggregateID()),
 			AttrCommandType.String(cmd.CommandType()),
+			AttrCorrelationID.String(eventsourcing.CorrelationIDFromContext(ctx)),
+			AttrCausationID.String(eventsourcing.CausationIDFromContext(ctx)),
 		)
-		attr = append(attr, chainAttrs(eventsourcing.CorrelationIDFromContext(ctx), eventsourcing.CausationIDFromContext(ctx))...)
 
 		if cfg.GetAttributes != nil {
 			attr = append(attr, cfg.GetAttributes(ctx)...)
