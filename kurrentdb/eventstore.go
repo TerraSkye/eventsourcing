@@ -137,8 +137,16 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			)
 		}
 
-		metaData, err := encodeMetadata(ev)
-
+		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
+		metadata := make(map[string]any, len(ev.Metadata)+2)
+		maps.Copy(metadata, ev.Metadata)
+		if ev.CorrelationID != "" {
+			metadata[correlationIDKey] = ev.CorrelationID
+		}
+		if ev.CausationID != "" {
+			metadata[causationIDKey] = ev.CausationID
+		}
+		metadataJSON, err := json.Marshal(metadata)
 		if err != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d failed to marshal meta data %s",
@@ -151,7 +159,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			EventType:   ev.Event.EventType(),
 			ContentType: kurrentdb.ContentTypeJson,
 			Data:        eventData,
-			Metadata:    metaData,
+			Metadata:    metadataJSON,
 		}
 	}
 
@@ -519,20 +527,6 @@ const (
 	correlationIDKey = "$correlationId"
 	causationIDKey   = "$causationId"
 )
-
-// encodeMetadata returns env's Metadata as JSON, with its chain IDs added
-// under KurrentDB's keys.
-func encodeMetadata(env eventsourcing.Envelope) ([]byte, error) {
-	md := make(map[string]any, len(env.Metadata)+2)
-	maps.Copy(md, env.Metadata)
-	if env.CorrelationID != "" {
-		md[correlationIDKey] = env.CorrelationID
-	}
-	if env.CausationID != "" {
-		md[causationIDKey] = env.CausationID
-	}
-	return json.Marshal(md)
-}
 
 // Close closes the underlying KurrentDB client connection.
 func (e EventStore) Close() error {
