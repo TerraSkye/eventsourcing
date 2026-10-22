@@ -17,7 +17,7 @@ jobs:
           cache: true
 
       - name: Run unit tests
-        run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+        run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/... ./examples/dashboard/...
 
   lint:
     runs-on: ubuntu-latest
