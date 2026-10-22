@@ -5,9 +5,11 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/terraskye/eventsourcing/projection"
@@ -32,6 +34,7 @@ type Dashboard struct {
 	interval time.Duration
 	claimTTL time.Duration
 	title    string
+	hosts    []string // host names allowed besides localhost and IP addresses
 
 	mux *http.ServeMux
 	hub *hub
@@ -76,6 +79,20 @@ func WithClaimTTL(ttl time.Duration) Option {
 	return func(d *Dashboard) { d.claimTTL = ttl }
 }
 
+// WithAllowedHosts lets the dashboard answer requests for these host names,
+// such as "ops.example.com". Without it, it answers only requests for
+// localhost or an IP address, and refuses others with 403: a site can
+// point a name it controls at the dashboard's address (DNS rebinding), and
+// its page would then pass for the dashboard's own. Names are compared
+// without the port.
+func WithAllowedHosts(hosts ...string) Option {
+	return func(d *Dashboard) {
+		for _, h := range hosts {
+			d.hosts = append(d.hosts, strings.ToLower(h))
+		}
+	}
+}
+
 // WithTitle sets the page's title. Default "Projections".
 func WithTitle(title string) Option {
 	return func(d *Dashboard) { d.title = title }
@@ -116,13 +133,37 @@ func New(store projection.Store, opts ...Option) *Dashboard {
 
 // ServeHTTP implements [http.Handler].
 func (d *Dashboard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !d.allowedHost(r.Host) {
+		http.Error(w, "dashboard: host "+r.Host+" is not allowed; see WithAllowedHosts", http.StatusForbidden)
+		return
+	}
 	if r.URL.Path == "" {
 		// Mounted under http.StripPrefix and opened without the trailing
-		// slash: the page's relative links need it.
-		http.Redirect(w, r, r.RequestURI+"/", http.StatusMovedPermanently)
+		// slash: the page's relative links need it. The slash goes on the
+		// path, before any query.
+		path, query, _ := strings.Cut(r.RequestURI, "?")
+		target := path + "/"
+		if query != "" {
+			target += "?" + query
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
 		return
 	}
 	d.mux.ServeHTTP(w, r)
+}
+
+// allowedHost reports whether the dashboard answers requests for host, the
+// request's Host header: localhost, an IP address, which DNS rebinding
+// cannot use, or a name given with [WithAllowedHosts].
+func (d *Dashboard) allowedHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || net.ParseIP(strings.Trim(host, "[]")) != nil {
+		return true
+	}
+	return slices.Contains(d.hosts, host)
 }
 
 func (d *Dashboard) servePage(w http.ResponseWriter, r *http.Request) {

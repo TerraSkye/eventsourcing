@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,7 +84,7 @@ type snapshot struct {
 func getSnapshot(t *testing.T, h http.Handler) snapshot {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/snapshot", nil))
+	h.ServeHTTP(rec, localRequest(http.MethodGet, "/api/snapshot", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/snapshot = %d: %s", rec.Code, rec.Body)
 	}
@@ -114,7 +115,7 @@ func TestSnapshot_ShowsRunnersAndFollowedProjections(t *testing.T) {
 func TestPage_IsServedAtTheRoot(t *testing.T) {
 	d := dashboard.New(memory.NewProjectionStore())
 	rec := httptest.NewRecorder()
-	d.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	d.ServeHTTP(rec, localRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>Projections</title>") {
 		t.Fatalf("GET / = %d, want the page", rec.Code)
 	}
@@ -126,9 +127,55 @@ func TestPage_RedirectsToTheTrailingSlash(t *testing.T) {
 	mux.Handle("/dashboard", http.StripPrefix("/dashboard", dashboard.New(memory.NewProjectionStore())))
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	mux.ServeHTTP(rec, localRequest(http.MethodGet, "/dashboard", nil))
 	if loc := rec.Header().Get("Location"); rec.Code != http.StatusMovedPermanently || loc != "/dashboard/" {
 		t.Fatalf("GET /dashboard = %d to %q, want a redirect to /dashboard/", rec.Code, loc)
+	}
+}
+
+// TestPage_RedirectKeepsTheQuery covers a redirect to the trailing slash of
+// a URL with a query: the slash goes on the path, so the redirect does not
+// loop.
+func TestPage_RedirectKeepsTheQuery(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.Handle("/dashboard", http.StripPrefix("/dashboard", dashboard.New(memory.NewProjectionStore())))
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, localRequest(http.MethodGet, "/dashboard?tab=ticks", nil))
+	if loc := rec.Header().Get("Location"); rec.Code != http.StatusMovedPermanently || loc != "/dashboard/?tab=ticks" {
+		t.Fatalf("GET /dashboard?tab=ticks = %d to %q, want a redirect to /dashboard/?tab=ticks", rec.Code, loc)
+	}
+}
+
+// TestHost_RefusesNamesNotAllowed covers DNS rebinding: a page on a site
+// whose name resolves to the dashboard's address sends that name as Host,
+// and is refused unless the name is allowed.
+func TestHost_RefusesNamesNotAllowed(t *testing.T) {
+	tests := []struct {
+		host    string
+		allowed []string
+		want    int
+	}{
+		{host: "localhost:8080", want: http.StatusOK},
+		{host: "127.0.0.1:8080", want: http.StatusOK},
+		{host: "[::1]:8080", want: http.StatusOK},
+		{host: "10.0.0.7", want: http.StatusOK},
+		{host: "attacker.example:8080", want: http.StatusForbidden},
+		{host: "ops.example.com", want: http.StatusForbidden},
+		{host: "ops.example.com", allowed: []string{"ops.example.com"}, want: http.StatusOK},
+		{host: "OPS.example.com:443", allowed: []string{"ops.example.com"}, want: http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			d := dashboard.New(memory.NewProjectionStore(), dashboard.WithAllowedHosts(tt.allowed...))
+			req := httptest.NewRequest(http.MethodGet, "/api/snapshot", nil)
+			req.Host = tt.host
+			rec := httptest.NewRecorder()
+			d.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Errorf("GET /api/snapshot with Host %q, allowed %v = %d, want %d", tt.host, tt.allowed, rec.Code, tt.want)
+			}
+		})
 	}
 }
 
@@ -167,8 +214,16 @@ func TestEvents_StreamsSnapshots(t *testing.T) {
 	}
 }
 
+// localRequest is an incoming request for localhost, which the dashboard
+// answers without WithAllowedHosts.
+func localRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "localhost:8080"
+	return req
+}
+
 func rebuild(d http.Handler, name string, header map[string]string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/api/projections/"+name+"/rebuild", nil)
+	req := localRequest(http.MethodPost, "/api/projections/"+name+"/rebuild", nil)
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}

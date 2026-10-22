@@ -228,8 +228,10 @@ release may break the API; every break is listed under **Breaking**.
   wherever they run; mount it with `dashboard.New(store, ...)` on any
   `http.ServeMux`. `WithReset` adds a rebuild button to every projection
   shown, also from a process that does not run it: it requests the
-  rebuild through the store and shows it pending until it starts.
-  `go run ./examples/dashboard` starts a demo.
+  rebuild through the store and shows it pending until it starts. It
+  answers only requests for localhost or an IP address, and for the host
+  names given with `WithAllowedHosts`. `go run ./examples/dashboard` starts
+  a demo.
 - `Store.RequestRebuild` asks for a rebuild from any program with the
   store, such as a web process, without running the projection.
   `Status.RebuildRequested` shows a pending one and `Status.ReplayUntil`
