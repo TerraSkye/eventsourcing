@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -1060,5 +1061,55 @@ func TestRunner_RebuildResetFails(t *testing.T) {
 	waitRebuilt(t, ps, 1)
 	if got := resets(c); got != 1 {
 		t.Errorf("Reset ran %d times once it worked, want once", got)
+	}
+}
+
+// TestRunner_NudgeWakesEverySegment covers that Nudge makes a live runner
+// read now on every segment, so WaitUntil returns well within PollInterval.
+func TestRunner_NudgeWakesEverySegment(t *testing.T) {
+	for _, segments := range []int{1, 2, 4} {
+		t.Run(fmt.Sprintf("segments=%d", segments), func(t *testing.T) {
+			es := memory.NewEventStore(16)
+			def := projection.Definition{
+				Name:         "nudge",
+				Handler:      eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error { return nil }),
+				EventTypes:   []string{"projection_test.TaskCreated"},
+				PollInterval: 10 * time.Second,
+				ClaimTTL:     30 * time.Second,
+			}
+			if segments > 1 {
+				def.Segments = segments
+				def.SegmentKey = projection.ByStreamID
+			}
+			r := projection.NewRunner(def, es, memory.NewProjectionStore())
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+			defer func() { cancel(); <-done }()
+
+			// Wait for every segment to reach Live at the empty head, then
+			// give each time to block in its wait for a nudge or the poll.
+			deadline := time.Now().Add(2 * time.Second)
+			for r.Status().Phase != projection.Live {
+				if time.Now().After(deadline) {
+					t.Fatalf("never live: %+v", r.Status())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+
+			res, err := es.Save(t.Context(), []eventsourcing.Envelope{{
+				EventID: uuid.New(), StreamID: "s-1", Event: &taskCreated{ID: "t"}, Version: 1,
+			}}, eventsourcing.Any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Nudge()
+			wctx, wcancel := context.WithTimeout(t.Context(), time.Second)
+			defer wcancel()
+			if err := r.WaitUntil(wctx, res.GlobalPosition); err != nil {
+				t.Fatalf("after Nudge, WaitUntil(%d) = %v; want nil well within PollInterval (10s)", res.GlobalPosition, err)
+			}
+		})
 	}
 }

@@ -235,7 +235,7 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			r.segs[seg].rebuilding = false
 			r.log(ctx, slog.LevelInfo, seg, next, "projection rebuild finished")
 		}
-		if res.AtEnd && !r.waitLive(ctx) {
+		if res.AtEnd && !r.waitLive(ctx, seg) {
 			return ctx.Err()
 		}
 	}
@@ -541,15 +541,15 @@ func (r *Runner) commit(ctx context.Context, seg int, cp Checkpoint, status Stat
 	return nil
 }
 
-// waitLive blocks at the head of the log until a nudge or the poll
+// waitLive blocks seg at the head of the log until a nudge or the poll
 // interval elapses. It reports false if ctx is done.
-func (r *Runner) waitLive(ctx context.Context) bool {
+func (r *Runner) waitLive(ctx context.Context, seg int) bool {
 	t := time.NewTimer(r.p.PollInterval)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-r.nudge:
+	case <-r.segs[seg].nudge:
 	case <-t.C:
 	}
 	return true

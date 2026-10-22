@@ -74,8 +74,6 @@ type Runner struct {
 	// fingerprint identifies p.EventTypes; see Checkpoint.Fingerprint.
 	fingerprint string
 
-	nudge chan struct{}
-
 	mu             sync.Mutex
 	segs           []*segmentState // indexed by segment
 	changed        chan struct{}   // closed and replaced on every status change, for WaitUntil
@@ -117,6 +115,9 @@ type segmentState struct {
 	// rebuilding reports that the segment was rebuilt and has not reached
 	// the head of the log since. Only the segment's own goroutine uses it.
 	rebuilding bool
+
+	// nudge wakes the segment at the head of the log; see [Runner.Nudge].
+	nudge chan struct{}
 }
 
 // replayRequest is a pending [Runner.ReplayStream] for one segment.
@@ -183,7 +184,6 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		reader:   reader,
 		store:    store,
 		segments: segments,
-		nudge:    make(chan struct{}, 1),
 
 		fingerprint: fingerprint(p.EventTypes),
 		segs:        make([]*segmentState, segments),
@@ -202,6 +202,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 			status: Status{Phase: Starting, Version: p.Version, Segment: i},
 			lease:  Lease{Name: p.Name, Segment: i, Owner: p.Owner},
 			parked: map[string]bool{},
+			nudge:  make(chan struct{}, 1),
 		}
 	}
 	return r
@@ -460,14 +461,17 @@ func (r *Runner) takeReplays(seg int) []*replayRequest {
 	return reqs
 }
 
-// Nudge asks the runner to read now instead of waiting for its next poll.
+// Nudge asks the runner to read now instead of waiting for its next poll,
+// on every segment it processes.
 //
 // Nudge never blocks, and nudges coalesce. Only reaches this process's
 // runner; other instances rely on polling.
 func (r *Runner) Nudge() {
-	select {
-	case r.nudge <- struct{}{}:
-	default: // a nudge is already pending
+	for _, s := range r.segs { // fixed after NewRunner
+		select {
+		case s.nudge <- struct{}{}:
+		default: // a nudge is already pending
+		}
 	}
 }
 
