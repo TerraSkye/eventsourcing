@@ -89,6 +89,9 @@ release may break the API; every break is listed under **Breaking**.
 - `Runner.Nudge` wakes every segment. Before, it woke one, and the others
   waited out their `PollInterval`, so `WaitUntil` after a `Nudge` on a
   segmented projection took up to a full interval.
+- `Watch` callbacks run when a segment goes `Live` without applying
+  events, such as on a restart with the checkpoint at the head. Before,
+  an `automation` waiting on such a projection idled for its `Interval`.
 - After `Run` returns, `IsLive` and `WaitUntil` ask the store. Before, the
   stopped runner kept reporting itself as the live owner.
 - A `Claim` that fails with a store error no longer makes the runner
