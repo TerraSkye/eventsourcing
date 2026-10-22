@@ -175,3 +175,81 @@ func TestRunner_ClaimErrorLeavesOwnerToStore(t *testing.T) {
 		})
 	}
 }
+
+// TestRunner_NotOwnerAfterRunReturns covers a Runner whose Run has returned,
+// and so released every claim: IsLive and WaitUntil answer from the store
+// rather than from its last in-memory status.
+func TestRunner_NotOwnerAfterRunReturns(t *testing.T) {
+	newDef := func(owner string) projection.Definition {
+		return projection.Definition{
+			Name:         "test",
+			Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+			EventTypes:   counterEvents,
+			Owner:        owner,
+			PollInterval: 10 * time.Millisecond,
+			ClaimTTL:     time.Second,
+		}
+	}
+	// startAndStop runs a until it is live, then stops it.
+	startAndStop := func(t *testing.T, a *projection.Runner) {
+		stop := runRunner(t, a)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		for {
+			if live, _ := a.IsLive(ctx); live {
+				break
+			}
+			if ctx.Err() != nil {
+				t.Fatal("runner never went live")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		stop() // Run has returned and released the claim
+	}
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T, es *testStore, ps *memory.ProjectionStore, a *projection.Runner)
+	}{
+		{
+			name: "IsLive with an unprocessed event and no owner",
+			check: func(t *testing.T, es *testStore, ps *memory.ProjectionStore, a *projection.Runner) {
+				pos := save(t, es, 1)
+				live, err := a.IsLive(t.Context())
+				if err != nil {
+					t.Fatalf("IsLive: %v", err)
+				}
+				if live {
+					t.Errorf("IsLive() = true after Run returned, with event %d unprocessed by anyone; Status() = %+v", pos, a.Status())
+				}
+			},
+		},
+		{
+			name: "WaitUntil for a position another instance reached",
+			check: func(t *testing.T, es *testStore, ps *memory.ProjectionStore, a *projection.Runner) {
+				pos := save(t, es, 1)
+				b := projection.NewRunner(newDef("b"), es, ps)
+				defer runRunner(t, b)()
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				if err := b.WaitUntil(ctx, pos); err != nil {
+					t.Fatalf("b.WaitUntil(%d): %v", pos, err)
+				}
+				ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				if err := a.WaitUntil(ctx, pos); err != nil {
+					t.Errorf("a.WaitUntil(%d) = %v after b processed it; a.Status() = %+v", pos, err, a.Status())
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			es := &testStore{}
+			ps := memory.NewProjectionStore()
+			a := projection.NewRunner(newDef("a"), es, ps)
+			startAndStop(t, a)
+			tt.check(t, es, ps, a)
+		})
+	}
+}

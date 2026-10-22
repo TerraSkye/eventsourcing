@@ -39,6 +39,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
 		_ = r.store.Release(relCtx, r.lease(seg))
+		// This instance no longer processes the segment, so IsLive and
+		// WaitUntil must ask the store rather than trust its last status.
+		r.setPhase(seg, Standby, "", false)
 		if held {
 			r.log(relCtx, slog.LevelInfo, seg, r.position(seg), "projection segment released")
 		}
@@ -99,6 +102,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 			held = false
 			retry.Reset()
+			r.setPhase(seg, Standby, "", false)
 		default:
 			// A stalled segment keeps its claim, so the next Claim
 			// succeeds: only a segment that moved before failing starts
