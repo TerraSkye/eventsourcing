@@ -14,17 +14,20 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/terraskye/eventsourcing"
 )
 
 var (
-	// ErrNotActive is returned by [Runner.Rebuild] when this instance is not
-	// working the projection: Run has not started or has returned, or
-	// another instance holds the claim. A rebuild only reaches the runner
-	// in this process; bump [Definition.Version] to rebuild wherever the
-	// projection runs.
+	// ErrNotActive is returned by [Runner.ReplayStream] when this instance
+	// processes no segment of the projection: Run has not started or has
+	// returned, or other instances hold every claim.
 	ErrNotActive = errors.New("projection: runner is not active on this instance")
+
+	// ErrUnknownProjection is returned by [Store.RequestRebuild] for a
+	// projection no runner has declared: there is nothing to rebuild yet.
+	ErrUnknownProjection = errors.New("projection: no runner has declared this projection")
 
 	// ErrNoReset is returned by [Runner.Rebuild] when the projection has no
 	// Reset function registered.
@@ -77,8 +80,14 @@ type Runner struct {
 	segs           []*segmentState // indexed by segment
 	changed        chan struct{}   // closed and replaced on every status change, for WaitUntil
 	watchers       []func()
-	pendingRebuild *rebuildRequest          // taken by segment 0 between batches
 	pendingReplays map[int][]*replayRequest // by segment, taken between batches
+
+	// checkRebuild asks segment 0 to look for a rebuild request in the
+	// store at once, rather than at its next regular check.
+	checkRebuild bool
+	// warnedRebuild is the last rebuild request logged as impossible for
+	// want of a Reset. Only segment 0's goroutine uses it.
+	warnedRebuild uint64
 
 	skipped atomic.Int64
 }
@@ -111,19 +120,6 @@ type replayRequest struct {
 }
 
 func (req *replayRequest) finish(err error) {
-	req.err = err
-	close(req.done)
-}
-
-// rebuildRequest is a pending [Runner.Rebuild]. The runner sets err and
-// closes done once the rebuild has run, so every caller waiting on the same
-// request sees the outcome.
-type rebuildRequest struct {
-	done chan struct{}
-	err  error
-}
-
-func (req *rebuildRequest) finish(err error) {
 	req.err = err
 	close(req.done)
 }
@@ -230,6 +226,10 @@ func defaultOwner() string {
 // Name returns the projection's name.
 func (r *Runner) Name() string { return r.p.Name }
 
+// CanRebuild reports whether the projection has a [Definition.Reset], which
+// [Runner.Rebuild] needs to wipe the read model.
+func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
+
 // Run processes events until ctx is done, then returns ctx.Err(). It
 // returns early only when it cannot start: when reading the head of the log
 // or [Store.Declare] fails, with that error.
@@ -270,71 +270,100 @@ func (r *Runner) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// Rebuild wipes the read model and processes the log again from the start.
-// The runner performs it between two batches, under the ctx passed to Run.
+// Rebuild wipes the read model and processes the log again from the start,
+// wherever the projection runs. It records a request in the [Store], which
+// the runner holding segment 0 picks up between two batches: at once when
+// that is this instance, otherwise within its [Definition.PollInterval].
+// Rebuild then waits until the reset has run. A segmented projection is
+// rebuilt as a whole.
 //
-// ctx only bounds how long Rebuild waits: once requested, the rebuild runs
-// even if ctx ends first. Concurrent calls share one rebuild.
+// The request is kept in the store. When ctx ends first, Rebuild returns
+// its error but the rebuild still runs, even if instances restart or
+// claims move in between. Requests made before a rebuild runs are all
+// served by it. Any process with the store can request one the same way
+// with [Store.RequestRebuild], without running the projection.
 //
-// A rebuild covers every segment. The instance holding segment 0 runs it,
-// and the others claim their segments again at the reset checkpoint.
-//
-// Rebuild returns [ErrNoReset] when the projection has no Reset, and
-// [ErrNotActive] when this instance does not hold segment 0, or stops
-// before the rebuild ran. To rebuild wherever the projection runs, bump
-// [Definition.Version].
+// Rebuild returns [ErrNoReset] when the projection has no Reset, and an
+// error wrapping [ErrUnknownProjection] before any runner declared it.
 func (r *Runner) Rebuild(ctx context.Context) error {
 	if r.p.Reset == nil {
 		return ErrNoReset
 	}
-
+	n, err := r.store.RequestRebuild(ctx, r.p.Name)
+	if err != nil {
+		return fmt.Errorf("projection %q: request rebuild: %w", r.p.Name, err)
+	}
 	r.mu.Lock()
-	if !r.segs[0].active {
-		r.mu.Unlock()
-		return ErrNotActive
-	}
-	req := r.pendingRebuild
-	if req == nil {
-		req = &rebuildRequest{done: make(chan struct{})}
-		r.pendingRebuild = req
-	}
+	r.checkRebuild = true
 	r.mu.Unlock()
 	r.Nudge()
 
-	select {
-	case <-req.done:
-		return req.err
-	case <-ctx.Done():
-		return ctx.Err()
+	tick := time.NewTicker(r.p.PollInterval)
+	defer tick.Stop()
+	for {
+		r.mu.Lock()
+		changed := r.changed
+		r.mu.Unlock()
+		_, done, err := r.store.Rebuilds(ctx, r.p.Name)
+		if err != nil {
+			return fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
+		}
+		if done >= n {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed: // the reset on this instance changes every status
+		case <-tick.C: // a reset elsewhere only shows in the store
+		}
 	}
 }
 
-// takeRebuild returns the pending rebuild request for seg, or nil, and
-// clears it.
-func (r *Runner) takeRebuild(seg int) *rebuildRequest {
-	if seg != 0 {
-		return nil
-	}
+// rebuildDue reports whether segment 0 should rebuild now: a rebuild was
+// requested and Reset has not served it. It asks the store at most once per
+// PollInterval, and at once after a Rebuild on this instance. last is when
+// the segment last asked.
+func (r *Runner) rebuildDue(ctx context.Context, last *time.Time) (bool, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	req := r.pendingRebuild
-	r.pendingRebuild = nil
-	return req
+	asked := r.checkRebuild
+	r.checkRebuild = false
+	r.mu.Unlock()
+	if !asked && !last.IsZero() && time.Since(*last) < r.p.PollInterval {
+		return false, nil
+	}
+	*last = time.Now()
+
+	requested, done, err := r.store.Rebuilds(ctx, r.p.Name)
+	if err != nil {
+		return false, fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
+	}
+	if requested <= done {
+		return false, nil
+	}
+	if r.p.Reset == nil {
+		// Another program asked through the store, not knowing there is
+		// nothing to wipe with. Leave the request pending, visible in the
+		// status, and say why once.
+		if r.warnedRebuild != requested {
+			r.log(ctx, slog.LevelWarn, 0, r.position(0),
+				"projection rebuild requested, but the projection has no Reset; it stays pending",
+				slog.Uint64("request", requested))
+			r.warnedRebuild = requested
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // setActive records whether this instance is processing seg. When seg stops
-// being active, a pending rebuild or replay for it fails with
-// [ErrNotActive].
+// being active, a pending replay for it fails with [ErrNotActive].
 func (r *Runner) setActive(seg int, active bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.segs[seg].active = active
 	if active {
 		return
-	}
-	if seg == 0 && r.pendingRebuild != nil {
-		r.pendingRebuild.finish(ErrNotActive)
-		r.pendingRebuild = nil
 	}
 	for _, req := range r.pendingReplays[seg] {
 		req.finish(ErrNotActive)

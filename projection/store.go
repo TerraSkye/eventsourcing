@@ -125,6 +125,19 @@ type Status struct {
 	// (so clock skew between machines does not matter). It is only set on a
 	// status returned by [Store.LoadStatuses].
 	Age time.Duration
+
+	// ReplayUntil is the position up to which the segment is replaying
+	// events it processed before: after a rebuild, the position it had
+	// reached; after it was first declared, the head of the log then. While
+	// Position is below it, the segment is replaying rather than catching up
+	// on new events. Only set on a status returned by [Store.LoadStatuses].
+	ReplayUntil uint64
+
+	// RebuildRequested reports that a rebuild of the projection was
+	// requested with [Store.RequestRebuild] and has not run yet. It is the
+	// same on every segment. Only set on a status returned by
+	// [Store.LoadStatuses].
+	RebuildRequested bool
 }
 
 // Lease identifies one segment of a projection and the instance that
@@ -204,9 +217,10 @@ type Store interface {
 
 	// Reset rebuilds the whole projection l.Name, every segment at once,
 	// as the read model is one and wipe empties all of it. In one unit of
-	// work it runs wipe and moves every segment's checkpoint back to
+	// work it runs wipe, moves every segment's checkpoint back to
 	// Position 0 with Version newVersion, ReplayUntil set to the position
-	// that segment had reached, and an empty Fingerprint. It releases every
+	// that segment had reached, and an empty Fingerprint, and marks every
+	// rebuild requested so far with RequestRebuild as done. It releases every
 	// segment's claim except l's, so an instance still working one gets
 	// [ErrClaimLost] on its next Commit instead of writing into the wiped
 	// read model, and claims it again at the new checkpoint. A store that
@@ -232,8 +246,24 @@ type Store interface {
 	SaveStatus(ctx context.Context, l Lease, status Status) error
 
 	// LoadStatuses returns the status of every segment of the projection
-	// name, ordered by segment, with Age set.
+	// name, ordered by segment, with Age, ReplayUntil and RebuildRequested
+	// set.
 	LoadStatuses(ctx context.Context, name string) ([]Status, error)
+
+	// RequestRebuild asks for the projection name to be rebuilt, wherever
+	// it runs: the runner holding segment 0 sees the request and rebuilds
+	// through Reset, which marks it done. The request is kept in the store,
+	// so it survives restarts and claims moving between instances, and
+	// requests made before a rebuild runs are all served by it. It returns
+	// the request's number, counting up from 1 per projection, and
+	// [ErrUnknownProjection] when no runner has declared name.
+	RequestRebuild(ctx context.Context, name string) (uint64, error)
+
+	// Rebuilds returns the number of the last rebuild requested for the
+	// projection name and of the last one Reset marked done. requested >
+	// done means a rebuild is pending. Both are 0 for a projection never
+	// asked to rebuild, or not declared.
+	Rebuilds(ctx context.Context, name string) (requested, done uint64, err error)
 }
 
 // DeadLetter is an event a segment skipped instead of applying.

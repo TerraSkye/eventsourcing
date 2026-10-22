@@ -138,17 +138,23 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		}
 	}
 
+	var rebuildChecked time.Time
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		if req := r.takeRebuild(seg); req != nil {
-			var err error
-			cp, err = r.rebuild(ctx, seg)
-			req.finish(err)
+		// Segment 0 serves rebuild requests, from this instance or any
+		// other, between two batches.
+		if seg == 0 {
+			due, err := r.rebuildDue(ctx, &rebuildChecked)
 			if err != nil {
 				return err
+			}
+			if due {
+				if cp, err = r.rebuild(ctx, seg); err != nil {
+					return err
+				}
 			}
 		}
 		for _, req := range r.takeReplays(seg) {

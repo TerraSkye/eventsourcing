@@ -9,6 +9,17 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `projection.Store` has two more methods, `RequestRebuild` and
+  `Rebuilds`, and `Reset` marks the requests it serves as done. The memory,
+  Postgres and SQLite stores and the telemetry wrapper implement them; a
+  store of your own needs them too. The Postgres and SQLite schemas add a
+  `projection_rebuilds` table, which applying the schema creates on an
+  existing database.
+- `Runner.Rebuild` works from any instance and no longer returns
+  `ErrNotActive`. It records a request in the store, which the runner
+  holding segment 0 serves wherever it runs, and the request survives
+  restarts and claims moving. Before any runner declared the projection
+  it returns `ErrUnknownProjection`.
 - `automation.Remote` is removed. Pass a `projection.Probe` instead, which
   implements `automation.Dependency`:
   `projection.NewProbe(store, name, projection.WithClaimTTL(claimTTL))`.
@@ -25,6 +36,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `Store.RequestRebuild` asks for a rebuild from any program with the
+  store, such as a web process, without running the projection.
+  `Status.RebuildRequested` shows a pending one and `Status.ReplayUntil`
+  how far a rebuilt segment is replaying. `Runner.CanRebuild` reports
+  whether a projection has a Reset.
 - Segmented projections rebuild in place. A `Definition.Version` bump or
   `Runner.Rebuild` wipes the read model once and moves every segment back
   to the start, and instances still working a segment are fenced off and

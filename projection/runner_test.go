@@ -490,15 +490,6 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 
 // TestRunner_RebuildNotActive covers that Rebuild on a runner that is not
 // running returns ErrNotActive instead of blocking until ctx is done.
-func TestRunner_RebuildNotActive(t *testing.T) {
-	r := newRunner(newCounter(), &testStore{}, 1)
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	if err := r.Rebuild(ctx); !errors.Is(err, projection.ErrNotActive) {
-		t.Fatalf("Rebuild on a runner that is not running = %v, want ErrNotActive", err)
-	}
-}
-
 // TestRunner_SkipWhenLiveAfterRestart covers that SkipWhenLive skips a
 // failing new event even when the runner meets it right after a restart,
 // before it has reported Live in this process.

@@ -53,6 +53,11 @@ func NewProjectionStore() *ProjectionStore {
 type memoryProjection struct {
 	segments int
 	rows     map[int]*memoryRow
+
+	// rebuildsRequested and rebuildsDone count RequestRebuild calls and
+	// the requests Reset has served.
+	rebuildsRequested uint64
+	rebuildsDone      uint64
 }
 
 type memoryRow struct {
@@ -182,7 +187,9 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 	if s.owned(l) == nil {
 		return projection.ErrClaimLost
 	}
-	for seg, row := range s.projections[l.Name].rows {
+	p := s.projections[l.Name]
+	p.rebuildsDone = p.rebuildsRequested
+	for seg, row := range p.rows {
 		row.deadLetters = nil
 		row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: row.cp.Position}
 		row.status.Position = 0
@@ -254,9 +261,33 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		if !row.heartbeat.IsZero() {
 			st.Age = time.Since(row.heartbeat)
 		}
+		st.ReplayUntil = row.cp.ReplayUntil
+		st.RebuildRequested = p.rebuildsRequested > p.rebuildsDone
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// RequestRebuild implements [projection.Store].
+func (s *ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projections[name]
+	if !ok {
+		return 0, projection.ErrUnknownProjection
+	}
+	p.rebuildsRequested++
+	return p.rebuildsRequested, nil
+}
+
+// Rebuilds implements [projection.Store].
+func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.projections[name]; ok {
+		return p.rebuildsRequested, p.rebuildsDone, nil
+	}
+	return 0, 0, nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. Like Commit, it

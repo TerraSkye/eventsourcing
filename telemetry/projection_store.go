@@ -160,6 +160,16 @@ func (t TelemetryProjectionStore) LoadStatuses(ctx context.Context, name string)
 	return t.next.LoadStatuses(ctx, name)
 }
 
+// RequestRebuild implements [projection.Store].
+func (t TelemetryProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+	return t.next.RequestRebuild(ctx, name)
+}
+
+// Rebuilds implements [projection.Store].
+func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+	return t.next.Rebuilds(ctx, name)
+}
+
 // telemetryDeadLetterStore is a [TelemetryProjectionStore] around a store
 // that also implements [projection.DeadLetterStore].
 type telemetryDeadLetterStore struct {

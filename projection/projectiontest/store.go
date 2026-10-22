@@ -121,6 +121,13 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	s.group(t, "LoadStatuses", map[string]func(*testing.T){
 		"UnknownName": s.loadStatusesUnknownName,
 		"Age":         s.loadStatusesAge,
+		"ReplayUntil": s.loadStatusesReplayUntil,
+	})
+	s.group(t, "RebuildRequests", map[string]func(*testing.T){
+		"UnknownName":   s.rebuildUnknownName,
+		"Counted":       s.rebuildCounted,
+		"ServedByReset": s.rebuildServedByReset,
+		"InStatus":      s.rebuildInStatus,
 	})
 	if _, ok := store.(projection.DeadLetterStore); ok {
 		s.group(t, "DeadLetter", map[string]func(*testing.T){
@@ -868,6 +875,115 @@ func (s *storeAcceptance) deadLetters(t *testing.T, name string, segment int) []
 // --- helpers ---
 
 func nop(context.Context) error { return nil }
+
+// --- LoadStatuses: ReplayUntil ---
+
+func (s *storeAcceptance) loadStatusesReplayUntil(t *testing.T) {
+	name := "projectiontest-" + uuid.NewString()
+	if err := s.store.Declare(t.Context(), name, 2, 7); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	for _, st := range s.statuses(t, name) {
+		if st.ReplayUntil != 7 {
+			t.Errorf("segment %d ReplayUntil = %d after Declare at 7, want 7", st.Segment, st.ReplayUntil)
+		}
+	}
+
+	s.claim(t, name, 0, owner, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 9, Version: 1})
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if st := s.statuses(t, name)[0]; st.ReplayUntil != 9 {
+		t.Errorf("segment 0 ReplayUntil = %d after a Reset from 9, want 9", st.ReplayUntil)
+	}
+}
+
+// --- RebuildRequests ---
+
+func (s *storeAcceptance) rebuildUnknownName(t *testing.T) {
+	name := "projectiontest-unknown-" + uuid.NewString()
+	if _, err := s.store.RequestRebuild(t.Context(), name); !errors.Is(err, projection.ErrUnknownProjection) {
+		t.Errorf("RequestRebuild of an undeclared projection: got %v, want ErrUnknownProjection", err)
+	}
+	requested, done, err := s.store.Rebuilds(t.Context(), name)
+	if err != nil || requested != 0 || done != 0 {
+		t.Errorf("Rebuilds of an undeclared projection = %d, %d, %v; want 0, 0, nil", requested, done, err)
+	}
+}
+
+// rebuildCounted covers that requests are numbered per projection and
+// kept until a Reset serves them.
+func (s *storeAcceptance) rebuildCounted(t *testing.T) {
+	name := s.newProjection(t, 2)
+	for want := uint64(1); want <= 2; want++ {
+		n, err := s.store.RequestRebuild(t.Context(), name)
+		if err != nil || n != want {
+			t.Fatalf("RequestRebuild = %d, %v; want %d, nil", n, err, want)
+		}
+	}
+	if requested, done, err := s.store.Rebuilds(t.Context(), name); err != nil || requested != 2 || done != 0 {
+		t.Fatalf("Rebuilds = %d, %d, %v; want 2, 0, nil", requested, done, err)
+	}
+	other := s.newProjection(t, 1)
+	if requested, _, _ := s.store.Rebuilds(t.Context(), other); requested != 0 {
+		t.Errorf("another projection's requests = %d, want 0: requests are per projection", requested)
+	}
+}
+
+// rebuildServedByReset covers that a Reset marks every request made so far
+// done, and a later request pending again.
+func (s *storeAcceptance) rebuildServedByReset(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.requestRebuild(t, name)
+	s.requestRebuild(t, name)
+
+	s.claim(t, name, 0, owner, longTTL)
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if requested, done, err := s.store.Rebuilds(t.Context(), name); err != nil || requested != 2 || done != 2 {
+		t.Fatalf("Rebuilds after Reset = %d, %d, %v; want 2, 2, nil", requested, done, err)
+	}
+
+	s.requestRebuild(t, name)
+	if requested, done, _ := s.store.Rebuilds(t.Context(), name); requested != 3 || done != 2 {
+		t.Errorf("Rebuilds after a later request = %d, %d; want 3, 2", requested, done)
+	}
+}
+
+// rebuildInStatus covers that LoadStatuses shows a pending rebuild on
+// every segment until a Reset serves it.
+func (s *storeAcceptance) rebuildInStatus(t *testing.T) {
+	name := s.newProjection(t, 2)
+	for _, st := range s.statuses(t, name) {
+		if st.RebuildRequested {
+			t.Fatalf("segment %d shows a rebuild requested before any was", st.Segment)
+		}
+	}
+	s.requestRebuild(t, name)
+	for _, st := range s.statuses(t, name) {
+		if !st.RebuildRequested {
+			t.Errorf("segment %d does not show the requested rebuild", st.Segment)
+		}
+	}
+	s.claim(t, name, 0, owner, longTTL)
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	for _, st := range s.statuses(t, name) {
+		if st.RebuildRequested {
+			t.Errorf("segment %d still shows a rebuild requested after Reset", st.Segment)
+		}
+	}
+}
+
+func (s *storeAcceptance) requestRebuild(t *testing.T, name string) {
+	t.Helper()
+	if _, err := s.store.RequestRebuild(t.Context(), name); err != nil {
+		t.Fatalf("RequestRebuild: %v", err)
+	}
+}
 
 // newProjection initializes a projection with a fresh name and returns it.
 func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
