@@ -70,7 +70,6 @@ Complete API documentation.
   - [memory.EventBus](./reference/implementations/memory-eventbus.md)
   - [postgres.EventStore](./reference/implementations/postgres-store.md)
   - [postgres.EventBus](./reference/implementations/postgres-eventbus.md)
-  - [file.EventStore](./reference/implementations/file-store.md)
   - [kurrentdb.EventStore](./reference/implementations/kurrentdb-store.md)
   - [kurrentdb.EventBus](./reference/implementations/kurrentdb-eventbus.md)
 

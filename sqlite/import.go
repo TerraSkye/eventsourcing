@@ -11,7 +11,8 @@ import (
 // each event's ID, stream, order within its stream, metadata and time. It
 // returns the number of events copied.
 //
-// It moves a log from another store, such as a file.EventStore, to SQLite.
+// It moves a log from another store to SQLite, such as the file store
+// v0.2.0 still has.
 // Run it from the program that defines the events, after registering them
 // with [cqrs.RegisterEvent], since reading src decodes every event. dst
 // should be empty: an event whose stream position is already taken in dst

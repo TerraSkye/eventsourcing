@@ -18,7 +18,7 @@ Event sourcing and CQRS for Go, built around a functional `decide`/`evolve` core
 - **Optimistic concurrency built in.** Every save states an expectation (`Any`, `NoStream`, `StreamExists`, `Revision(n)`); conflicts come back as a typed error, and handlers can retry with backoff.
 - **Projections that catch up, checkpoint and rebuild.** A `projection.Runner` reads the global log in order, keeps a checkpoint per read model, rebuilds on a version bump, and can be segmented across instances when one can't keep up.
 - **Stores you can grow into.** Start with `memory` in tests and `sqlite` on your laptop; move to `postgres` or `kurrentdb` when several processes share the log. Every store passes the same acceptance suite.
-- **Batteries included, dependencies isolated.** OpenTelemetry traces and metrics, `slog` middleware and a test suite for stores ship in the repo. Drivers live in separate Go modules, so the root module pulls in only `uuid`, `backoff` and `fsnotify`.
+- **Batteries included, dependencies isolated.** OpenTelemetry traces and metrics, `slog` middleware and a test suite for stores ship in the repo. Drivers live in separate Go modules, so the root module pulls in only `uuid` and `backoff`.
 
 ## Install
 
@@ -181,7 +181,6 @@ The query side mirrors the command side with a typed `QueryBus` and `QueryGatewa
 | `sqlite` | Local development, tutorials, tests that need real transactions, single-process services | ✓ | ✓ | ✓ | Pure Go driver (`modernc.org/sqlite`), no C toolchain. One file, or `":memory:"`. WAL mode; replicate with Litestream. |
 | `postgres` | Production with several processes sharing the log | ✓ | ✓ | ✓ | `pgx/v5`. Appends are serialized under an advisory lock so the global log has no gaps; expect lower write throughput on a very busy store. |
 | `kurrentdb` | Production on KurrentDB / EventStoreDB | ✓ | ✓ | – | Uses the official Go client. Event bus is a catch-up subscription. |
-| `file` | — | ✓ | ✓ | – | **Deprecated**: use `sqlite`, which also keeps the log in one file. |
 
 Every store is run against the shared acceptance suite in [`eventsourcingtest`](eventsourcingtest), which checks ordering, revisions, concurrent saves, paging, filters and iterator cleanup.
 
@@ -210,7 +209,7 @@ Projection handlers on SQLite and Postgres write through `sqlite.Tx(ctx)` / `pos
 | `eventsourcing` (root) | `Command`, `Event`, `Envelope`, `EventStore`, `GlobalReader`, `EventBus`, command/query buses, `NewCommandHandler`, middleware, event registry, `Iterator`, stream states and typed errors |
 | `projection` | `Definition`, `Runner`, `Store`; checkpoints, leases, segments, rebuilds, replay, error policies, dead-lettering |
 | `automation` | Background workers that claim items from a todo-list read model and act on them (process managers, scheduled follow-ups) |
-| `memory`, `file`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore`, `NewEventBus` and, where supported, `NewProjectionStore` |
+| `memory`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore`, `NewEventBus` and, where supported, `NewProjectionStore` |
 | `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores, the event bus and projections |
 | `logging` | `slog` middleware for commands, queries and events |
 | `eventsourcingtest`, `projection/projectiontest`, `automation/automationtest` | Acceptance suites and fakes for testing your own implementations |

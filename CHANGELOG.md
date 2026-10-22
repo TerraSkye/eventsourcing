@@ -49,6 +49,8 @@ release may break the API; every break is listed under **Breaking**.
   not copied.
 - `automation.Definition.Name` is no longer the causation of the work's
   commands.
+- Package `file` is removed, as deprecated in v0.2.0. Before upgrading,
+  copy a file store's events into SQLite with `sqlite.Import` on v0.2.0.
 - `projection.Store` has two more methods, `RequestRebuild` and
   `Rebuilds`, and `Reset` marks the requests it serves as done. The memory,
   Postgres and SQLite stores and the telemetry wrapper implement them; a
@@ -83,7 +85,7 @@ release may break the API; every break is listed under **Breaking**.
   the first event when the context has none. Postgres and SQLite store
   them in indexed columns, KurrentDB under its `$correlationId` and
   `$causationId` metadata keys (so `$by_correlation_id` works), and the
-  memory and file stores as fields.
+  memory store as fields.
 - `NewCommandHandler` records the command in each event's `Metadata`, as
   `command_type` and a per-call `command_id`.
 - `automation.Definition.Chain` returns the chain of the event that put an
