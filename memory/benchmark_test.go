@@ -3,6 +3,8 @@
 package memory_test
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	cqrs "github.com/terraskye/eventsourcing"
@@ -19,7 +21,21 @@ func BenchmarkEventStore(b *testing.B) {
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(*testing.B) (cqrs.EventStore, projection.Store) {
-		return memory.NewEventStore(0), memory.NewProjectionStore()
+	projectiontest.Benchmark(b, func(*testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
+		return memory.NewEventStore(0), memory.NewProjectionStore(), newRowsHandler()
+	})
+}
+
+// newRowsHandler returns a handler that keeps the benchmark's read model in
+// a map, the memory backend's database: one row per stream, holding the
+// version last applied.
+func newRowsHandler() cqrs.EventHandler {
+	var mu sync.Mutex
+	rows := map[string]uint64{}
+	return cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+		mu.Lock()
+		defer mu.Unlock()
+		rows[cqrs.StreamIDFromContext(ctx)] = cqrs.VersionFromContext(ctx)
+		return nil
 	})
 }

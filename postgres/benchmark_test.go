@@ -3,6 +3,7 @@
 package postgres_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,10 +27,33 @@ func BenchmarkEventStore(b *testing.B) {
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store) {
+	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
 		pool := newBenchmarkPool(b)
-		return postgres.NewEventStore(pool), postgres.NewProjectionStore(pool)
+		if _, err := pool.Exec(b.Context(), benchmarkRowsSchema); err != nil {
+			b.Fatalf("create benchmark_rows: %v", err)
+		}
+		return postgres.NewEventStore(pool), postgres.NewProjectionStore(pool), cqrs.NewEventHandlerFunc(writeBenchmarkRow)
 	})
+}
+
+// benchmarkRowsSchema is the benchmark's read model: one row per stream,
+// holding the version last applied. It starts empty for every group of
+// benchmarks.
+const benchmarkRowsSchema = `
+CREATE TABLE IF NOT EXISTS benchmark_rows (
+	stream_id TEXT PRIMARY KEY,
+	version   BIGINT NOT NULL
+);
+TRUNCATE benchmark_rows`
+
+// writeBenchmarkRow upserts the event's stream row in the projection's
+// transaction, as a real projection writes its read model.
+func writeBenchmarkRow(ctx context.Context, _ cqrs.Event) error {
+	_, err := postgres.Tx(ctx).Exec(ctx,
+		`INSERT INTO benchmark_rows (stream_id, version) VALUES ($1, $2)
+		 ON CONFLICT (stream_id) DO UPDATE SET version = EXCLUDED.version`,
+		cqrs.StreamIDFromContext(ctx), int64(cqrs.VersionFromContext(ctx)))
+	return err
 }
 
 // newBenchmarkPool connects to the test database and empties the events

@@ -3,6 +3,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -24,10 +25,30 @@ func BenchmarkEventStore(b *testing.B) {
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store) {
+	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
 		db := openBenchmarkDB(b)
-		return sqlite.NewEventStore(db), sqlite.NewProjectionStore(db)
+		if _, err := db.ExecContext(b.Context(), benchmarkRowsSchema); err != nil {
+			b.Fatalf("create benchmark_rows: %v", err)
+		}
+		return sqlite.NewEventStore(db), sqlite.NewProjectionStore(db), cqrs.NewEventHandlerFunc(writeBenchmarkRow)
 	})
+}
+
+// benchmarkRowsSchema is the benchmark's read model: one row per stream,
+// holding the version last applied.
+const benchmarkRowsSchema = `CREATE TABLE IF NOT EXISTS benchmark_rows (
+	stream_id TEXT PRIMARY KEY,
+	version   INTEGER NOT NULL
+)`
+
+// writeBenchmarkRow upserts the event's stream row in the projection's
+// transaction, as a real projection writes its read model.
+func writeBenchmarkRow(ctx context.Context, _ cqrs.Event) error {
+	_, err := sqlite.Tx(ctx).ExecContext(ctx,
+		`INSERT INTO benchmark_rows (stream_id, version) VALUES (?, ?)
+		 ON CONFLICT (stream_id) DO UPDATE SET version = excluded.version`,
+		cqrs.StreamIDFromContext(ctx), int64(cqrs.VersionFromContext(ctx)))
+	return err
 }
 
 // openBenchmarkDB opens a new database file with the schema applied, closed

@@ -44,15 +44,14 @@ const (
 // catchUpSegments are the segment counts the catch-up is measured at.
 var catchUpSegments = []int{1, 4, 16}
 
-// Benchmark measures a [projection.Runner] reading the event store, and
-// keeping its checkpoints in the [projection.Store], that newStores
-// returns, as a set of sub-benchmarks:
+// Benchmark measures a [projection.Runner] reading the event store, keeping
+// its checkpoints in the [projection.Store] and running the handler that
+// newStores returns, as a set of sub-benchmarks:
 //
-//   - CatchUp: a projection with a no-op handler catching up on 100,000
-//     events, at 1, 4 and 16 segments. It reports events/s, the events in
-//     the log over the time to process all of them, and reads/event, the
-//     events the store returned to every segment together for each event
-//     in the log. Segments parallelize the handlers, not the reads, so
+//   - CatchUp: a projection catching up on 100,000 events, at 1, 4 and 16
+//     segments. It reports events/s, the events in the log over the time
+//     to process all of them, and reads/event, the events the store
+//     returned to every segment together for each event in the log. Segments parallelize the handlers, not the reads, so
 //     reads/event comes out at the number of segments.
 //   - CommandToLive: the time from appending one event to the projection
 //     having processed it, through Save, [projection.Runner.Nudge] and
@@ -62,7 +61,13 @@ var catchUpSegments = []int{1, 4, 16}
 //
 // newStores is called once per group of sub-benchmarks, and must return an
 // event store that implements [eventsourcing.GlobalReader], together with
-// a projection store, typically on the same database. The event store
+// a projection store, typically on the same database, and the projection's
+// handler. The handler should write each event to a read model in the
+// projection store's database, as a real projection does: one row per
+// stream, keyed by [eventsourcing.StreamIDFromContext] and holding
+// [eventsourcing.VersionFromContext], written in the store's unit of work,
+// such as postgres.Tx(ctx). Without that write, the benchmarks measure
+// reading alone, which is what segments multiply. The event store
 // should be empty: the projections read the whole log, and the benchmarks
 // count only the events they appended. Each projection is named with a
 // fresh UUID, so the projection store may be shared. Benchmark never calls
@@ -71,15 +76,15 @@ var catchUpSegments = []int{1, 4, 16}
 // A backend's benchmark is a few lines:
 //
 //	func BenchmarkProjection(b *testing.B) {
-//		projectiontest.Benchmark(b, func(*testing.B) (eventsourcing.EventStore, projection.Store) {
-//			return memory.NewEventStore(0), memory.NewProjectionStore()
+//		projectiontest.Benchmark(b, func(*testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler) {
+//			return memory.NewEventStore(0), memory.NewProjectionStore(), newRowsHandler()
 //		})
 //	}
-func Benchmark(b *testing.B, newStores func(b *testing.B) (eventsourcing.EventStore, projection.Store)) {
+func Benchmark(b *testing.B, newStores func(b *testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler)) {
 	b.Helper()
 
 	b.Run("CatchUp", func(b *testing.B) {
-		events, store := newStores(b)
+		events, store, handler := newStores(b)
 		reader := globalReader(b, events)
 		for range catchUpStreams {
 			seedStream(b, events, catchUpStreamLength)
@@ -90,14 +95,14 @@ func Benchmark(b *testing.B, newStores func(b *testing.B) (eventsourcing.EventSt
 		}
 		for _, segments := range catchUpSegments {
 			b.Run("Segments="+strconv.Itoa(segments), func(b *testing.B) {
-				benchmarkCatchUp(b, reader, store, head, segments)
+				benchmarkCatchUp(b, reader, store, handler, head, segments)
 			})
 		}
 	})
 
 	b.Run("CommandToLive", func(b *testing.B) {
-		events, store := newStores(b)
-		benchmarkCommandToLive(b, events, globalReader(b, events), store)
+		events, store, handler := newStores(b)
+		benchmarkCommandToLive(b, events, globalReader(b, events), store, handler)
 	})
 }
 
@@ -105,11 +110,11 @@ func Benchmark(b *testing.B, newStores func(b *testing.B) (eventsourcing.EventSt
 // start of the log to head once per iteration. Only the time from Run to
 // every segment reaching head is measured; building the runner and
 // stopping it, which releases its claims, are not.
-func benchmarkCatchUp(b *testing.B, reader eventsourcing.GlobalReader, store projection.Store, head uint64, segments int) {
+func benchmarkCatchUp(b *testing.B, reader eventsourcing.GlobalReader, store projection.Store, write eventsourcing.EventHandler, head uint64, segments int) {
 	var handled atomic.Int64
-	handler := eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error {
 		handled.Add(1)
-		return nil
+		return write.Handle(ctx, ev)
 	})
 	counting := &countingReader{GlobalReader: reader}
 
@@ -146,10 +151,7 @@ func benchmarkCatchUp(b *testing.B, reader eventsourcing.GlobalReader, store pro
 
 // benchmarkCommandToLive appends one event per iteration to a projection
 // that is already live, and waits until the projection has processed it.
-func benchmarkCommandToLive(b *testing.B, events eventsourcing.EventStore, reader eventsourcing.GlobalReader, store projection.Store) {
-	handler := eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error {
-		return nil
-	})
+func benchmarkCommandToLive(b *testing.B, events eventsourcing.EventStore, reader eventsourcing.GlobalReader, store projection.Store, handler eventsourcing.EventHandler) {
 	r := newBenchmarkRunner(handler, reader, store, 1)
 	changed := watch(r)
 	ctx, cancel := context.WithCancel(b.Context())
