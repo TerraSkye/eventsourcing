@@ -30,6 +30,10 @@ const (
 	// shortTTL lets a subtest wait a claim out. Stores may track heartbeats
 	// at a coarse resolution, so expiry is checked after twice this long.
 	shortTTL = 300 * time.Millisecond
+
+	// waitTimeout bounds a wait on a store call running in a goroutine, so
+	// a store that breaks the contract fails the subtest instead of hanging.
+	waitTimeout = 10 * time.Second
 )
 
 var errWrite = errors.New("projectiontest: fn failed")
@@ -98,10 +102,13 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	})
 	s.group(t, "Reset", map[string]func(*testing.T){
 		"MovesCheckpoint":     s.resetMovesCheckpoint,
+		"KeepsReplayUntil":    s.resetKeepsReplayUntil,
 		"RunsWipeOnce":        s.resetRunsWipeOnce,
 		"WipeErrorKeepsState": s.resetWipeErrorKeepsState,
 		"NotOwner":            s.resetNotOwner,
 		"StaleEpoch":          s.resetStaleEpoch,
+		"CoversEverySegment":  s.resetCoversEverySegment,
+		"WaitsForCommit":      s.resetWaitsForCommit,
 	})
 	s.group(t, "Release", map[string]func(*testing.T){
 		"LetsOtherClaim": s.releaseLetsOtherClaim,
@@ -119,6 +126,13 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 	s.group(t, "LoadStatuses", map[string]func(*testing.T){
 		"UnknownName": s.loadStatusesUnknownName,
 		"Age":         s.loadStatusesAge,
+		"ReplayUntil": s.loadStatusesReplayUntil,
+	})
+	s.group(t, "RebuildRequests", map[string]func(*testing.T){
+		"UnknownName":   s.rebuildUnknownName,
+		"Counted":       s.rebuildCounted,
+		"ServedByReset": s.rebuildServedByReset,
+		"InStatus":      s.rebuildInStatus,
 	})
 	if _, ok := store.(projection.DeadLetterStore); ok {
 		s.group(t, "DeadLetter", map[string]func(*testing.T){
@@ -127,6 +141,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 			"Delete":              s.deadLetterDelete,
 			"SegmentsIndependent": s.deadLetterSegmentsIndependent,
 			"UnknownName":         s.deadLetterUnknownName,
+			"ClearedByReset":      s.deadLetterClearedByReset,
 		})
 	}
 }
@@ -466,6 +481,23 @@ func (s *storeAcceptance) resetMovesCheckpoint(t *testing.T) {
 	}
 }
 
+// resetKeepsReplayUntil covers a Reset before the segment got through its
+// replay: the boundary stays where it was, as a rebuild can only add events
+// to the replayed ones.
+func (s *storeAcceptance) resetKeepsReplayUntil(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 3, Version: 1, ReplayUntil: 9, Fingerprint: "fp-reset"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	want := projection.Checkpoint{Position: 0, Version: 2, ReplayUntil: 9}
+	if got := s.claim(t, name, 0, owner, longTTL); got != want {
+		t.Fatalf("checkpoint after a Reset at 3 with ReplayUntil 9: got %+v, want %+v", got, want)
+	}
+}
+
 func (s *storeAcceptance) resetRunsWipeOnce(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.claim(t, name, 0, owner, longTTL)
@@ -509,6 +541,101 @@ func (s *storeAcceptance) resetNotOwner(t *testing.T) {
 	}
 	if got := s.claim(t, name, 0, owner, longTTL); got != cp {
 		t.Fatalf("checkpoint after a non-owner Reset: got %+v, want %+v", got, cp)
+	}
+}
+
+// resetCoversEverySegment covers that Reset rebuilds the whole projection:
+// every segment's checkpoint moves back, the caller keeps its claim, and
+// every other claim is released, so its holder can no longer commit into
+// the wiped read model but can claim the segment again at once.
+func (s *storeAcceptance) resetCoversEverySegment(t *testing.T) {
+	name := s.newProjection(t, 3)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, other, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 8, Version: 1, Fingerprint: "fp-all"})
+	s.commit(t, name, 1, other, projection.Checkpoint{Position: 6, Version: 1, Fingerprint: "fp-all"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	for _, st := range s.statuses(t, name) {
+		if st.Position != 0 || st.Version != 2 {
+			t.Errorf("segment %d after Reset: Position %d, Version %d; want 0, 2", st.Segment, st.Position, st.Version)
+		}
+		if st.Segment != 0 && (st.Owner != "" || st.Phase != projection.Standby) {
+			t.Errorf("segment %d after Reset: Owner %q, Phase %s; want released and standby", st.Segment, st.Owner, st.Phase)
+		}
+	}
+
+	err := s.store.Commit(t.Context(), s.lease(name, 1, other), projection.Checkpoint{Position: 9, Version: 1}, projection.Status{}, nop)
+	if !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("Commit by the other segment's holder after Reset: got %v, want ErrClaimLost", err)
+	}
+
+	for seg, want := range map[int]projection.Checkpoint{
+		1: {Version: 2, ReplayUntil: 6},
+		2: {Version: 2},
+	} {
+		if got := s.claim(t, name, seg, other, longTTL); got != want {
+			t.Errorf("segment %d claimed after Reset: got %+v, want %+v", seg, got, want)
+		}
+	}
+	if got := s.claim(t, name, 0, owner, longTTL); got != (projection.Checkpoint{Version: 2, ReplayUntil: 8}) {
+		t.Errorf("segment 0 after Reset: got %+v, want its caller to keep it at the new checkpoint", got)
+	}
+}
+
+// resetWaitsForCommit covers that a Reset does not run while another
+// segment's Commit is in progress, so no batch writes into the read model
+// after wipe has emptied it.
+func (s *storeAcceptance) resetWaitsForCommit(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, other, longTTL)
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		committed <- s.store.Commit(t.Context(), s.lease(name, 1, other), projection.Checkpoint{Position: 4, Version: 1}, projection.Status{}, func(context.Context) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case err := <-committed:
+		t.Fatalf("Commit returned %v without running fn", err)
+	case <-time.After(waitTimeout):
+		t.Fatal("Commit did not run fn")
+	}
+
+	reset := make(chan error, 1)
+	go func() { reset <- s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop) }()
+	select {
+	case err := <-reset:
+		close(release)
+		t.Fatalf("Reset returned %v while another segment's Commit was in progress, want it to wait", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	for _, step := range []struct {
+		name string
+		done chan error
+	}{{"Commit that started before the Reset", committed}, {"Reset", reset}} {
+		select {
+		case err := <-step.done:
+			if err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("%s did not return", step.name)
+		}
+	}
+	if got := s.claim(t, name, 1, other, longTTL); got != (projection.Checkpoint{Version: 2, ReplayUntil: 4}) {
+		t.Fatalf("segment 1 after the Reset: got %+v, want it reset after the Commit landed", got)
 	}
 }
 
@@ -732,6 +859,27 @@ func (s *storeAcceptance) deadLetterUnknownName(t *testing.T) {
 }
 
 // saveDeadLetters records ds for segment in one Commit by owner.
+// deadLetterClearedByReset covers that Reset deletes the dead letters of
+// every segment: the replay runs those events through the handler again,
+// so letters left behind would park their streams for the whole replay and
+// be recorded a second time.
+func (s *storeAcceptance) deadLetterClearedByReset(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, owner, longTTL)
+	s.saveDeadLetters(t, name, 0, projection.DeadLetter{Position: 1, StreamID: "order-1", EventType: "projectiontest.Event", Error: "a"})
+	s.saveDeadLetters(t, name, 1, projection.DeadLetter{Position: 1, StreamID: "order-2", EventType: "projectiontest.Event", Error: "b"})
+
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	for seg := range 2 {
+		if got := s.deadLetters(t, name, seg); len(got) != 0 {
+			t.Errorf("segment %d dead letters after Reset = %+v, want none", seg, got)
+		}
+	}
+}
+
 func (s *storeAcceptance) saveDeadLetters(t *testing.T, name string, segment int, ds ...projection.DeadLetter) {
 	t.Helper()
 	dls := s.store.(projection.DeadLetterStore)
@@ -762,6 +910,115 @@ func (s *storeAcceptance) deadLetters(t *testing.T, name string, segment int) []
 // --- helpers ---
 
 func nop(context.Context) error { return nil }
+
+// --- LoadStatuses: ReplayUntil ---
+
+func (s *storeAcceptance) loadStatusesReplayUntil(t *testing.T) {
+	name := "projectiontest-" + uuid.NewString()
+	if err := s.store.Declare(t.Context(), name, 2, 7); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	for _, st := range s.statuses(t, name) {
+		if st.ReplayUntil != 7 {
+			t.Errorf("segment %d ReplayUntil = %d after Declare at 7, want 7", st.Segment, st.ReplayUntil)
+		}
+	}
+
+	s.claim(t, name, 0, owner, longTTL)
+	s.commit(t, name, 0, owner, projection.Checkpoint{Position: 9, Version: 1})
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if st := s.statuses(t, name)[0]; st.ReplayUntil != 9 {
+		t.Errorf("segment 0 ReplayUntil = %d after a Reset from 9, want 9", st.ReplayUntil)
+	}
+}
+
+// --- RebuildRequests ---
+
+func (s *storeAcceptance) rebuildUnknownName(t *testing.T) {
+	name := "projectiontest-unknown-" + uuid.NewString()
+	if _, err := s.store.RequestRebuild(t.Context(), name); !errors.Is(err, projection.ErrUnknownProjection) {
+		t.Errorf("RequestRebuild of an undeclared projection: got %v, want ErrUnknownProjection", err)
+	}
+	requested, done, err := s.store.Rebuilds(t.Context(), name)
+	if err != nil || requested != 0 || done != 0 {
+		t.Errorf("Rebuilds of an undeclared projection = %d, %d, %v; want 0, 0, nil", requested, done, err)
+	}
+}
+
+// rebuildCounted covers that requests are numbered per projection and
+// kept until a Reset serves them.
+func (s *storeAcceptance) rebuildCounted(t *testing.T) {
+	name := s.newProjection(t, 2)
+	for want := uint64(1); want <= 2; want++ {
+		n, err := s.store.RequestRebuild(t.Context(), name)
+		if err != nil || n != want {
+			t.Fatalf("RequestRebuild = %d, %v; want %d, nil", n, err, want)
+		}
+	}
+	if requested, done, err := s.store.Rebuilds(t.Context(), name); err != nil || requested != 2 || done != 0 {
+		t.Fatalf("Rebuilds = %d, %d, %v; want 2, 0, nil", requested, done, err)
+	}
+	unrelated := s.newProjection(t, 1)
+	if requested, _, _ := s.store.Rebuilds(t.Context(), unrelated); requested != 0 {
+		t.Errorf("another projection's requests = %d, want 0: requests are per projection", requested)
+	}
+}
+
+// rebuildServedByReset covers that a Reset marks every request made so far
+// done, and a later request pending again.
+func (s *storeAcceptance) rebuildServedByReset(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.requestRebuild(t, name)
+	s.requestRebuild(t, name)
+
+	s.claim(t, name, 0, owner, longTTL)
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if requested, done, err := s.store.Rebuilds(t.Context(), name); err != nil || requested != 2 || done != 2 {
+		t.Fatalf("Rebuilds after Reset = %d, %d, %v; want 2, 2, nil", requested, done, err)
+	}
+
+	s.requestRebuild(t, name)
+	if requested, done, _ := s.store.Rebuilds(t.Context(), name); requested != 3 || done != 2 {
+		t.Errorf("Rebuilds after a later request = %d, %d; want 3, 2", requested, done)
+	}
+}
+
+// rebuildInStatus covers that LoadStatuses shows a pending rebuild on
+// every segment until a Reset serves it.
+func (s *storeAcceptance) rebuildInStatus(t *testing.T) {
+	name := s.newProjection(t, 2)
+	for _, st := range s.statuses(t, name) {
+		if st.RebuildRequested {
+			t.Fatalf("segment %d shows a rebuild requested before any was", st.Segment)
+		}
+	}
+	s.requestRebuild(t, name)
+	for _, st := range s.statuses(t, name) {
+		if !st.RebuildRequested {
+			t.Errorf("segment %d does not show the requested rebuild", st.Segment)
+		}
+	}
+	s.claim(t, name, 0, owner, longTTL)
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 1, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	for _, st := range s.statuses(t, name) {
+		if st.RebuildRequested {
+			t.Errorf("segment %d still shows a rebuild requested after Reset", st.Segment)
+		}
+	}
+}
+
+func (s *storeAcceptance) requestRebuild(t *testing.T, name string) {
+	t.Helper()
+	if _, err := s.store.RequestRebuild(t.Context(), name); err != nil {
+		t.Fatalf("RequestRebuild: %v", err)
+	}
+}
 
 // newProjection initializes a projection with a fresh name and returns it.
 func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {

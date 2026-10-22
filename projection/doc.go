@@ -105,6 +105,12 @@
 // to gate work that must not run on a half-built read model: a readiness
 // probe, an automation, or a test's wait with [Runner.WaitUntil].
 //
+// A process that reads a read model but does not run its projection, such
+// as an API in front of a worker, follows it with a [Probe] instead: it
+// needs only the [Store] and the projection's name, and offers the same
+// [Probe.WaitUntil] and [Probe.IsLive] from the status the runners
+// publish, including a [Stalled] segment and why it stalled.
+//
 // # Replaying
 //
 // Catching up and replaying are different things. A projection catches up
@@ -124,16 +130,23 @@
 //
 //   - Bump [Definition.Version] when you change how the projection writes
 //     its read model. On start, a runner whose stored version differs from
-//     its configured one rebuilds automatically. A segmented projection
-//     has no Version: rebuild it under a new [Definition.Name].
-//   - Call [Runner.Rebuild] on the active instance.
+//     its configured one rebuilds automatically. A segmented projection is
+//     rebuilt as a whole: every segment starts over, whichever instance
+//     holds it.
+//   - Call [Runner.Rebuild] on any instance, or [Store.RequestRebuild]
+//     from any program that has the store, such as an admin endpoint in a
+//     web process. The request is kept in the store, and the runner that
+//     holds segment 0 serves it between two batches, wherever it runs.
+//     Requests made before that rebuild runs are all served by it.
+//     [Status.RebuildRequested] shows one that is pending.
 //
 // Changing [Definition.EventTypes] counts as a change too. The checkpoint
 // records which types it was written for, so a runner started with a
 // different list rebuilds the projection when it has a Reset, and
 // otherwise stalls with [ErrEventTypesChanged] rather than skip the
-// history of an added type. A segmented projection always stalls; run it
-// under a new Name.
+// history of an added type. A segmented projection stalls unless Version
+// is bumped with the change, so that during a rollout old and new
+// instances cannot reset each other.
 //
 // A rebuild in place empties the read model until the runner has caught
 // up. When that takes too long, build the new version under a new

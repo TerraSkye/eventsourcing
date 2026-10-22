@@ -203,7 +203,7 @@ func reset(ctx context.Context) error {
 On start, a runner whose stored version differs from `Version` runs `Reset` and the checkpoint move back to zero in one unit of work, then processes the log again. `runner.Rebuild(ctx)` does the same on demand.
 
 !!! note "Changing `EventTypes` rebuilds too"
-    The checkpoint records which event types it was written for. When you add or remove a name in `EventTypes`, the runner rebuilds the projection with `Reset` on its next start, so the history of an added type is applied. A projection without `Reset`, or a segmented one, stops with `ErrEventTypesChanged` instead; give it a `Reset`, or run it under a new name.
+    The checkpoint records which event types it was written for. When you add or remove a name in `EventTypes`, the runner rebuilds the projection with `Reset` on its next start, so the history of an added type is applied. A projection without `Reset` stops with `ErrEventTypesChanged` instead; give it a `Reset`, or run it under a new name. A segmented projection stops too unless you bump `Version` with the change.
 
 A rebuild in place empties the read model: queries see an empty table until the runner has caught up again. For a large log, build the new version next to the old one instead; see [Rebuild a projection without downtime](./rebuild-without-downtime.md).
 

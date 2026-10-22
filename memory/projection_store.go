@@ -25,10 +25,17 @@ import (
 // halfway; the Commit then returns [projection.ErrClaimLost] after fn's
 // writes were applied.
 //
+// Reset waits for every Commit in progress and holds off new ones while
+// wipe runs, so no batch writes into the read model it wipes.
+//
 // It implements [projection.Store] fully, including Claim/Release fencing,
 // so segmented projections and multiple goroutine instances of a runner can
 // be exercised against it.
 type ProjectionStore struct {
+	// units is held for reading by every Commit, for its whole run, and for
+	// writing by Reset, since neither can roll back what fn or wipe wrote.
+	units sync.RWMutex
+
 	mu          sync.Mutex
 	projections map[string]*memoryProjection
 }
@@ -46,6 +53,11 @@ func NewProjectionStore() *ProjectionStore {
 type memoryProjection struct {
 	segments int
 	rows     map[int]*memoryRow
+
+	// rebuildsRequested and rebuildsDone count RequestRebuild calls and
+	// the requests Reset has served.
+	rebuildsRequested uint64
+	rebuildsDone      uint64
 }
 
 type memoryRow struct {
@@ -123,6 +135,9 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 // Commit implements [projection.Store]. It cannot roll back fn's writes;
 // see [ProjectionStore].
 func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+	s.units.RLock()
+	defer s.units.RUnlock()
+
 	// Check ownership before fn, so a handler never writes against a lost
 	// claim, and again after fn, so a reclaim during fn is still reported.
 	s.mu.Lock()
@@ -151,14 +166,15 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 // Reset implements [projection.Store]. It cannot roll back wipe's writes;
 // see [ProjectionStore].
 func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
+	s.units.Lock()
+	defer s.units.Unlock()
+
 	s.mu.Lock()
-	row := s.owned(l)
-	if row == nil {
-		s.mu.Unlock()
+	held := s.owned(l) != nil
+	s.mu.Unlock()
+	if !held {
 		return projection.ErrClaimLost
 	}
-	oldPos := row.cp.Position
-	s.mu.Unlock()
 
 	if err := wipe(ctx); err != nil {
 		return err
@@ -166,14 +182,29 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row = s.owned(l)
-	if row == nil {
+	// A Claim does not wait for units, so l may have been taken over while
+	// wipe ran.
+	if s.owned(l) == nil {
 		return projection.ErrClaimLost
 	}
-	row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: oldPos}
-	row.status.Position = 0
-	row.status.Version = newVersion
-	row.heartbeat = time.Now()
+	p := s.projections[l.Name]
+	p.rebuildsDone = p.rebuildsRequested
+	for seg, row := range p.rows {
+		row.deadLetters = nil
+		row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: max(row.cp.ReplayUntil, row.cp.Position)}
+		row.status.Position = 0
+		row.status.Version = newVersion
+		row.status.Head = 0
+		row.status.LastError = ""
+		if seg == l.Segment {
+			row.status.Phase = projection.Starting
+			row.heartbeat = time.Now()
+			continue
+		}
+		row.owner = ""
+		row.status.Owner = ""
+		row.status.Phase = projection.Standby
+	}
 	return nil
 }
 
@@ -230,9 +261,33 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		if !row.heartbeat.IsZero() {
 			st.Age = time.Since(row.heartbeat)
 		}
+		st.ReplayUntil = row.cp.ReplayUntil
+		st.RebuildRequested = p.rebuildsRequested > p.rebuildsDone
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// RequestRebuild implements [projection.Store].
+func (s *ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projections[name]
+	if !ok {
+		return 0, projection.ErrUnknownProjection
+	}
+	p.rebuildsRequested++
+	return p.rebuildsRequested, nil
+}
+
+// Rebuilds implements [projection.Store].
+func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.projections[name]; ok {
+		return p.rebuildsRequested, p.rebuildsDone, nil
+	}
+	return 0, 0, nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. Like Commit, it

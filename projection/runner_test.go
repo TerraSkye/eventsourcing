@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -355,13 +356,6 @@ func TestRunner_Panics(t *testing.T) {
 			c := newCounter()
 			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewProjectionStore())
 		}},
-		{"segments with version", func() {
-			c := newCounter()
-			projection.NewRunner(projection.Definition{
-				Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents,
-				Segments: 2, SegmentKey: projection.ByStreamID, Version: 1, Reset: c.Reset,
-			}, &nopReader{}, memory.NewProjectionStore())
-		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -492,17 +486,6 @@ func TestRunner_RebuildCallerContextDoesNotStopRun(t *testing.T) {
 	case err := <-done:
 		t.Fatalf("Run returned %v after a Rebuild's ctx expired, while Run's own ctx is still live", err)
 	case <-time.After(500 * time.Millisecond):
-	}
-}
-
-// TestRunner_RebuildNotActive covers that Rebuild on a runner that is not
-// running returns ErrNotActive instead of blocking until ctx is done.
-func TestRunner_RebuildNotActive(t *testing.T) {
-	r := newRunner(newCounter(), &testStore{}, 1)
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	if err := r.Rebuild(ctx); !errors.Is(err, projection.ErrNotActive) {
-		t.Fatalf("Rebuild on a runner that is not running = %v, want ErrNotActive", err)
 	}
 }
 
@@ -1026,5 +1009,340 @@ func TestRunner_LogsLifecycle(t *testing.T) {
 	recs := logs.snapshot()
 	if lastRec := recs[len(recs)-1]; lastRec.Level != slog.LevelInfo || !strings.Contains(lastRec.Message, "released") {
 		t.Fatalf("last record = %q (%s), want the Info for the release on shutdown", lastRec.Message, lastRec.Level)
+	}
+}
+
+// TestRunner_RebuildResetFails covers a Reset that fails on the instance
+// Rebuild is called on: Rebuild returns the error instead of waiting until
+// ctx ends, and the request stays pending until a retry serves it.
+func TestRunner_RebuildResetFails(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	c := newCounter()
+	var mu sync.Mutex
+	failing := true
+	p := projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Owner:        "a",
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+		Version:      1,
+		Reset: func(ctx context.Context) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if failing {
+				return errors.New("wipe failed")
+			}
+			return c.Reset(ctx)
+		},
+	}
+	r := projection.NewRunner(p, es, ps)
+	defer runRunner(t, r)()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+
+	err := r.Rebuild(ctx)
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("Rebuild with a failing Reset = %v, want the Reset's error before ctx ends", err)
+	}
+	if requested, done, _ := ps.Rebuilds(ctx, "test"); requested != 1 || done != 0 {
+		t.Fatalf("Rebuilds = %d, %d; want 1, 0: the request stays pending", requested, done)
+	}
+
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	waitRebuilt(t, ps, 1)
+	if got := resets(c); got != 1 {
+		t.Errorf("Reset ran %d times once it worked, want once", got)
+	}
+}
+
+// TestRunner_NudgeWakesEverySegment covers that Nudge makes a live runner
+// read now on every segment, so WaitUntil returns well within PollInterval.
+func TestRunner_NudgeWakesEverySegment(t *testing.T) {
+	for _, segments := range []int{1, 2, 4} {
+		t.Run(fmt.Sprintf("segments=%d", segments), func(t *testing.T) {
+			es := memory.NewEventStore(16)
+			def := projection.Definition{
+				Name:         "nudge",
+				Handler:      eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error { return nil }),
+				EventTypes:   []string{"projection_test.TaskCreated"},
+				PollInterval: 10 * time.Second,
+				ClaimTTL:     30 * time.Second,
+			}
+			if segments > 1 {
+				def.Segments = segments
+				def.SegmentKey = projection.ByStreamID
+			}
+			r := projection.NewRunner(def, es, memory.NewProjectionStore())
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+			defer func() { cancel(); <-done }()
+
+			// Wait for every segment to reach Live at the empty head, then
+			// give each time to block in its wait for a nudge or the poll.
+			deadline := time.Now().Add(2 * time.Second)
+			for r.Status().Phase != projection.Live {
+				if time.Now().After(deadline) {
+					t.Fatalf("never live: %+v", r.Status())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+
+			res, err := es.Save(t.Context(), []eventsourcing.Envelope{{
+				EventID: uuid.New(), StreamID: "s-1", Event: &taskCreated{ID: "t"}, Version: 1,
+			}}, eventsourcing.Any{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Nudge()
+			wctx, wcancel := context.WithTimeout(t.Context(), time.Second)
+			defer wcancel()
+			if err := r.WaitUntil(wctx, res.GlobalPosition); err != nil {
+				t.Fatalf("after Nudge, WaitUntil(%d) = %v; want nil well within PollInterval (10s)", res.GlobalPosition, err)
+			}
+		})
+	}
+}
+
+// newInstance returns a runner of the counter projection "test" on ps, as
+// one instance of a program that may run several. Without reset, the
+// projection has no Reset.
+func newInstance(c *counter, es *testStore, ps projection.Store, owner string, reset bool) *projection.Runner {
+	p := projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Owner:        owner,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}
+	if reset {
+		p.Reset, p.Version = c.Reset, 1
+	}
+	return projection.NewRunner(p, es, ps)
+}
+
+func resets(c *counter) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resets
+}
+
+// waitRebuilt waits until the store marks rebuild request n done.
+func waitRebuilt(t *testing.T, ps projection.Store, n uint64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_, done, err := ps.Rebuilds(t.Context(), "test")
+		if err != nil {
+			t.Fatalf("Rebuilds: %v", err)
+		}
+		if done >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rebuild request %d not served within 3s (done %d)", n, done)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestRunner_RebuildBeforeDeclare(t *testing.T) {
+	r := newRunner(newCounter(), &testStore{}, 1)
+	if err := r.Rebuild(t.Context()); !errors.Is(err, projection.ErrUnknownProjection) {
+		t.Fatalf("Rebuild before any runner declared the projection = %v, want ErrUnknownProjection", err)
+	}
+}
+
+// TestRunner_RebuildFromAnotherInstance covers calling Rebuild on an
+// instance that does not hold segment 0: the instance that does rebuilds.
+func TestRunner_RebuildFromAnotherInstance(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	holder, standby := newCounter(), newCounter()
+	a := newInstance(holder, es, ps, "a", true)
+	defer runRunner(t, a)()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := a.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+	b := newInstance(standby, es, ps, "b", true)
+	defer runRunner(t, b)()
+
+	if err := b.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild on the standby instance = %v, want nil", err)
+	}
+	if n, m := resets(holder), resets(standby); n != 1 || m != 0 {
+		t.Errorf("Reset ran %d times on the holder and %d on the standby, want 1 and 0", n, m)
+	}
+	if err := a.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil after the rebuild: %v", err)
+	}
+}
+
+// TestRunner_RebuildRequestOutlivesTheRunner covers a request made while no
+// runner holds the projection, as from a web process or after a crash: the
+// next runner to claim segment 0 serves it.
+func TestRunner_RebuildRequestOutlivesTheRunner(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	first := newCounter()
+	stop := runRunner(t, newInstance(first, es, ps, "a", true))
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	waitPosition(ctx, t, ps, last)
+	stop()
+
+	n, err := ps.RequestRebuild(ctx, "test")
+	if err != nil {
+		t.Fatalf("RequestRebuild: %v", err)
+	}
+	statuses, _ := ps.LoadStatuses(ctx, "test")
+	if len(statuses) == 0 || !statuses[0].RebuildRequested {
+		t.Fatalf("statuses = %+v, want the request shown as pending", statuses)
+	}
+
+	next := newCounter()
+	defer runRunner(t, newInstance(next, es, ps, "b", true))()
+	waitRebuilt(t, ps, n)
+	if got := resets(next); got != 1 {
+		t.Errorf("Reset ran %d times on the next runner, want once", got)
+	}
+}
+
+// TestRunner_RebuildRequestsShareARebuild covers that requests made before
+// a rebuild runs are all served by it.
+func TestRunner_RebuildRequestsShareARebuild(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	stop := runRunner(t, newInstance(newCounter(), es, ps, "a", true))
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	waitPosition(ctx, t, ps, last)
+	stop()
+
+	var n uint64
+	for range 3 {
+		var err error
+		if n, err = ps.RequestRebuild(ctx, "test"); err != nil {
+			t.Fatalf("RequestRebuild: %v", err)
+		}
+	}
+	c := newCounter()
+	defer runRunner(t, newInstance(c, es, ps, "b", true))()
+	waitRebuilt(t, ps, n)
+	if got := resets(c); got != 1 {
+		t.Errorf("Reset ran %d times for 3 requests, want once", got)
+	}
+}
+
+// TestRunner_RebuildWithoutResetStaysPending covers a request for a
+// projection with no Reset: the runner cannot serve it, so it stays
+// pending and visible, and the projection keeps running.
+func TestRunner_RebuildWithoutResetStaysPending(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	defer runRunner(t, newInstance(newCounter(), es, ps, "a", false))()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	waitPosition(ctx, t, ps, last)
+
+	if _, err := ps.RequestRebuild(ctx, "test"); err != nil {
+		t.Fatalf("RequestRebuild: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // ten of the runner's checks
+
+	if requested, done, _ := ps.Rebuilds(ctx, "test"); requested != 1 || done != 0 {
+		t.Errorf("Rebuilds = %d, %d; want 1, 0: nothing can serve it", requested, done)
+	}
+	more := save(t, es, 2)
+	waitPosition(ctx, t, ps, more)
+}
+
+// waitPosition waits until segment 0 of "test" has processed position.
+func waitPosition(ctx context.Context, t *testing.T, ps projection.Store, position uint64) {
+	t.Helper()
+	if err := projection.NewProbe(ps, "test", projection.WithPollInterval(5*time.Millisecond)).WaitUntil(ctx, position); err != nil {
+		t.Fatalf("waiting for position %d: %v", position, err)
+	}
+}
+
+// TestRunner_RebuildMidReplayKeepsReplayUntil covers that a rebuild started
+// before a segment has passed its ReplayUntil keeps every event that was in
+// the log at the first start counted as replayed.
+func TestRunner_RebuildMidReplayKeepsReplayUntil(t *testing.T) {
+	es := &testStore{}
+	last := save(t, es, 10) // all ten are in the log before the first start
+	c := newCounter()
+	// Hold the first replay at position 4 by failing event 5 until the
+	// rebuild is requested.
+	var poison atomic.Bool
+	poison.Store(true)
+	c.fail = func(gv uint64) error {
+		if gv == 5 && poison.Load() {
+			return errors.New("poison")
+		}
+		return nil
+	}
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Reset:        c.Reset,
+		Version:      1,
+		BatchSize:    2,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, memory.NewProjectionStore())
+	defer runRunner(t, r)()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for r.Status().Phase != projection.Stalled {
+		if ctx.Err() != nil {
+			t.Fatalf("runner never stalled; status %+v", r.Status())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	c.mu.Lock()
+	for gv := uint64(1); gv <= 4; gv++ {
+		if !c.replayed[gv] {
+			t.Errorf("IsReplaying for event %d before Rebuild = false, want true", gv)
+		}
+	}
+	c.mu.Unlock()
+
+	poison.Store(false)
+	if err := r.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil(%d): %v", last, err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resets != 1 {
+		t.Fatalf("Reset ran %d times, want 1", c.resets)
+	}
+	for gv := uint64(1); gv <= last; gv++ {
+		if !c.replayed[gv] {
+			t.Errorf("IsReplaying for event %d (in the log at the first start) after Rebuild = false, want true", gv)
+		}
 	}
 }

@@ -154,11 +154,17 @@ type Definition struct {
 	// again. For a large log, build the new version under a new Name
 	// instead and switch queries over once it is live.
 	//
+	// A rebuild covers every segment of a segmented projection at once:
+	// Reset wipes the whole read model, so every segment starts over, and
+	// instances still working a segment are fenced off and resume from
+	// the reset checkpoint.
+	//
+	// Only raise Version. A runner whose Version is below the stored one,
+	// such as an instance of the previous deployment during a rollout,
+	// stands by instead of rebuilding back.
+	//
 	// Default 0: no automatic rebuilds (Rebuild can still be called).
-	// Setting a non-zero Version requires Reset, and is not allowed on a
-	// segmented projection: Reset wipes the whole read model, including
-	// rows another segment has already rebuilt. A segmented projection is
-	// rebuilt under a new Name.
+	// Setting a non-zero Version requires Reset.
 	Version int
 
 	// Reset wipes the read model so the projection can be rebuilt. It runs
@@ -179,9 +185,7 @@ type Definition struct {
 	// through the [Store]'s claim mechanism.
 	//
 	// Set this only when one instance cannot keep up. The segment count is
-	// fixed per name; changing it takes a new name. So does rebuilding a
-	// segmented projection: it cannot have a Version, and [Runner.Rebuild]
-	// returns [ErrRebuildSegmented].
+	// fixed per name; changing it takes a new name.
 	//
 	// Segments parallelize the handlers, not the reads: every segment reads
 	// the filtered log on its own and drops the events of other segments,

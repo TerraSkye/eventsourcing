@@ -30,7 +30,8 @@ const releaseTimeout = 2 * time.Second
 //  5. on ctx.Done, releases the claim so another instance can take over
 //     at once rather than waiting the claim TTL out.
 func (r *Runner) runSegment(ctx context.Context, seg int) {
-	held := false // this instance holds the segment's claim
+	held := false     // this instance holds the segment's claim
+	outdated := false // the stored Version is newer than this runner's
 	defer func() {
 		// ctx is done by now; release under a context that is not.
 		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
@@ -38,6 +39,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
 		_ = r.store.Release(relCtx, r.lease(seg))
+		// This instance no longer processes the segment, so IsLive and
+		// WaitUntil must ask the store rather than trust its last status.
+		r.setPhase(seg, Standby, "", false)
 		if held {
 			r.log(relCtx, slog.LevelInfo, seg, r.position(seg), "projection segment released")
 		}
@@ -47,7 +51,9 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 	for ctx.Err() == nil {
 		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
-			r.setPhase(seg, Stalled, err.Error())
+			// The claim failed, so this instance does not know it holds
+			// the segment: leave the owner to the store.
+			r.setPhase(seg, Stalled, err.Error(), false)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
 			sleepCtx(ctx, wait)
@@ -58,16 +64,33 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 				r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 				held = false
 			}
-			r.setPhase(seg, Standby, "")
+			retry.Reset()
+			r.setPhase(seg, Standby, "", false)
 			sleepCtx(ctx, r.p.PollInterval)
 			continue
 		}
-		retry.Reset()
+		if cp.Version > r.p.Version {
+			// A newer deployment rebuilt the projection for a later
+			// Version. Rebuilding it back would have old and new instances
+			// reset each other until the rollout is done, so step aside.
+			_ = r.store.Release(ctx, r.lease(seg))
+			if !outdated {
+				r.log(ctx, slog.LevelWarn, seg, cp.Position, "projection segment left to a newer version",
+					slog.Int("version", r.p.Version), slog.Int("stored_version", cp.Version))
+				outdated = true
+			}
+			held = false
+			r.setPhase(seg, Standby, "", false)
+			sleepCtx(ctx, r.p.PollInterval)
+			continue
+		}
+		outdated = false
 		if !held {
 			r.log(ctx, slog.LevelInfo, seg, cp.Position, "projection segment claimed")
 			held = true
 		}
 
+		before := r.position(seg)
 		r.setActive(seg, true)
 		err = r.work(ctx, seg, cp)
 		r.setActive(seg, false)
@@ -78,8 +101,17 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			// Another instance took the segment; compete for it again.
 			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 			held = false
+			retry.Reset()
+			r.setPhase(seg, Standby, "", false)
 		default:
-			r.setPhase(seg, Stalled, err.Error())
+			// A stalled segment keeps its claim, so the next Claim
+			// succeeds: only a segment that moved before failing starts
+			// its backoff over.
+			if r.position(seg) != before {
+				retry.Reset()
+			}
+			r.setPhase(seg, Stalled, err.Error(), true)
+			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
 			sleepCtx(ctx, wait)
@@ -91,23 +123,30 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 // when the claim is lost, ctx is done, or a batch fails; it never returns
 // nil.
 func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
-	if err := r.loadParked(ctx, seg); err != nil {
+	if err := r.loadParked(ctx, seg, cp); err != nil {
 		return err
 	}
 
-	// Rebuild if the stored version or EventTypes differ from the
-	// configured ones and there is already something to wipe. A fresh
+	// Rebuild if the configured Version is newer than the stored one, or
+	// EventTypes changed, and there is already something to wipe. A fresh
 	// segment (nothing processed yet) just picks both up on its first
-	// commit, and an empty stored fingerprint is not a change. Only an
-	// unsegmented projection with Reset can rebuild; NewRunner rejects a
-	// Version on any other, so a changed version always gets here.
+	// commit, and an empty stored fingerprint is not a change. A stored
+	// Version newer than the configured one never gets here: runSegment
+	// steps aside instead. NewRunner requires a Reset for any Version.
+	//
+	// An EventTypes change alone only rebuilds an unsegmented projection.
+	// Two lists cannot be ordered, so during a rollout old and new
+	// instances of a segmented one would reset each other; bumping Version
+	// with the change gives the order.
 	if cp.Position > 0 {
-		versionChanged := r.p.Version != 0 && cp.Version != r.p.Version
+		upgraded := cp.Version < r.p.Version
 		typesChanged := cp.Fingerprint != "" && cp.Fingerprint != r.fingerprint
 		switch {
-		case (versionChanged || typesChanged) && r.p.Reset != nil && r.segments == 1:
+		case upgraded, typesChanged && r.p.Reset != nil && r.segments == 1:
 			var err error
-			if cp, err = r.rebuild(ctx, seg); err != nil {
+			cp, err = r.rebuild(ctx, seg)
+			r.rebuildTried(ctx, 0, err) // its Reset serves requests made meanwhile
+			if err != nil {
 				return err
 			}
 		case typesChanged:
@@ -115,23 +154,36 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 		}
 	}
 
+	var rebuildChecked time.Time
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		if req := r.takeRebuild(seg); req != nil {
-			var err error
-			cp, err = r.rebuild(ctx, seg)
-			req.finish(err)
+		// Segment 0 serves rebuild requests, from this instance or any
+		// other, between two batches.
+		if seg == 0 {
+			requested, err := r.rebuildDue(ctx, &rebuildChecked)
 			if err != nil {
 				return err
 			}
+			if requested > 0 {
+				cp, err = r.rebuild(ctx, seg)
+				r.rebuildTried(ctx, requested, err)
+				if err != nil {
+					return err
+				}
+			}
 		}
-		for _, req := range r.takeReplays(seg) {
+		reqs := r.takeReplays(seg)
+		for i, req := range reqs {
 			err := r.replayStream(ctx, seg, cp, req.streamID)
 			req.finish(err)
 			if errors.Is(err, ErrClaimLost) {
+				// The segment is no longer this instance's to replay on.
+				for _, rest := range reqs[i+1:] {
+					rest.finish(ErrNotActive)
+				}
 				return err
 			}
 		}
@@ -193,17 +245,18 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			// Nothing to persist; publish the phase so LoadStatuses sees it.
 			// A lost claim drops the segment; any other failure only delays
 			// what other instances see until the next commit.
-			if err := r.store.SaveStatus(ctx, r.lease(seg), status); errors.Is(err, ErrClaimLost) {
+			l := r.lease(seg)
+			if err := r.store.SaveStatus(ctx, l, status); errors.Is(err, ErrClaimLost) {
 				return err
 			}
-			r.setStatus(seg, status)
+			r.setStatus(seg, l, status)
 		}
 
 		if res.AtEnd && r.segs[seg].rebuilding {
 			r.segs[seg].rebuilding = false
 			r.log(ctx, slog.LevelInfo, seg, next, "projection rebuild finished")
 		}
-		if res.AtEnd && !r.waitLive(ctx) {
+		if res.AtEnd && !r.waitLive(ctx, seg) {
 			return ctx.Err()
 		}
 	}
@@ -222,24 +275,55 @@ func (r *Runner) reclaim(ctx context.Context, seg int) (Checkpoint, error) {
 	return cp, nil
 }
 
-// rebuild resets seg through [Store.Reset] and returns the checkpoint to
-// continue from. Before it returns, the in-memory status is back at
-// position 0, so a [Runner.WaitUntil] after a rebuild waits for the replay
-// rather than seeing the position reached before it.
+// rebuild resets the projection through [Store.Reset], every segment at
+// once, and returns the checkpoint to continue seg from. The store releases
+// the other segments, so this instance's own goroutines for them get
+// ErrClaimLost on their next commit and claim them again. Before rebuild
+// returns, every segment's in-memory status is back at position 0, so a
+// [Runner.WaitUntil] after a rebuild waits for the replay rather than
+// seeing the position reached before it.
 func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
+	r.mu.Lock()
+	r.resetting = true // until the caller's rebuildTried
+	before := make([]Lease, len(r.segs))
+	for i, s := range r.segs {
+		before[i] = s.lease
+	}
+	r.mu.Unlock()
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
 	}
+	// The read model is wiped now, whether or not the reclaim below
+	// succeeds: put every segment back at position 0 first, so no
+	// WaitUntil sees a position from before the wipe.
+	r.mu.Lock()
+	head := r.segs[seg].status.Head
+	for i, s := range r.segs {
+		s.status.Position = 0
+		s.status.Version = r.p.Version
+		if i == seg {
+			continue // Reset kept seg's claim
+		}
+		// The store released the segment. Retire the lease it was held
+		// under, so a commit that reached the store before the reset
+		// cannot write its wiped position back through setStatus. A
+		// segment claimed again since keeps its new lease.
+		if s.lease == before[i] {
+			s.lease.Epoch = 0
+		}
+	}
+	r.signalChange()
+	r.mu.Unlock()
+	r.segs[seg].rebuilding = true
+	// The replay runs every event through the handler again, so nothing
+	// stays parked; Reset deleted the dead letters that parked it.
+	r.segs[seg].parked = map[string]bool{}
 	cp, err := r.reclaim(ctx, seg)
 	if err != nil {
 		return Checkpoint{}, err
 	}
-	r.mu.Lock()
-	head := r.segs[seg].status.Head
-	r.mu.Unlock()
-	r.segs[seg].rebuilding = true
-	r.setStatus(seg, Status{
+	r.setStatus(seg, r.lease(seg), Status{
 		Phase:    CatchingUp,
 		Position: cp.Position,
 		Head:     head,
@@ -326,6 +410,14 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 			return err
 		}
 	}
+	// The read may have scanned past the last event, over events this
+	// segment does not handle: commit up to where it scanned, as the batch
+	// would have.
+	if last := events[len(events)-1].GlobalPosition; batchCP.Position > last {
+		if err := r.commit(ctx, seg, batchCP, batchStatus, func(context.Context) error { return nil }); err != nil {
+			return err
+		}
+	}
 	r.notifyWatchers()
 	return nil
 }
@@ -373,7 +465,16 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 // loadParked reloads the streams parked in seg from the store's dead
 // letters, so a parked stream stays parked across restarts and takeovers.
 // Without a [DeadLetterStore] the runner keeps what it parked itself.
-func (r *Runner) loadParked(ctx context.Context, seg int) error {
+//
+// A checkpoint at Position 0 has processed nothing since it was created or
+// last reset, so no stream can be parked in it. Clearing the set there also
+// unparks after a rebuild by another instance, which a store without dead
+// letters cannot tell this one about.
+func (r *Runner) loadParked(ctx context.Context, seg int, cp Checkpoint) error {
+	if cp.Position == 0 {
+		r.segs[seg].parked = map[string]bool{}
+		return nil
+	}
 	dls, ok := r.store.(DeadLetterStore)
 	if !ok {
 		return nil
@@ -399,10 +500,15 @@ func (r *Runner) replayStream(ctx context.Context, seg int, cp Checkpoint, strea
 	if err != nil {
 		return fmt.Errorf("projection %q: replay stream %q: load dead letters: %w", r.p.Name, streamID, err)
 	}
+	applied := make(map[uint64]bool)
 	for _, d := range letters {
-		if d.StreamID != streamID {
+		// A position can carry more than one letter, as when a Commit that
+		// recorded one failed after a store could not roll it back. The
+		// first apply deletes them all; apply the event only once.
+		if d.StreamID != streamID || applied[d.Position] {
 			continue
 		}
+		applied[d.Position] = true
 		res, err := r.reader.ReadAll(ctx, d.Position-1, eventsourcing.ReadOptions{Limit: 1})
 		if err != nil {
 			return fmt.Errorf("projection %q: replay stream %q: read event %d: %w", r.p.Name, streamID, d.Position, err)
@@ -461,25 +567,38 @@ func (e *handlerError) Unwrap() error { return e.err }
 
 // commit wraps Store.Commit and updates the in-memory status on success.
 func (r *Runner) commit(ctx context.Context, seg int, cp Checkpoint, status Status, fn func(ctx context.Context) error) error {
-	if err := r.store.Commit(ctx, r.lease(seg), cp, status, fn); err != nil {
+	l := r.lease(seg)
+	if err := r.store.Commit(ctx, l, cp, status, fn); err != nil {
 		return err
 	}
-	r.setStatus(seg, status)
+	r.setStatus(seg, l, status)
 	return nil
 }
 
-// waitLive blocks at the head of the log until a nudge or the poll
+// waitLive blocks seg at the head of the log until a nudge or the poll
 // interval elapses. It reports false if ctx is done.
-func (r *Runner) waitLive(ctx context.Context) bool {
+func (r *Runner) waitLive(ctx context.Context, seg int) bool {
 	t := time.NewTimer(r.p.PollInterval)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
-	case <-r.nudge:
+	case <-r.segs[seg].nudge:
 	case <-t.C:
 	}
 	return true
+}
+
+// publishStatus saves seg's in-memory status to the store, so other
+// instances see a stall instead of the phase of the last commit. The
+// claim is still held after a failed batch, as only a lost claim ends it.
+// Best effort: the store may be what failed, and ErrClaimLost means
+// another instance owns the segment now, which the next Claim finds out.
+func (r *Runner) publishStatus(ctx context.Context, seg int) {
+	r.mu.Lock()
+	st := r.segs[seg].status
+	r.mu.Unlock()
+	_ = r.store.SaveStatus(ctx, r.lease(seg), st)
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.

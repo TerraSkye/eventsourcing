@@ -80,8 +80,7 @@
 // dependency stopped being live are finished normally.
 //
 // The todo list may run in another process or another program; pass a
-// [Remote] dependency instead of a runner. See
-// [Dependency].
+// [projection.Probe] for it instead of a runner. See [Dependency].
 //
 // # Doing the work safely
 //

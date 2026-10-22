@@ -148,28 +148,39 @@ func (s *ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp pro
 }
 
 // Reset implements [projection.Store], in one transaction fenced like
-// Commit.
+// Commit. The transaction holds the database's write lock, so Commits run
+// before or after it, never during. On the right-hand side of SET,
+// position and owner are the row's values before the update.
 func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	return s.runTx(ctx, "reset", l.Name, func(ctx context.Context, tx *sql.Tx) error {
-		oldPos, err := ownedPosition(ctx, tx, l)
-		if err != nil {
+		if _, err := ownedPosition(ctx, tx, l); err != nil {
 			return err
 		}
 		if err := wipe(ctx); err != nil {
 			return err
 		}
-		res, err := tx.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE projection_segments
-			SET position = 0, version = ?, replay_until = ?, fingerprint = '',
-			    phase = 'starting', head = 0, last_error = NULL,
-			    heartbeat = `+nowMS+`
-			WHERE name = ? AND segment = ? AND owner = ? AND epoch = ?`,
-			newVersion, int64(oldPos), l.Name, l.Segment, l.Owner, int64(l.Epoch),
-		)
-		if err != nil {
-			return fmt.Errorf("sqlite: reset checkpoint of %q segment %d: %w", l.Name, l.Segment, err)
+			SET replay_until = MAX(replay_until, position), position = 0, version = ?2, fingerprint = '',
+			    head = 0, last_error = NULL,
+			    phase = CASE WHEN segment = ?3 THEN 'starting' ELSE 'standby' END,
+			    owner = CASE WHEN segment = ?3 THEN owner END,
+			    heartbeat = CASE WHEN segment = ?3 THEN `+nowMS+` ELSE heartbeat END
+			WHERE name = ?1`,
+			l.Name, newVersion, l.Segment,
+		); err != nil {
+			return fmt.Errorf("sqlite: reset checkpoints of %q: %w", l.Name, err)
 		}
-		return claimHeld(res)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM projection_dead_letters WHERE projection = ?`, l.Name); err != nil {
+			return fmt.Errorf("sqlite: clear dead letters of %q: %w", l.Name, err)
+		}
+		// Every rebuild requested so far is served by this one. The
+		// transaction holds the write lock, so a request runs before or
+		// after it, never in between.
+		if _, err := tx.ExecContext(ctx, `UPDATE projection_rebuilds SET done = requested WHERE name = ?`, l.Name); err != nil {
+			return fmt.Errorf("sqlite: mark rebuild requests of %q done: %w", l.Name, err)
+		}
+		return nil
 	})
 }
 
@@ -223,11 +234,13 @@ func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, st
 // LoadStatuses implements [projection.Store].
 func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT segment, phase, position, version, head, last_error, owner,
-		       `+nowMS+` - heartbeat
-		FROM projection_segments
-		WHERE name = ?
-		ORDER BY segment`,
+		SELECT s.segment, s.phase, s.position, s.version, s.head, s.last_error, s.owner,
+		       `+nowMS+` - s.heartbeat,
+		       s.replay_until, COALESCE(r.requested > r.done, 0)
+		FROM projection_segments s
+		LEFT JOIN projection_rebuilds r ON r.name = s.name
+		WHERE s.name = ?
+		ORDER BY s.segment`,
 		name,
 	)
 	if err != nil {
@@ -245,8 +258,10 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 			lastErr  sql.NullString
 			owner    sql.NullString
 			ageMS    int64
+			replay   int64
+			pending  bool
 		)
-		if err := rows.Scan(&st.Segment, &phase, &position, &st.Version, &head, &lastErr, &owner, &ageMS); err != nil {
+		if err := rows.Scan(&st.Segment, &phase, &position, &st.Version, &head, &lastErr, &owner, &ageMS, &replay, &pending); err != nil {
 			return nil, fmt.Errorf("sqlite: load statuses of %q: %w", name, err)
 		}
 		st.Phase = parsePhase(phase)
@@ -255,12 +270,48 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		st.LastError = lastErr.String
 		st.Owner = owner.String
 		st.Age = time.Duration(max(ageMS, 0)) * time.Millisecond
+		st.ReplayUntil = uint64(replay)
+		st.RebuildRequested = pending
 		out = append(out, st)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: load statuses of %q: %w", name, err)
 	}
 	return out, nil
+}
+
+// RequestRebuild implements [projection.Store].
+func (s *ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO projection_rebuilds (name, requested)
+		SELECT ?1, 1 WHERE EXISTS (SELECT 1 FROM projection_segments WHERE name = ?1)
+		ON CONFLICT (name) DO UPDATE SET requested = requested + 1
+		RETURNING requested`,
+		name,
+	).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, projection.ErrUnknownProjection
+	}
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: request rebuild of %q: %w", name, err)
+	}
+	return uint64(n), nil
+}
+
+// Rebuilds implements [projection.Store].
+func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+	var r, d int64
+	err = s.db.QueryRowContext(ctx,
+		`SELECT requested, done FROM projection_rebuilds WHERE name = ?`, name,
+	).Scan(&r, &d)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("sqlite: read rebuild requests of %q: %w", name, err)
+	}
+	return uint64(r), uint64(d), nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
