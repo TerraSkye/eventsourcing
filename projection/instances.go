@@ -57,12 +57,14 @@ func (r *Runner) runMembership(ctx context.Context) {
 // its quota from the instances it returns. When the heartbeat fails, the
 // instance keeps its quota but claims nothing new and sheds nothing, so a
 // store outage can neither make it take every segment nor give them up.
+// A failure says nothing about whether the instances changed, so it does
+// not restart the count of unchanged heartbeats: on a store that fails now
+// and then, an instance over its quota still gets to shed.
 func (r *Runner) heartbeat(ctx context.Context) error {
 	instances, err := r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, r.p.ClaimTTL)
 	r.mu.Lock()
 	if err != nil {
 		r.instancesOK = false
-		r.stable = 0
 		r.mu.Unlock()
 		return err
 	}

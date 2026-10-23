@@ -265,3 +265,30 @@ func TestRunner_RolloutLeavesNoSegmentFree(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	waitHeld(t, ps, map[string]int{"new": 4}, 0)
 }
+
+// flakyHeartbeatStore fails every other Heartbeat after the first, as a
+// store busy with other instances' writes would now and then.
+type flakyHeartbeatStore struct {
+	projection.Store
+	calls atomic.Int64
+}
+
+func (s *flakyHeartbeatStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	if n := s.calls.Add(1); ttl > 0 && n%2 == 0 {
+		return nil, errors.New("database is locked")
+	}
+	return s.Store.Heartbeat(ctx, name, owner, version, ttl)
+}
+
+// TestRunner_JoinWithFlakyHeartbeats covers instances whose heartbeats
+// fail now and then: a failure does not restart the grace before shedding,
+// so a joining instance still gets its share.
+func TestRunner_JoinWithFlakyHeartbeats(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	save(t, es, 5)
+	defer runRunner(t, newSpreadRunner(es, &flakyHeartbeatStore{Store: ps}, "a", 8, 0))()
+	waitHeld(t, ps, map[string]int{"a": 8}, 2*time.Second)
+
+	defer runRunner(t, newSpreadRunner(es, &flakyHeartbeatStore{Store: ps}, "b", 8, 0))()
+	waitHeld(t, ps, map[string]int{"a": 4, "b": 4}, 3*time.Second)
+}
