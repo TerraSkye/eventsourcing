@@ -7,6 +7,27 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Breaking
+
+- `projection.Store` has a new method, `Heartbeat`, which records a
+  runner as a live instance of its projection and lists the others as
+  `projection.Member`s. Stores outside this module must implement it, and
+  `projectiontest.StoreAcceptanceTest` checks it.
+- The Postgres and SQLite schemas add a `projection_members` table. Apply
+  the new schema before deploying: `Runner.Run` returns an error when its
+  first heartbeat fails.
+
+### Fixed
+
+- The segments of a projection spread across its instances (#182).
+  Before, the first instance to start claimed every segment and the
+  others stood by, so more instances added failover but no throughput.
+  Now each runner claims up to its share of the segments, S/N rounded
+  down or up, and releases the ones above it between batches. An instance
+  that starts gets its share without any other stopping, and the segments
+  of one that stops or crashes are divided over the rest. A single
+  instance still holds every segment.
+
 ## [0.3.0] - 2026-10-22
 
 ### Breaking

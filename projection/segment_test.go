@@ -3,6 +3,7 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -94,6 +95,13 @@ func (s *claimErrStore) Claim(ctx context.Context, l projection.Lease, ttl time.
 		return projection.Lease{}, projection.Checkpoint{}, false, errors.New("connection reset")
 	}
 	return s.Store.Claim(ctx, l, ttl)
+}
+
+// Heartbeat reports owner as the only member, so its runner competes for
+// every segment, as it does while the other members' heartbeats are late.
+func (s *claimErrStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+	members, err := s.Store.Heartbeat(ctx, name, owner, version, ttl)
+	return slices.DeleteFunc(members, func(m projection.Member) bool { return m.Owner != owner }), err
 }
 
 // TestRunner_ClaimErrorLeavesOwnerToStore covers a Runner whose Claim fails

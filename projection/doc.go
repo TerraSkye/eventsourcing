@@ -200,11 +200,21 @@
 //
 // A projection whose one instance cannot keep up is segmented by setting
 // [Definition.Segments] and [Definition.SegmentKey]. Each event goes to
-// the segment its key maps to; segments spread across every instance of
-// the program through the same claim mechanism as a single-segment
-// projection, each with its own checkpoint and status. Handlers are the
-// same as for an unsegmented projection, as long as no two segments write
-// the same read-model row.
+// the segment its key maps to, and each segment has its own claim,
+// checkpoint and status. Handlers are the same as for an unsegmented
+// projection, as long as no two segments write the same read-model row.
+//
+// The segments spread evenly across every instance of the program, with
+// nothing to configure. Each runner records itself with [Store.Heartbeat],
+// and every runner computes the same share from the instances it lists:
+// with S segments and N instances, S/N each, rounded down or up. A runner
+// claims segments only up to its share, and between two batches releases
+// those above it, so an instance that starts takes its share from the
+// others without any of them stopping. One that stops leaves at once and
+// one that crashes after ClaimTTL, and the rest divide its segments. Only
+// instances on the highest [Definition.Version] get a share, so during a
+// rolling deploy the new version takes over the segments the old one
+// steps aside from.
 //
 // Segmenting has two costs. Each segment reads the log on its own, so a
 // projection with N segments reads it N times. And a read model that

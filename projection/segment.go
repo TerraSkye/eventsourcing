@@ -20,13 +20,16 @@ const releaseTimeout = 2 * time.Second
 //
 // The loop:
 //
-//  1. tries to claim the segment from the store;
+//  1. tries to claim the segment from the store, while the instance holds
+//     fewer segments than its quota;
 //  2. if claimed, processes events in batches, each committed through
 //     Store.Commit so read-model writes and checkpoint moves land together;
 //  3. if not claimed, reports Standby and polls until the claim becomes
 //     available;
-//  4. on ErrClaimLost, drops the segment and goes back to step 1; on any
-//     other error, reports Stalled and backs off before going back;
+//  4. on ErrClaimLost, drops the segment and goes back to step 1; when the
+//     instance holds more than its quota, releases it between two batches
+//     and goes back; on any other error, reports Stalled and backs off
+//     before going back;
 //  5. on ctx.Done, releases the claim so another instance can take over
 //     at once rather than waiting the claim TTL out.
 func (r *Runner) runSegment(ctx context.Context, seg int) {
@@ -39,6 +42,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		// Best effort: if Release fails, the claim expires after ClaimTTL
 		// and another instance takes over then.
 		_ = r.store.Release(relCtx, r.lease(seg))
+		r.unreserve(seg)
 		// This instance no longer processes the segment, so IsLive and
 		// WaitUntil must ask the store rather than trust its last status.
 		r.setPhase(seg, Standby, "", false)
@@ -49,10 +53,25 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 
 	retry := newRetryBackOff()
 	for ctx.Err() == nil {
+		if held && r.shouldShed(seg) {
+			// A segment that stalled since its last batch sheds here, as
+			// it does not get back to the check between batches.
+			r.shed(ctx, seg)
+			held = false
+			retry.Reset()
+		}
+		if !r.reserve(seg) {
+			// The instance holds its share: leave the segment to the
+			// others.
+			r.setPhase(seg, Standby, "", false)
+			sleepCtx(ctx, r.p.PollInterval)
+			continue
+		}
 		cp, ok, err := r.claim(ctx, seg)
 		if err != nil {
 			// The claim failed, so this instance does not know it holds
 			// the segment: leave the owner to the store.
+			r.unreserve(seg)
 			r.setPhase(seg, Stalled, err.Error(), false)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
@@ -60,6 +79,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			continue
 		}
 		if !ok {
+			r.unreserve(seg)
 			if held {
 				r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
 				held = false
@@ -74,6 +94,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			// Version. Rebuilding it back would have old and new instances
 			// reset each other until the rollout is done, so step aside.
 			_ = r.store.Release(ctx, r.lease(seg))
+			r.unreserve(seg)
 			if !outdated {
 				r.log(ctx, slog.LevelWarn, seg, cp.Position, "projection segment left to a newer version",
 					slog.Int("version", r.p.Version), slog.Int("stored_version", cp.Version))
@@ -97,9 +118,14 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 		switch {
 		case ctx.Err() != nil:
 			return
+		case errors.Is(err, errShed):
+			r.shed(ctx, seg)
+			held = false
+			retry.Reset()
 		case errors.Is(err, ErrClaimLost):
 			// Another instance took the segment; compete for it again.
 			r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment claim lost")
+			r.unreserve(seg)
 			held = false
 			retry.Reset()
 			r.setPhase(seg, Standby, "", false)
@@ -160,8 +186,12 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			return err
 		}
 
-		// Segment 0 serves rebuild requests, from this instance or any
-		// other, between two batches.
+		// Between two batches, give the segment up when the instance holds
+		// more than its share, and on segment 0 serve rebuild requests,
+		// from this instance or any other.
+		if r.shouldShed(seg) {
+			return errShed
+		}
 		if seg == 0 {
 			requested, err := r.rebuildDue(ctx, &rebuildChecked)
 			if err != nil {
@@ -260,6 +290,17 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// shed releases seg so that another instance, below its quota, can claim
+// it, and reports Standby. The instance is at its quota afterwards, so
+// seg's loop does not claim it back.
+func (r *Runner) shed(ctx context.Context, seg int) {
+	// Best effort: if Release fails, the claim expires after ClaimTTL.
+	_ = r.store.Release(ctx, r.lease(seg))
+	r.unreserve(seg)
+	r.setPhase(seg, Standby, "", false)
+	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection segment released to another instance")
 }
 
 // reclaim refreshes the claim on seg after a reset and returns the

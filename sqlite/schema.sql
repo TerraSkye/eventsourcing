@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS projection_rebuilds (
     done      INTEGER NOT NULL DEFAULT 0
 );
 
+-- The live instances of each projection, to spread its segments over:
+-- one row per instance, refreshed by its heartbeat (Unix time in
+-- milliseconds).
+CREATE TABLE IF NOT EXISTS projection_members (
+    name      TEXT    NOT NULL,
+    owner     TEXT    NOT NULL,
+    version   INTEGER NOT NULL,
+    heartbeat INTEGER NOT NULL,
+    PRIMARY KEY (name, owner)
+);
+
 CREATE TABLE IF NOT EXISTS projection_dead_letters (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     projection      TEXT    NOT NULL,

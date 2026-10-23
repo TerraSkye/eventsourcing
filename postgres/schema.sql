@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS projection_rebuilds (
     done      BIGINT NOT NULL DEFAULT 0
 );
 
+-- The live instances of each projection, to spread its segments over:
+-- one row per instance, refreshed by its heartbeat.
+CREATE TABLE IF NOT EXISTS projection_members (
+    name      TEXT        NOT NULL,
+    owner     TEXT        NOT NULL,
+    version   INT         NOT NULL,
+    heartbeat TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (name, owner)
+);
+
 CREATE TABLE IF NOT EXISTS projection_dead_letters (
     id              BIGSERIAL   PRIMARY KEY,
     projection      TEXT        NOT NULL,

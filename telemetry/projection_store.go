@@ -170,6 +170,11 @@ func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (re
 	return t.next.Rebuilds(ctx, name)
 }
 
+// Heartbeat implements [projection.Store].
+func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+	return t.next.Heartbeat(ctx, name, owner, version, ttl)
+}
+
 // telemetryDeadLetterStore is a [TelemetryProjectionStore] around a store
 // that also implements [projection.DeadLetterStore].
 type telemetryDeadLetterStore struct {
