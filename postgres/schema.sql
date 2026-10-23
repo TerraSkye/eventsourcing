@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS projection_rebuilds (
 
 -- The live instances of each projection, to spread its segments over:
 -- one row per instance, refreshed by its heartbeat.
-CREATE TABLE IF NOT EXISTS projection_members (
+CREATE TABLE IF NOT EXISTS projection_instances (
     name      TEXT        NOT NULL,
     owner     TEXT        NOT NULL,
     version   INT         NOT NULL,

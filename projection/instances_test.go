@@ -166,8 +166,8 @@ func TestRunner_JoinKeepsSingleSegment(t *testing.T) {
 }
 
 // TestRunner_StopHandsShareOver covers an instance that stops: it leaves
-// the members at once, so the rest take its segments without waiting out
-// ClaimTTL.
+// the live instances at once, so the rest take its segments without
+// waiting out ClaimTTL.
 func TestRunner_StopHandsShareOver(t *testing.T) {
 	es, ps := &testStore{}, memory.NewProjectionStore()
 	save(t, es, 5)
@@ -225,7 +225,7 @@ func (s *deadStore) Rebuilds(ctx context.Context, name string) (uint64, uint64, 
 	return s.Store.Rebuilds(ctx, name)
 }
 
-func (s *deadStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+func (s *deadStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	if s.dead.Load() {
 		return nil, errDead
 	}
@@ -233,7 +233,7 @@ func (s *deadStore) Heartbeat(ctx context.Context, name, owner string, version i
 }
 
 // TestRunner_CrashSpreadsShare covers an instance that crashes, keeping its
-// claims and its member row until they expire: its segments spread over
+// claims and its instance row until they expire: its segments spread over
 // the rest instead of landing on one of them.
 func TestRunner_CrashSpreadsShare(t *testing.T) {
 	es, ps := &testStore{}, memory.NewProjectionStore()
@@ -245,7 +245,7 @@ func TestRunner_CrashSpreadsShare(t *testing.T) {
 	waitSpread(t, ps, []string{"a", "b", "c"}, 6, 3*time.Second)
 
 	cs.dead.Store(true)
-	// c's claims and member row expire after the 1s ClaimTTL.
+	// c's claims and instance row expire after the 1s ClaimTTL.
 	waitHeld(t, ps, map[string]int{"a": 3, "b": 3}, 4*time.Second)
 }
 

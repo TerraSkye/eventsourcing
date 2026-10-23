@@ -370,10 +370,10 @@ func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested,
 // live ones with the number of segments each one claims. The statement's
 // reads see the table as it was before its writes, so owner's row comes
 // from the upsert and is left out of the read.
-func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	if ttl == 0 {
 		if _, err := s.db.Exec(ctx,
-			`DELETE FROM projection_members WHERE name = $1 AND owner = $2`, name, owner,
+			`DELETE FROM projection_instances WHERE name = $1 AND owner = $2`, name, owner,
 		); err != nil {
 			return nil, fmt.Errorf("postgres: leave %q as %q: %w", name, owner, err)
 		}
@@ -381,16 +381,16 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	}
 	rows, err := s.db.Query(ctx, `
 		WITH me AS (
-			INSERT INTO projection_members (name, owner, version, heartbeat)
+			INSERT INTO projection_instances (name, owner, version, heartbeat)
 			VALUES ($1, $2, $3, clock_timestamp())
 			ON CONFLICT (name, owner) DO UPDATE SET version = EXCLUDED.version, heartbeat = EXCLUDED.heartbeat
 			RETURNING owner, version, 0::float8 AS age
 		), expired AS (
-			DELETE FROM projection_members
+			DELETE FROM projection_instances
 			WHERE name = $1 AND owner <> $2 AND heartbeat < clock_timestamp() - make_interval(secs => $4)
 		), live AS (
 			SELECT owner, version, EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat))::float8 AS age
-			FROM projection_members
+			FROM projection_instances
 			WHERE name = $1 AND owner <> $2 AND heartbeat >= clock_timestamp() - make_interval(secs => $4)
 			UNION ALL
 			SELECT owner, version, age FROM me
@@ -405,10 +405,10 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 		return nil, fmt.Errorf("postgres: heartbeat %q as %q: %w", name, owner, err)
 	}
 	defer rows.Close()
-	var out []projection.Member
+	var out []projection.Instance
 	for rows.Next() {
 		var (
-			m          projection.Member
+			m          projection.Instance
 			ageSeconds float64
 		)
 		if err := rows.Scan(&m.Owner, &m.Version, &ageSeconds, &m.Segments); err != nil {

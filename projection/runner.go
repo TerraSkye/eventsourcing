@@ -97,15 +97,15 @@ type Runner struct {
 	rebuildFailed uint64
 	rebuildErr    error
 
-	// Membership, from the last Store.Heartbeat; see members.go. quota is
+	// Membership, from the last Store.Heartbeat; see instances.go. quota is
 	// how many segments this instance should hold, held how many it holds
-	// or is claiming, membersOK whether that heartbeat succeeded, and
+	// or is claiming, instancesOK whether that heartbeat succeeded, and
 	// stable how many heartbeats in a row saw the same membership.
-	quota      int
-	held       int
-	membersOK  bool
-	stable     int
-	membership string
+	quota       int
+	held        int
+	instancesOK bool
+	stable      int
+	membership  string
 
 	skipped atomic.Int64
 }
@@ -276,7 +276,7 @@ func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
 // instance holds every segment.
 //
 // Call Run once per Runner. On return it has released every claim it held
-// and removed itself from the members.
+// and removed itself from the live instances.
 func (r *Runner) Run(ctx context.Context) error {
 	// Events already in the log when the projection is first created count
 	// as replayed; see IsReplaying. Declare only uses head for segments it
@@ -295,9 +295,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := r.heartbeat(ctx); err != nil {
 		return fmt.Errorf("projection %q: heartbeat: %w", r.p.Name, err)
 	}
-	membersDone := make(chan struct{})
+	instancesDone := make(chan struct{})
 	go func() {
-		defer close(membersDone)
+		defer close(instancesDone)
 		r.runMembership(ctx)
 	}()
 
@@ -313,7 +313,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
-	<-membersDone
+	<-instancesDone
 	r.leave(ctx)
 	return ctx.Err()
 }

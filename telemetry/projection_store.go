@@ -171,7 +171,7 @@ func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (re
 }
 
 // Heartbeat implements [projection.Store].
-func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	return t.next.Heartbeat(ctx, name, owner, version, ttl)
 }
 

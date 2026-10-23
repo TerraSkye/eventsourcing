@@ -822,8 +822,8 @@ func (s *storeAcceptance) heartbeatOrderedByOwner(t *testing.T) {
 	s.heartbeat(t, name, other, 0, longTTL)
 	s.heartbeat(t, name, "owner-c", 0, longTTL)
 	got := s.heartbeat(t, name, owner, 0, longTTL)
-	if want := []string{owner, other, "owner-c"}; !slices.Equal(memberOwners(got), want) {
-		t.Fatalf("Heartbeat returned owners %v, want %v", memberOwners(got), want)
+	if want := []string{owner, other, "owner-c"}; !slices.Equal(instanceOwners(got), want) {
+		t.Fatalf("Heartbeat returned owners %v, want %v", instanceOwners(got), want)
 	}
 }
 
@@ -831,8 +831,8 @@ func (s *storeAcceptance) heartbeatExpires(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.heartbeat(t, name, other, 0, shortTTL)
 	time.Sleep(2 * shortTTL)
-	if got := s.heartbeat(t, name, owner, 0, shortTTL); !slices.Equal(memberOwners(got), []string{owner}) {
-		t.Fatalf("Heartbeat returned owners %v after %s stopped for twice the ttl, want only %s", memberOwners(got), other, owner)
+	if got := s.heartbeat(t, name, owner, 0, shortTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat returned owners %v after %s stopped for twice the ttl, want only %s", instanceOwners(got), other, owner)
 	}
 }
 
@@ -840,8 +840,8 @@ func (s *storeAcceptance) heartbeatZeroTTLRemoves(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.heartbeat(t, name, other, 0, longTTL)
 	s.heartbeat(t, name, other, 0, 0)
-	if got := s.heartbeat(t, name, owner, 0, longTTL); !slices.Equal(memberOwners(got), []string{owner}) {
-		t.Fatalf("Heartbeat returned owners %v after %s left with ttl 0, want only %s", memberOwners(got), other, owner)
+	if got := s.heartbeat(t, name, owner, 0, longTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat returned owners %v after %s left with ttl 0, want only %s", instanceOwners(got), other, owner)
 	}
 }
 
@@ -862,7 +862,7 @@ func (s *storeAcceptance) heartbeatUpdatesVersion(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.heartbeat(t, name, owner, 1, longTTL)
 	if got := s.heartbeat(t, name, owner, 2, longTTL); len(got) != 1 || got[0].Version != 2 {
-		t.Fatalf("Heartbeat = %+v, want one member on version 2", got)
+		t.Fatalf("Heartbeat = %+v, want one instance on version 2", got)
 	}
 }
 
@@ -872,7 +872,7 @@ func (s *storeAcceptance) heartbeatAge(t *testing.T) {
 	time.Sleep(shortTTL)
 	got := s.heartbeat(t, name, owner, 0, longTTL)
 	if len(got) != 2 {
-		t.Fatalf("Heartbeat = %+v, want two members", got)
+		t.Fatalf("Heartbeat = %+v, want two instances", got)
 	}
 	if age := got[1].Age; age < shortTTL/2 || age > time.Minute {
 		t.Fatalf("Age of %s is %s after its heartbeat %s ago, want roughly that", other, age, shortTTL)
@@ -885,8 +885,8 @@ func (s *storeAcceptance) heartbeatAge(t *testing.T) {
 func (s *storeAcceptance) heartbeatNamesIndependent(t *testing.T) {
 	a, b := s.newProjection(t, 1), s.newProjection(t, 1)
 	s.heartbeat(t, a, other, 0, longTTL)
-	if got := s.heartbeat(t, b, owner, 0, longTTL); !slices.Equal(memberOwners(got), []string{owner}) {
-		t.Fatalf("Heartbeat on another projection returned owners %v, want only %s", memberOwners(got), owner)
+	if got := s.heartbeat(t, b, owner, 0, longTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat on another projection returned owners %v, want only %s", instanceOwners(got), owner)
 	}
 }
 
@@ -1128,19 +1128,19 @@ func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 }
 
 // heartbeat calls Heartbeat and fails the test on an error.
-func (s *storeAcceptance) heartbeat(t *testing.T, name, who string, version int, ttl time.Duration) []projection.Member {
+func (s *storeAcceptance) heartbeat(t *testing.T, name, who string, version int, ttl time.Duration) []projection.Instance {
 	t.Helper()
-	members, err := s.store.Heartbeat(t.Context(), name, who, version, ttl)
+	instances, err := s.store.Heartbeat(t.Context(), name, who, version, ttl)
 	if err != nil {
 		t.Fatalf("Heartbeat(%s, ttl %s): %v", who, ttl, err)
 	}
-	return members
+	return instances
 }
 
-// memberOwners returns the owners of members, in order.
-func memberOwners(members []projection.Member) []string {
-	owners := make([]string, len(members))
-	for i, m := range members {
+// instanceOwners returns the owners of instances, in order.
+func instanceOwners(instances []projection.Instance) []string {
+	owners := make([]string, len(instances))
+	for i, m := range instances {
 		owners[i] = m.Owner
 	}
 	return owners

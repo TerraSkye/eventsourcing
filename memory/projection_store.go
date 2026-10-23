@@ -38,7 +38,7 @@ type ProjectionStore struct {
 
 	mu          sync.Mutex
 	projections map[string]*memoryProjection
-	members     map[string]map[string]*memoryMember // by projection name, then owner
+	instances   map[string]map[string]*memoryInstance // by projection name, then owner
 }
 
 var (
@@ -50,11 +50,11 @@ var (
 func NewProjectionStore() *ProjectionStore {
 	return &ProjectionStore{
 		projections: make(map[string]*memoryProjection),
-		members:     make(map[string]map[string]*memoryMember),
+		instances:   make(map[string]map[string]*memoryInstance),
 	}
 }
 
-type memoryMember struct {
+type memoryInstance struct {
 	version   int
 	heartbeat time.Time
 }
@@ -342,20 +342,20 @@ func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lea
 }
 
 // Heartbeat implements [projection.Store].
-func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	members := s.members[name]
+	instances := s.instances[name]
 	if ttl == 0 {
-		delete(members, owner)
+		delete(instances, owner)
 		return nil, nil
 	}
-	if members == nil {
-		members = make(map[string]*memoryMember)
-		s.members[name] = members
+	if instances == nil {
+		instances = make(map[string]*memoryInstance)
+		s.instances[name] = instances
 	}
 	now := time.Now()
-	members[owner] = &memoryMember{version: version, heartbeat: now}
+	instances[owner] = &memoryInstance{version: version, heartbeat: now}
 
 	held := make(map[string]int)
 	if p, ok := s.projections[name]; ok {
@@ -365,15 +365,15 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 			}
 		}
 	}
-	out := make([]projection.Member, 0, len(members))
-	for o, m := range members {
+	out := make([]projection.Instance, 0, len(instances))
+	for o, m := range instances {
 		age := now.Sub(m.heartbeat)
 		if age > ttl {
-			delete(members, o) // expired for every instance sharing ttl
+			delete(instances, o) // expired for every instance sharing ttl
 			continue
 		}
-		out = append(out, projection.Member{Owner: o, Version: m.version, Segments: held[o], Age: age})
+		out = append(out, projection.Instance{Owner: o, Version: m.version, Segments: held[o], Age: age})
 	}
-	slices.SortFunc(out, func(a, b projection.Member) int { return cmp.Compare(a.Owner, b.Owner) })
+	slices.SortFunc(out, func(a, b projection.Instance) int { return cmp.Compare(a.Owner, b.Owner) })
 	return out, nil
 }

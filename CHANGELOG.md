@@ -11,9 +11,9 @@ release may break the API; every break is listed under **Breaking**.
 
 - `projection.Store` has a new method, `Heartbeat`, which records a
   runner as a live instance of its projection and lists the others as
-  `projection.Member`s. Stores outside this module must implement it, and
+  `projection.Instance`s. Stores outside this module must implement it, and
   `projectiontest.StoreAcceptanceTest` checks it.
-- The Postgres and SQLite schemas add a `projection_members` table. Apply
+- The Postgres and SQLite schemas add a `projection_instances` table. Apply
   the new schema before deploying: `Runner.Run` returns an error when its
   first heartbeat fails.
 

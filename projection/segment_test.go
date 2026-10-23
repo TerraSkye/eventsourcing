@@ -97,11 +97,11 @@ func (s *claimErrStore) Claim(ctx context.Context, l projection.Lease, ttl time.
 	return s.Store.Claim(ctx, l, ttl)
 }
 
-// Heartbeat reports owner as the only member, so its runner competes for
-// every segment, as it does while the other members' heartbeats are late.
-func (s *claimErrStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
-	members, err := s.Store.Heartbeat(ctx, name, owner, version, ttl)
-	return slices.DeleteFunc(members, func(m projection.Member) bool { return m.Owner != owner }), err
+// Heartbeat reports owner as the only instance, so its runner competes for
+// every segment, as it does while the other instances' heartbeats are late.
+func (s *claimErrStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	instances, err := s.Store.Heartbeat(ctx, name, owner, version, ttl)
+	return slices.DeleteFunc(instances, func(m projection.Instance) bool { return m.Owner != owner }), err
 }
 
 // TestRunner_ClaimErrorLeavesOwnerToStore covers a Runner whose Claim fails

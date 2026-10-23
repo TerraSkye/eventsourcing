@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// shedGrace is how many heartbeats in a row must see the same members
+// shedGrace is how many heartbeats in a row must see the same instances
 // before an instance over its quota gives segments up. While instances
 // start together the membership changes for a moment; waiting it out
 // keeps segments from moving back and forth.
@@ -22,7 +22,7 @@ const shedGrace = 2
 var errShed = errors.New("projection: segment shed to another instance")
 
 // heartbeatInterval is how often the runner sends its heartbeat: often
-// enough that its member row never expires while it runs, and at least
+// enough that its instance row never expires while it runs, and at least
 // once per poll so a quota change is seen as soon as a claim would be.
 func (r *Runner) heartbeatInterval() time.Duration {
 	return min(r.p.PollInterval, r.p.ClaimTTL/3)
@@ -54,26 +54,26 @@ func (r *Runner) runMembership(ctx context.Context) {
 }
 
 // heartbeat records this instance with [Store.Heartbeat] and recomputes
-// its quota from the members it returns. When the heartbeat fails, the
+// its quota from the instances it returns. When the heartbeat fails, the
 // instance keeps its quota but claims nothing new and sheds nothing, so a
 // store outage can neither make it take every segment nor give them up.
 func (r *Runner) heartbeat(ctx context.Context) error {
-	members, err := r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, r.p.ClaimTTL)
+	instances, err := r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, r.p.ClaimTTL)
 	r.mu.Lock()
 	if err != nil {
-		r.membersOK = false
+		r.instancesOK = false
 		r.stable = 0
 		r.mu.Unlock()
 		return err
 	}
-	if sig := membership(members); sig == r.membership {
+	if sig := membership(instances); sig == r.membership {
 		r.stable++
 	} else {
 		r.membership = sig
 		r.stable = 0
 	}
-	r.quota = quota(members, r.p.Owner, r.segments)
-	r.membersOK = true
+	r.quota = quota(instances, r.p.Owner, r.segments)
+	r.instancesOK = true
 	over := r.held > r.quota && r.stable >= shedGrace
 	r.mu.Unlock()
 	if over {
@@ -83,20 +83,20 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 	return nil
 }
 
-// leave removes this instance from the members, so the others take its
-// share at once rather than after the heartbeat's ttl. Best effort: if it
-// fails, the member expires after ClaimTTL.
+// leave removes this instance from the live instances, so the others take
+// its share at once rather than after the heartbeat's ttl. Best effort: if
+// it fails, the instance expires after ClaimTTL.
 func (r *Runner) leave(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
 	_, _ = r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, 0)
 }
 
-// membership identifies a set of members by owner and version, to tell
+// membership identifies a set of instances by owner and version, to tell
 // whether it changed between two heartbeats.
-func membership(members []Member) string {
+func membership(instances []Instance) string {
 	var b strings.Builder
-	for _, m := range members {
+	for _, m := range instances {
 		b.WriteString(m.Owner)
 		b.WriteByte(0)
 		b.WriteString(strconv.Itoa(m.Version))
@@ -105,27 +105,27 @@ func membership(members []Member) string {
 	return b.String()
 }
 
-// quota returns how many of segments owner should hold. Only members on
+// quota returns how many of segments owner should hold. Only instances on
 // the highest Version count: an older instance steps aside from segments a
 // newer one rebuilt, so a quota of its own would leave them unclaimed. The
-// quotas of the members that count sum to segments.
+// quotas of the instances that count sum to segments.
 //
-// Every member gets segments/n, and the members holding the most segments
+// Every instance gets segments/n, and the instances holding the most segments
 // get one more each until the rest is handed out, so a segment only moves
 // when the counts require it. Ties go by Owner, so every instance computes
-// the same quotas from the same members.
-func quota(members []Member, owner string, segments int) int {
+// the same quotas from the same instances.
+func quota(instances []Instance, owner string, segments int) int {
 	top := 0
-	for _, m := range members {
+	for _, m := range instances {
 		top = max(top, m.Version)
 	}
-	live := slices.DeleteFunc(slices.Clone(members), func(m Member) bool { return m.Version != top })
-	slices.SortFunc(live, func(a, b Member) int {
+	live := slices.DeleteFunc(slices.Clone(instances), func(m Instance) bool { return m.Version != top })
+	slices.SortFunc(live, func(a, b Instance) int {
 		return cmp.Or(cmp.Compare(b.Segments, a.Segments), cmp.Compare(a.Owner, b.Owner))
 	})
-	i := slices.IndexFunc(live, func(m Member) bool { return m.Owner == owner })
+	i := slices.IndexFunc(live, func(m Instance) bool { return m.Owner == owner })
 	if i < 0 {
-		return 0 // not (yet) a member, or on an older version: claim nothing
+		return 0 // not (yet) live, or on an older version: claim nothing
 	}
 	n := len(live)
 	q := segments / n
@@ -147,7 +147,7 @@ func (r *Runner) reserve(seg int) bool {
 	if s.reserved {
 		return true
 	}
-	if !r.membersOK || r.held >= r.quota {
+	if !r.instancesOK || r.held >= r.quota {
 		return false
 	}
 	s.reserved = true
@@ -167,14 +167,14 @@ func (r *Runner) unreserve(seg int) {
 }
 
 // shouldShed reports whether seg's loop should release the segment, as the
-// instance holds more segments than its quota and the members have been
+// instance holds more segments than its quota and the instances have been
 // stable for shedGrace heartbeats. The instance gives up its
 // highest-numbered segment first and segment 0, which serves rebuild
 // requests, last.
 func (r *Runner) shouldShed(seg int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.membersOK || r.stable < shedGrace || r.held <= r.quota {
+	if !r.instancesOK || r.stable < shedGrace || r.held <= r.quota {
 		return false
 	}
 	for i := len(r.segs) - 1; i > 0; i-- {

@@ -283,19 +283,19 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 // Heartbeat implements [projection.Store], in one transaction that upserts
 // owner's row, deletes the expired rows of other instances, and reads the
 // live ones with the number of segments each one claims.
-func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Member, error) {
+func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	if ttl == 0 {
 		if _, err := s.db.ExecContext(ctx,
-			`DELETE FROM projection_members WHERE name = ? AND owner = ?`, name, owner,
+			`DELETE FROM projection_instances WHERE name = ? AND owner = ?`, name, owner,
 		); err != nil {
 			return nil, fmt.Errorf("sqlite: leave %q as %q: %w", name, owner, err)
 		}
 		return nil, nil
 	}
-	var out []projection.Member
+	var out []projection.Instance
 	err := s.runTx(ctx, "heartbeat", name, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO projection_members (name, owner, version, heartbeat)
+			INSERT INTO projection_instances (name, owner, version, heartbeat)
 			VALUES (?1, ?2, ?3, `+nowMS+`)
 			ON CONFLICT (name, owner) DO UPDATE SET version = excluded.version, heartbeat = excluded.heartbeat`,
 			name, owner, version,
@@ -303,30 +303,30 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 			return fmt.Errorf("sqlite: heartbeat %q as %q: %w", name, owner, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM projection_members WHERE name = ? AND heartbeat < `+nowMS+` - ?`,
+			DELETE FROM projection_instances WHERE name = ? AND heartbeat < `+nowMS+` - ?`,
 			name, ttl.Milliseconds(),
 		); err != nil {
-			return fmt.Errorf("sqlite: heartbeat %q as %q: delete expired members: %w", name, owner, err)
+			return fmt.Errorf("sqlite: heartbeat %q as %q: delete expired instances: %w", name, owner, err)
 		}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT m.owner, m.version, `+nowMS+` - m.heartbeat,
 			       (SELECT count(*) FROM projection_segments s WHERE s.name = m.name AND s.owner = m.owner)
-			FROM projection_members m
+			FROM projection_instances m
 			WHERE m.name = ?
 			ORDER BY m.owner`,
 			name,
 		)
 		if err != nil {
-			return fmt.Errorf("sqlite: heartbeat %q as %q: load members: %w", name, owner, err)
+			return fmt.Errorf("sqlite: heartbeat %q as %q: load instances: %w", name, owner, err)
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var (
-				m     projection.Member
+				m     projection.Instance
 				ageMS int64
 			)
 			if err := rows.Scan(&m.Owner, &m.Version, &ageMS, &m.Segments); err != nil {
-				return fmt.Errorf("sqlite: heartbeat %q as %q: load members: %w", name, owner, err)
+				return fmt.Errorf("sqlite: heartbeat %q as %q: load instances: %w", name, owner, err)
 			}
 			m.Age = time.Duration(max(ageMS, 0)) * time.Millisecond
 			out = append(out, m)

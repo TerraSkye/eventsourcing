@@ -271,14 +271,14 @@ type Store interface {
 	// running version, and returns the instances seen within ttl, owner
 	// included, ordered by Owner, with Age measured by the store's clock
 	// and Segments counting the claims each one holds on name. A ttl of 0
-	// removes owner instead, for a clean shutdown, and returns no members.
+	// removes owner instead, for a clean shutdown, and returns no instances.
 	// The runner calls it to spread the segments over its instances.
-	Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]Member, error)
+	Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]Instance, error)
 }
 
-// Member is a live instance of a projection, as returned by
-// [Store.Heartbeat].
-type Member struct {
+// Instance is a runner of a projection that sent a heartbeat within the
+// ttl, as returned by [Store.Heartbeat].
+type Instance struct {
 	// Owner identifies the instance; see [Definition.Owner].
 	Owner string
 
