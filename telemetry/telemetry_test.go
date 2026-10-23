@@ -197,6 +197,17 @@ func (c recCounter) Add(_ context.Context, v int64, opts ...metric.AddOption) {
 	c.rec.add(c.name, float64(v), set.ToSlice()...)
 }
 
+type recSyncGauge struct {
+	metricnoop.Int64Gauge
+	name string
+	rec  *recorder
+}
+
+func (g recSyncGauge) Record(_ context.Context, v int64, opts ...metric.RecordOption) {
+	set := metric.NewRecordConfig(opts).Attributes()
+	g.rec.add(g.name, float64(v), set.ToSlice()...)
+}
+
 // recGauge and recObservableCounter carry their name, so recObserver can
 // tell which instrument an observation is for.
 type recGauge struct {
@@ -247,6 +258,10 @@ func (m recMeter) Float64Histogram(name string, _ ...metric.Float64HistogramOpti
 
 func (m recMeter) Int64Counter(name string, _ ...metric.Int64CounterOption) (metric.Int64Counter, error) {
 	return recCounter{name: name, rec: m.rec}, nil
+}
+
+func (m recMeter) Int64Gauge(name string, _ ...metric.Int64GaugeOption) (metric.Int64Gauge, error) {
+	return recSyncGauge{name: name, rec: m.rec}, nil
 }
 
 func (m recMeter) Int64ObservableGauge(name string, _ ...metric.Int64ObservableGaugeOption) (metric.Int64ObservableGauge, error) {

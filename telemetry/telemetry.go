@@ -239,4 +239,34 @@ var (
 		metric.WithDescription("Projection segment rebuilds, labelled by eventsourcing.result"),
 		metric.WithUnit("{rebuild}"),
 	)
+
+	// ProjectionHeartbeats counts the heartbeats a runner sends to record
+	// itself as a live instance of a projection, labelled by
+	// [AttrProjectionName] and [AttrResult] ("success" or "failure"). While
+	// they fail, the instance claims no new segments.
+	ProjectionHeartbeats, _ = meter.Int64Counter(
+		"eventsourcing.projection.heartbeats",
+		metric.WithDescription("Heartbeats a projection instance sends, labelled by eventsourcing.result"),
+		metric.WithUnit("{heartbeat}"),
+	)
+
+	// ProjectionInstanceCount records the number of live instances of a
+	// projection, as the last heartbeat listed them, labelled by
+	// [AttrProjectionName]. Every instance reports the same count, so
+	// aggregate it with max rather than sum.
+	ProjectionInstanceCount, _ = meter.Int64Gauge(
+		"eventsourcing.projection.instance.count",
+		metric.WithDescription("Live instances of a projection, as its last heartbeat listed them"),
+		metric.WithUnit("{instance}"),
+	)
+
+	// ProjectionSegmentHeld records the number of segments of a projection
+	// this instance holds, as of its last heartbeat, labelled by
+	// [AttrProjectionName]. Summed over the instances it is the segment
+	// count once every segment is claimed.
+	ProjectionSegmentHeld, _ = meter.Int64Gauge(
+		"eventsourcing.projection.segment.held",
+		metric.WithDescription("Segments of a projection this instance holds, as of its last heartbeat"),
+		metric.WithUnit("{segment}"),
+	)
 )

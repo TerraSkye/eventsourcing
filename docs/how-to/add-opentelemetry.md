@@ -93,9 +93,12 @@ projection makes on every poll, are counted in metrics but get no span.
 | `eventsourcing.projection.batch.duration` | histogram | Batch commit time, by `eventsourcing.result` (`success`, `failure`, `claim_lost`) |
 | `eventsourcing.projection.claims` | counter | Claim attempts, by `eventsourcing.projection.claim.result` |
 | `eventsourcing.projection.rebuilds` | counter | Rebuilds, by `eventsourcing.result` |
+| `eventsourcing.projection.heartbeats` | counter | Heartbeats an instance sends, by `eventsourcing.result`; while they fail it claims no new segments |
+| `eventsourcing.projection.instance.count` | gauge | Live instances of the projection. Every instance reports the same count: aggregate with max |
+| `eventsourcing.projection.segment.held` | gauge | Segments this instance holds. Summed over instances it is the segment count |
 
-Alert on `phase{eventsourcing.projection.phase="stalled"} == 1` and on lag
-that keeps growing.
+Alert on `phase{eventsourcing.projection.phase="stalled"} == 1`, on lag
+that keeps growing, and on `heartbeats{eventsourcing.result="failure"}`.
 
 ## Add custom attributes
 

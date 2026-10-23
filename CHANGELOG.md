@@ -17,6 +17,13 @@ release may break the API; every break is listed under **Breaking**.
   the new schema before deploying: `Runner.Run` returns an error when its
   first heartbeat fails.
 
+### Added
+
+- The telemetry projection store records `eventsourcing.projection.heartbeats`,
+  `eventsourcing.projection.instance.count` and
+  `eventsourcing.projection.segment.held`, so a dashboard shows how the
+  segments are spread and an alert can catch failing heartbeats.
+
 ### Fixed
 
 - The segments of a projection spread across its instances (#182).
