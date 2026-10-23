@@ -14,6 +14,7 @@ package projectiontest
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -136,6 +137,16 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"Counted":       s.rebuildCounted,
 		"ServedByReset": s.rebuildServedByReset,
 		"InStatus":      s.rebuildInStatus,
+	})
+	s.group(t, "Heartbeat", map[string]func(*testing.T){
+		"ListsSelf":        s.heartbeatListsSelf,
+		"OrderedByOwner":   s.heartbeatOrderedByOwner,
+		"Expires":          s.heartbeatExpires,
+		"ZeroTTLRemoves":   s.heartbeatZeroTTLRemoves,
+		"CountsSegments":   s.heartbeatCountsSegments,
+		"UpdatesVersion":   s.heartbeatUpdatesVersion,
+		"Age":              s.heartbeatAge,
+		"NamesIndependent": s.heartbeatNamesIndependent,
 	})
 	if _, ok := store.(projection.DeadLetterStore); ok {
 		s.group(t, "DeadLetter", map[string]func(*testing.T){
@@ -796,6 +807,89 @@ func (s *storeAcceptance) loadStatusesAge(t *testing.T) {
 	}
 }
 
+// --- Heartbeat ---
+
+func (s *storeAcceptance) heartbeatListsSelf(t *testing.T) {
+	name := s.newProjection(t, 1)
+	got := s.heartbeat(t, name, owner, 2, longTTL)
+	if len(got) != 1 || got[0].Owner != owner || got[0].Version != 2 || got[0].Segments != 0 {
+		t.Fatalf("Heartbeat = %+v, want only %s on version 2 holding 0 segments", got, owner)
+	}
+}
+
+func (s *storeAcceptance) heartbeatOrderedByOwner(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, longTTL)
+	s.heartbeat(t, name, "owner-c", 0, longTTL)
+	got := s.heartbeat(t, name, owner, 0, longTTL)
+	if want := []string{owner, other, "owner-c"}; !slices.Equal(instanceOwners(got), want) {
+		t.Fatalf("Heartbeat returned owners %v, want %v", instanceOwners(got), want)
+	}
+}
+
+func (s *storeAcceptance) heartbeatExpires(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, shortTTL)
+	time.Sleep(2 * shortTTL)
+	if got := s.heartbeat(t, name, owner, 0, shortTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat returned owners %v after %s stopped for twice the ttl, want only %s", instanceOwners(got), other, owner)
+	}
+}
+
+func (s *storeAcceptance) heartbeatZeroTTLRemoves(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, longTTL)
+	s.heartbeat(t, name, other, 0, 0)
+	if got := s.heartbeat(t, name, owner, 0, longTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat returned owners %v after %s left with ttl 0, want only %s", instanceOwners(got), other, owner)
+	}
+}
+
+func (s *storeAcceptance) heartbeatCountsSegments(t *testing.T) {
+	name := s.newProjection(t, 3)
+	s.claim(t, name, 0, owner, longTTL)
+	s.claim(t, name, 1, owner, longTTL)
+	s.claim(t, name, 2, other, longTTL)
+	s.release(t, name, 1, owner)
+	s.heartbeat(t, name, other, 0, longTTL)
+	got := s.heartbeat(t, name, owner, 0, longTTL)
+	if len(got) != 2 || got[0].Segments != 1 || got[1].Segments != 1 {
+		t.Fatalf("Heartbeat = %+v, want %s and %s holding 1 segment each", got, owner, other)
+	}
+}
+
+func (s *storeAcceptance) heartbeatUpdatesVersion(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, owner, 1, longTTL)
+	if got := s.heartbeat(t, name, owner, 2, longTTL); len(got) != 1 || got[0].Version != 2 {
+		t.Fatalf("Heartbeat = %+v, want one instance on version 2", got)
+	}
+}
+
+func (s *storeAcceptance) heartbeatAge(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, longTTL)
+	time.Sleep(shortTTL)
+	got := s.heartbeat(t, name, owner, 0, longTTL)
+	if len(got) != 2 {
+		t.Fatalf("Heartbeat = %+v, want two instances", got)
+	}
+	if age := got[1].Age; age < shortTTL/2 || age > time.Minute {
+		t.Fatalf("Age of %s is %s after its heartbeat %s ago, want roughly that", other, age, shortTTL)
+	}
+	if age := got[0].Age; age > shortTTL/2 {
+		t.Fatalf("Age of %s is %s right after its heartbeat, want about 0", owner, age)
+	}
+}
+
+func (s *storeAcceptance) heartbeatNamesIndependent(t *testing.T) {
+	a, b := s.newProjection(t, 1), s.newProjection(t, 1)
+	s.heartbeat(t, a, other, 0, longTTL)
+	if got := s.heartbeat(t, b, owner, 0, longTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("Heartbeat on another projection returned owners %v, want only %s", instanceOwners(got), owner)
+	}
+}
+
 // --- DeadLetter ---
 
 func (s *storeAcceptance) deadLetterInsideCommit(t *testing.T) {
@@ -1031,6 +1125,25 @@ func (s *storeAcceptance) newProjection(t *testing.T, segments int) string {
 		t.Fatalf("Declare(%d): %v", segments, err)
 	}
 	return name
+}
+
+// heartbeat calls Heartbeat and fails the test on an error.
+func (s *storeAcceptance) heartbeat(t *testing.T, name, who string, version int, ttl time.Duration) []projection.Instance {
+	t.Helper()
+	instances, err := s.store.Heartbeat(t.Context(), name, who, version, ttl)
+	if err != nil {
+		t.Fatalf("Heartbeat(%s, ttl %s): %v", who, ttl, err)
+	}
+	return instances
+}
+
+// instanceOwners returns the owners of instances, in order.
+func instanceOwners(instances []projection.Instance) []string {
+	owners := make([]string, len(instances))
+	for i, m := range instances {
+		owners[i] = m.Owner
+	}
+	return owners
 }
 
 // lease returns the last Lease Claim granted who on segment, or a Lease

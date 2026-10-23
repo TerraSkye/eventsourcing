@@ -38,6 +38,7 @@ type ProjectionStore struct {
 
 	mu          sync.Mutex
 	projections map[string]*memoryProjection
+	instances   map[string]map[string]*memoryInstance // by projection name, then owner
 }
 
 var (
@@ -47,7 +48,15 @@ var (
 
 // NewProjectionStore returns an empty [ProjectionStore].
 func NewProjectionStore() *ProjectionStore {
-	return &ProjectionStore{projections: make(map[string]*memoryProjection)}
+	return &ProjectionStore{
+		projections: make(map[string]*memoryProjection),
+		instances:   make(map[string]map[string]*memoryInstance),
+	}
+}
+
+type memoryInstance struct {
+	version   int
+	heartbeat time.Time
 }
 
 type memoryProjection struct {
@@ -330,4 +339,41 @@ func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lea
 		return d.Position == position
 	})
 	return nil
+}
+
+// Heartbeat implements [projection.Store].
+func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	instances := s.instances[name]
+	if ttl == 0 {
+		delete(instances, owner)
+		return nil, nil
+	}
+	if instances == nil {
+		instances = make(map[string]*memoryInstance)
+		s.instances[name] = instances
+	}
+	now := time.Now()
+	instances[owner] = &memoryInstance{version: version, heartbeat: now}
+
+	held := make(map[string]int)
+	if p, ok := s.projections[name]; ok {
+		for _, row := range p.rows {
+			if row.owner != "" {
+				held[row.owner]++
+			}
+		}
+	}
+	out := make([]projection.Instance, 0, len(instances))
+	for o, m := range instances {
+		age := now.Sub(m.heartbeat)
+		if age > ttl {
+			delete(instances, o) // expired for every instance sharing ttl
+			continue
+		}
+		out = append(out, projection.Instance{Owner: o, Version: m.version, Segments: held[o], Age: age})
+	}
+	slices.SortFunc(out, func(a, b projection.Instance) int { return cmp.Compare(a.Owner, b.Owner) })
+	return out, nil
 }

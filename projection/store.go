@@ -175,7 +175,8 @@ type Lease struct {
 //   - exclusive ownership between instances (via Claim and the fenced
 //     Commit; no separate lock service)
 //   - segmentation across instances (a [Lease] names one segment; a single
-//     projection is just segments=1)
+//     projection is just segments=1; Heartbeat tells each instance how
+//     many others share the segments)
 //   - exactly-once writes to the read model (Commit opens the unit of work
 //     and refuses to commit if the claim has been taken over)
 //   - status publication for other instances to follow (SaveStatus and
@@ -265,6 +266,31 @@ type Store interface {
 	// done means a rebuild is pending. Both are 0 for a projection never
 	// asked to rebuild, or not declared.
 	Rebuilds(ctx context.Context, name string) (requested, done uint64, err error)
+
+	// Heartbeat records owner as a live instance of the projection name
+	// running version, and returns the instances seen within ttl, owner
+	// included, ordered by Owner, with Age measured by the store's clock
+	// and Segments counting the claims each one holds on name. A ttl of 0
+	// removes owner instead, for a clean shutdown, and returns no instances.
+	// The runner calls it to spread the segments over its instances.
+	Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]Instance, error)
+}
+
+// Instance is a runner of a projection that sent a heartbeat within the
+// ttl, as returned by [Store.Heartbeat].
+type Instance struct {
+	// Owner identifies the instance; see [Definition.Owner].
+	Owner string
+
+	// Version is the [Definition.Version] the instance runs.
+	Version int
+
+	// Segments is the number of segments whose claim the instance holds.
+	Segments int
+
+	// Age is how long ago the instance last sent a heartbeat, by the
+	// store's clock.
+	Age time.Duration
 }
 
 // DeadLetter is an event a segment skipped instead of applying.

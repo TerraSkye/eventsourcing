@@ -170,6 +170,47 @@ func TestWithProjectionStoreTelemetry_Claim(t *testing.T) {
 	}
 }
 
+// TestWithProjectionStoreTelemetry_Heartbeat checks a heartbeat records
+// the live instances and the segments its own instance holds, and that
+// the ttl-0 heartbeat an instance leaves with is not counted.
+func TestWithProjectionStoreTelemetry_Heartbeat(t *testing.T) {
+	name := newProjectionName()
+	store := WithProjectionStoreTelemetry(memory.NewProjectionStore())
+	if err := store.Declare(t.Context(), name, 3, 0); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	for seg := range 2 {
+		if _, _, _, err := store.Claim(t.Context(), projection.Lease{Name: name, Segment: seg, Owner: "a"}, time.Minute); err != nil {
+			t.Fatalf("Claim(%d): %v", seg, err)
+		}
+	}
+	for _, owner := range []string{"b", "a"} {
+		if _, err := store.Heartbeat(t.Context(), name, owner, 0, time.Minute); err != nil {
+			t.Fatalf("Heartbeat(%q): %v", owner, err)
+		}
+	}
+	if _, err := store.Heartbeat(t.Context(), name, "b", 0, 0); err != nil {
+		t.Fatalf("Heartbeat(b, ttl 0): %v", err)
+	}
+
+	values := func(metric string) []float64 {
+		var out []float64
+		for _, rec := range forProjection(durationRecorder.recordsFor(metric), name) {
+			out = append(out, rec.value)
+		}
+		return out
+	}
+	if got, want := values("eventsourcing.projection.heartbeats"), []float64{1, 1}; !slices.Equal(got, want) {
+		t.Errorf("heartbeats = %v, want %v", got, want)
+	}
+	if got, want := values("eventsourcing.projection.instance.count"), []float64{1, 2}; !slices.Equal(got, want) {
+		t.Errorf("instance counts = %v, want %v", got, want)
+	}
+	if got, want := values("eventsourcing.projection.segment.held"), []float64{0, 2}; !slices.Equal(got, want) {
+		t.Errorf("segments held = %v, want %v", got, want)
+	}
+}
+
 // TestWithProjectionStoreTelemetry_CommitClaimLost checks a Commit by an
 // instance that does not hold the segment is recorded as claim_lost.
 func TestWithProjectionStoreTelemetry_CommitClaimLost(t *testing.T) {

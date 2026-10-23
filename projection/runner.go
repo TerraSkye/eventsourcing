@@ -97,6 +97,16 @@ type Runner struct {
 	rebuildFailed uint64
 	rebuildErr    error
 
+	// Membership, from the last Store.Heartbeat; see instances.go. quota is
+	// how many segments this instance should hold, held how many it holds
+	// or is claiming, instancesOK whether that heartbeat succeeded, and
+	// stable how many heartbeats in a row saw the same membership.
+	quota       int
+	held        int
+	instancesOK bool
+	stable      int
+	membership  string
+
 	skipped atomic.Int64
 }
 
@@ -110,6 +120,10 @@ type segmentState struct {
 	// active reports that this instance holds the segment's claim and is
 	// processing it.
 	active bool
+
+	// reserved reports that the segment counts against this instance's
+	// quota: it holds the claim or is claiming it; see [Runner.reserve].
+	reserved bool
 
 	// parked holds the streams with a dead letter in this segment, whose
 	// later events are skipped. Only the segment's own goroutine uses it.
@@ -243,8 +257,8 @@ func (r *Runner) Name() string { return r.p.Name }
 func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
 
 // Run processes events until ctx is done, then returns ctx.Err(). It
-// returns early only when it cannot start: when reading the head of the log
-// or [Store.Declare] fails, with that error.
+// returns early only when it cannot start: when reading the head of the log,
+// [Store.Declare] or the first [Store.Heartbeat] fails, with that error.
 //
 // Failures while processing never make Run return. When a batch fails the
 // runner reports [Stalled], backs off and retries from its last committed
@@ -255,7 +269,14 @@ func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
 // keeps trying. If the stored version differs from [Definition.Version] on
 // a segment, that segment is rebuilt first.
 //
-// Call Run once per Runner. On return it has released every claim it held.
+// The instances of a projection spread its segments evenly: each one
+// records itself with [Store.Heartbeat], claims segments only up to its
+// share, and releases segments above it between two batches, so with S
+// segments and N instances each holds S/N, rounded down or up. A single
+// instance holds every segment.
+//
+// Call Run once per Runner. On return it has released every claim it held
+// and removed itself from the live instances.
 func (r *Runner) Run(ctx context.Context) error {
 	// Events already in the log when the projection is first created count
 	// as replayed; see IsReplaying. Declare only uses head for segments it
@@ -268,8 +289,21 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("projection %q: declare segments: %w", r.p.Name, err)
 	}
 
+	// The first heartbeat sets the quota before any segment is claimed, so
+	// a single instance takes every segment at once and a later one does
+	// not take more than its share.
+	if err := r.heartbeat(ctx); err != nil {
+		return fmt.Errorf("projection %q: heartbeat: %w", r.p.Name, err)
+	}
+	instancesDone := make(chan struct{})
+	go func() {
+		defer close(instancesDone)
+		r.runMembership(ctx)
+	}()
+
 	// One loop per segment. The loops compete for the claims with the
-	// loops of every other instance of this program.
+	// loops of every other instance of this program, each claiming only
+	// up to the instance's quota.
 	var wg sync.WaitGroup
 	wg.Add(r.segments)
 	for seg := range r.segments {
@@ -279,6 +313,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		}()
 	}
 	wg.Wait()
+	<-instancesDone
+	r.leave(ctx)
 	return ctx.Err()
 }
 

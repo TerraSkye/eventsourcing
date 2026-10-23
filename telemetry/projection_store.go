@@ -29,7 +29,9 @@ var (
 // as its child, tagged with the projection's name and segment as well.
 // Commit records [ProjectionBatchDuration]. Reset runs inside a "rebuild
 // projection" span and records [ProjectionRebuilds]; Claim records
-// [ProjectionClaims]. The other calls, made on every poll, are not traced.
+// [ProjectionClaims]; Heartbeat records [ProjectionHeartbeats],
+// [ProjectionInstanceCount] and [ProjectionSegmentHeld]. The other calls,
+// made on every poll, are not traced.
 type TelemetryProjectionStore struct {
 	next projection.Store
 	cfg  *config
@@ -168,6 +170,31 @@ func (t TelemetryProjectionStore) RequestRebuild(ctx context.Context, name strin
 // Rebuilds implements [projection.Store].
 func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
 	return t.next.Rebuilds(ctx, name)
+}
+
+// Heartbeat implements [projection.Store], records [ProjectionHeartbeats],
+// and from the instances it lists records [ProjectionInstanceCount] and,
+// for owner, [ProjectionSegmentHeld]. It is not traced: a runner sends a
+// heartbeat on every poll. The ttl-0 call a runner leaves with is not
+// counted as a heartbeat.
+func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	instances, err := t.next.Heartbeat(ctx, name, owner, version, ttl)
+	if ttl == 0 {
+		return instances, err
+	}
+	attrs := metric.WithAttributes(AttrProjectionName.String(name))
+	if err != nil {
+		ProjectionHeartbeats.Add(ctx, 1, metric.WithAttributes(AttrProjectionName.String(name), AttrResult.String("failure")))
+		return instances, err
+	}
+	ProjectionHeartbeats.Add(ctx, 1, metric.WithAttributes(AttrProjectionName.String(name), AttrResult.String("success")))
+	ProjectionInstanceCount.Record(ctx, int64(len(instances)), attrs)
+	for _, inst := range instances {
+		if inst.Owner == owner {
+			ProjectionSegmentHeld.Record(ctx, int64(inst.Segments), attrs)
+		}
+	}
+	return instances, nil
 }
 
 // telemetryDeadLetterStore is a [TelemetryProjectionStore] around a store
