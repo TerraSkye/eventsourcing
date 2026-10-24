@@ -258,7 +258,9 @@ func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
 
 // Run processes events until ctx is done, then returns ctx.Err(). It
 // returns early only when it cannot start: when reading the head of the log,
-// [Store.Declare] or the first [Store.Heartbeat] fails, with that error.
+// [Store.Declare] or the first [Store.Heartbeat] keeps failing for
+// [Definition.ClaimTTL], with the last error, or at once when Declare
+// returns [ErrSegmentsChanged].
 //
 // Failures while processing never make Run return. When a batch fails the
 // runner reports [Stalled], backs off and retries from its last committed
@@ -278,22 +280,8 @@ func (r *Runner) CanRebuild() bool { return r.p.Reset != nil }
 // Call Run once per Runner. On return it has released every claim it held
 // and removed itself from the live instances.
 func (r *Runner) Run(ctx context.Context) error {
-	// Events already in the log when the projection is first created count
-	// as replayed; see IsReplaying. Declare only uses head for segments it
-	// creates, so a restart keeps the boundary of the first start.
-	head, err := r.reader.Head(ctx)
-	if err != nil {
-		return fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
-	}
-	if err := r.store.Declare(ctx, r.p.Name, r.segments, head); err != nil {
-		return fmt.Errorf("projection %q: declare segments: %w", r.p.Name, err)
-	}
-
-	// The first heartbeat sets the quota before any segment is claimed, so
-	// a single instance takes every segment at once and a later one does
-	// not take more than its share.
-	if err := r.heartbeat(ctx); err != nil {
-		return fmt.Errorf("projection %q: heartbeat: %w", r.p.Name, err)
+	if err := r.start(ctx); err != nil {
+		return err
 	}
 	instancesDone := make(chan struct{})
 	go func() {
@@ -316,6 +304,51 @@ func (r *Runner) Run(ctx context.Context) error {
 	<-instancesDone
 	r.leave(ctx)
 	return ctx.Err()
+}
+
+// start reads the head of the log, declares the segments and sends the
+// first heartbeat, trying all three again with the stall backoff for up to
+// ClaimTTL. A blip at startup then does not end Run, while a store that
+// keeps failing, such as one missing a table, still does. A segment count
+// that differs from the stored one is not retried.
+func (r *Runner) start(ctx context.Context) error {
+	retry := newRetryBackOff()
+	giveUp := time.Now().Add(r.p.ClaimTTL)
+	for {
+		err := r.startOnce(ctx)
+		if err == nil || ctx.Err() != nil || errors.Is(err, ErrSegmentsChanged) {
+			return err
+		}
+		wait := retry.NextBackOff()
+		if time.Now().Add(wait).After(giveUp) {
+			return err
+		}
+		r.p.Logger.WarnContext(ctx, "projection start failed; retrying",
+			slog.String("projection", r.p.Name), slog.String("owner", r.p.Owner),
+			slog.String("error", err.Error()), slog.Duration("retry_in", wait))
+		sleepCtx(ctx, wait)
+	}
+}
+
+// startOnce makes one attempt of [Runner.start].
+func (r *Runner) startOnce(ctx context.Context) error {
+	// Events already in the log when the projection is first created count
+	// as replayed; see IsReplaying. Declare only uses head for segments it
+	// creates, so a restart keeps the boundary of the first start.
+	head, err := r.reader.Head(ctx)
+	if err != nil {
+		return fmt.Errorf("projection %q: read head: %w", r.p.Name, err)
+	}
+	if err := r.store.Declare(ctx, r.p.Name, r.segments, head); err != nil {
+		return fmt.Errorf("projection %q: declare segments: %w", r.p.Name, err)
+	}
+	// The first heartbeat sets the quota before any segment is claimed, so
+	// a single instance takes every segment at once and a later one does
+	// not take more than its share.
+	if err := r.heartbeat(ctx); err != nil {
+		return fmt.Errorf("projection %q: heartbeat: %w", r.p.Name, err)
+	}
+	return nil
 }
 
 // Rebuild wipes the read model and processes the log again from the start,

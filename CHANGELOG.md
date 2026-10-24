@@ -29,6 +29,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A one-off store or log error while `Runner.Run` started (reading the
+  head, `Declare` or the first heartbeat) ended `Run`, while the same
+  error later was tolerated. `Run` now tries the start again with the
+  stall backoff for up to `ClaimTTL`, so a store that keeps failing,
+  such as one missing a table, still fails `Run`. A changed segment
+  count still fails at once.
 - A command handler built with `WithRetryStrategy` shared one `BackOff`
   across every command. On a `CommandBus` with several shards that was a
   data race, and commands lost or took each other's retries. Each command

@@ -1346,3 +1346,81 @@ func TestRunner_RebuildMidReplayKeepsReplayUntil(t *testing.T) {
 		}
 	}
 }
+
+// failHeartbeatStore fails the first fails Heartbeats, or every one when
+// always is set.
+type failHeartbeatStore struct {
+	projection.Store
+	fails  atomic.Int64
+	always bool
+}
+
+func (s *failHeartbeatStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	if s.always || s.fails.Add(-1) >= 0 {
+		return nil, errors.New("connection reset")
+	}
+	return s.Store.Heartbeat(ctx, name, owner, version, ttl)
+}
+
+func newStartRunner(es *testStore, ps projection.Store, segments int) *projection.Runner {
+	d := projection.Definition{
+		Name:         "start",
+		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+		EventTypes:   counterEvents,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}
+	if segments > 1 {
+		d.Segments, d.SegmentKey = segments, projection.ByStreamID
+	}
+	return projection.NewRunner(d, es, ps)
+}
+
+// TestRunner_StartRetriesBlip covers a store that fails the first
+// heartbeat once: Run tries again and processes the log.
+func TestRunner_StartRetriesBlip(t *testing.T) {
+	es := &testStore{}
+	ps := &failHeartbeatStore{Store: memory.NewProjectionStore()}
+	ps.fails.Store(1)
+	r := newStartRunner(es, ps, 1)
+	last := save(t, es, 3)
+	defer runRunner(t, r)()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil(%d) after a failed first heartbeat: %v", last, err)
+	}
+}
+
+// TestRunner_StartGivesUp covers a store that keeps failing the first
+// heartbeat, as one missing its table would: Run returns its error once
+// ClaimTTL has passed.
+func TestRunner_StartGivesUp(t *testing.T) {
+	ps := &failHeartbeatStore{Store: memory.NewProjectionStore(), always: true}
+	r := newStartRunner(&testStore{}, ps, 1)
+	start := time.Now()
+	err := r.Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("Run = %v, want the heartbeat's error", err)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("Run gave up after %s, want within about the 1s ClaimTTL", took)
+	}
+}
+
+// TestRunner_StartSegmentsChangedNotRetried covers a segment count that
+// differs from the stored one: retrying cannot help, so Run returns at once.
+func TestRunner_StartSegmentsChangedNotRetried(t *testing.T) {
+	ps := memory.NewProjectionStore()
+	if err := ps.Declare(t.Context(), "start", 2, 0); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	r := newStartRunner(&testStore{}, ps, 1)
+	start := time.Now()
+	if err := r.Run(t.Context()); !errors.Is(err, projection.ErrSegmentsChanged) {
+		t.Fatalf("Run = %v, want ErrSegmentsChanged", err)
+	}
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Errorf("Run returned after %s, want at once", took)
+	}
+}
