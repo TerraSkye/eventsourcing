@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,8 +34,9 @@ func newSpreadRunner(es *testStore, ps projection.Store, owner string, segments,
 	return projection.NewRunner(p, es, ps)
 }
 
-// held returns how many segments of "spread" each owner holds, and how
-// many no one holds.
+// held returns how many segments of "spread" each configured owner holds,
+// and how many no one holds. A runner appends a random part to its Owner,
+// which held leaves out.
 func held(t *testing.T, ps projection.Store) (map[string]int, int) {
 	t.Helper()
 	sts, err := ps.LoadStatuses(t.Context(), "spread")
@@ -47,7 +49,7 @@ func held(t *testing.T, ps projection.Store) (map[string]int, int) {
 			free++
 			continue
 		}
-		counts[st.Owner]++
+		counts[st.Owner[:strings.LastIndexByte(st.Owner, '/')]]++
 	}
 	return counts, free
 }
@@ -291,4 +293,48 @@ func TestRunner_JoinWithFlakyHeartbeats(t *testing.T) {
 
 	defer runRunner(t, newSpreadRunner(es, &flakyHeartbeatStore{Store: ps}, "b", 8, 0))()
 	waitHeld(t, ps, map[string]int{"a": 4, "b": 4}, 3*time.Second)
+}
+
+// TestRunner_SharedOwnerSplitsSegments covers two runners configured with
+// the same Owner, as replicas given one service name: each is an instance
+// of its own, so they split the segments rather than both taking the share
+// of one, and one stopping does not remove the other from the instances.
+func TestRunner_SharedOwnerSplitsSegments(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	save(t, es, 5)
+	a := newSpreadRunner(es, ps, "orders", 8, 0)
+	b := newSpreadRunner(es, ps, "orders", 8, 0)
+	if a.Owner() == b.Owner() {
+		t.Fatalf("both runners run as %q, want an Owner of their own", a.Owner())
+	}
+	defer runRunner(t, a)()
+	stopB := runRunner(t, b)
+	waitOwners(t, ps, map[string]int{a.Owner(): 4, b.Owner(): 4}, 3*time.Second)
+
+	stopB()
+	waitOwners(t, ps, map[string]int{a.Owner(): 8}, time.Second)
+}
+
+// waitOwners waits until the segments of "spread" are held exactly as want
+// says, by full Owner, with none free.
+func waitOwners(t *testing.T, ps projection.Store, want map[string]int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		sts, err := ps.LoadStatuses(t.Context(), "spread")
+		if err != nil {
+			t.Fatalf("LoadStatuses: %v", err)
+		}
+		got := map[string]int{}
+		for _, st := range sts {
+			got[st.Owner]++
+		}
+		if fmt.Sprint(got) == fmt.Sprint(want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("segments held %v after %s, want %v", got, timeout, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

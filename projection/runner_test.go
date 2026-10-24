@@ -356,6 +356,12 @@ func TestRunner_Panics(t *testing.T) {
 			c := newCounter()
 			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewProjectionStore())
 		}},
+		{"poll interval equal to claim ttl", func() {
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents, PollInterval: time.Second, ClaimTTL: time.Second}, &nopReader{}, memory.NewProjectionStore())
+		}},
+		{"poll interval above the default claim ttl", func() {
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents, PollInterval: time.Minute}, &nopReader{}, memory.NewProjectionStore())
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -601,7 +607,7 @@ func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	for r.Status().Owner != "a" {
+	for r.Status().Owner != r.Owner() {
 		if ctx.Err() != nil {
 			t.Fatalf("runner never claimed the segment; status %+v", r.Status())
 		}
@@ -1001,8 +1007,8 @@ func TestRunner_LogsLifecycle(t *testing.T) {
 			t.Errorf("claim record lacks attribute %q: %v", key, a)
 		}
 	}
-	if a["projection"].String() != "test" || a["owner"].String() != "owner-a" {
-		t.Errorf("claim record attributes = %v, want projection test and owner owner-a", a)
+	if a["projection"].String() != "test" || a["owner"].String() != r.Owner() {
+		t.Errorf("claim record attributes = %v, want projection test and owner %s", a, r.Owner())
 	}
 
 	c.fail = func(uint64) error { return errors.New("boom") }

@@ -275,7 +275,7 @@ Each event goes to the segment its key maps to, and instances share the segments
 Know the limits before you segment:
 
 - **Each segment reads the log.** Every segment reads the filtered log on its own and drops the events of other segments, so 16 segments read the log 16 times. Segment when handlers are the bottleneck, not reading.
-- **Each segment writes a heartbeat.** An idle segment refreshes its claim once per `PollInterval`, so 64 segments across many instances keep up a steady write load on the store.
+- **Each segment writes a heartbeat.** An idle segment refreshes its claim once per `PollInterval`, and every runner also sends a heartbeat of its own to list itself among the instances. So 64 segments, or many projections, across many instances keep up a steady write load on the store; on Postgres every such write leaves a dead row for autovacuum.
 - **Cross-stream read models cannot be segmented.** A row that combines events from many streams, such as a total, a count or a leaderboard, would be written by every segment, and the order between streams is lost. Keep such a projection on one segment. The segment count is fixed per name; changing it takes a new name.
 
 ## Write your own Store

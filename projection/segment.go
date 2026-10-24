@@ -140,7 +140,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
-			sleepCtx(ctx, wait)
+			r.waitStalled(ctx, seg, wait)
 		}
 	}
 }
@@ -327,10 +327,6 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
 	r.mu.Lock()
 	r.resetting = true // until the caller's rebuildTried
-	before := make([]Lease, len(r.segs))
-	for i, s := range r.segs {
-		before[i] = s.lease
-	}
 	r.mu.Unlock()
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
@@ -346,13 +342,15 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 		if i == seg {
 			continue // Reset kept seg's claim
 		}
-		// The store released the segment. Retire the lease it was held
-		// under, so a commit that reached the store before the reset
-		// cannot write its wiped position back through setStatus. A
-		// segment claimed again since keeps its new lease.
-		if s.lease == before[i] {
-			s.lease.Epoch = 0
-		}
+		// The store released the segment. Retire whatever lease it holds
+		// in memory, so a commit that reached the store before the reset
+		// cannot write its wiped position back through setStatus. That
+		// includes a lease taken over while Reset ran: its commits may
+		// have landed before the wipe. A lease claimed after the reset is
+		// retired too, and costs that segment one ErrClaimLost and a
+		// claim; one claimed after this point is kept, and the store
+		// fences its commits if it reached the store before the reset.
+		s.lease.Epoch = 0
 	}
 	r.signalChange()
 	r.mu.Unlock()
@@ -640,6 +638,31 @@ func (r *Runner) publishStatus(ctx context.Context, seg int) {
 	st := r.segs[seg].status
 	r.mu.Unlock()
 	_ = r.store.SaveStatus(ctx, r.lease(seg), st)
+}
+
+// waitStalled waits d before stalled seg retries, publishing its status
+// every PollInterval meanwhile. That refreshes the claim, which a backoff
+// longer than ClaimTTL would otherwise let expire: another instance would
+// take the segment over only to stall on the same event. It returns early
+// when ctx is done or the claim is lost.
+func (r *Runner) waitStalled(ctx context.Context, seg int, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 || ctx.Err() != nil {
+			return
+		}
+		sleepCtx(ctx, min(left, r.p.PollInterval))
+		if time.Until(deadline) <= 0 || ctx.Err() != nil {
+			return
+		}
+		r.mu.Lock()
+		st := r.segs[seg].status
+		r.mu.Unlock()
+		if err := r.store.SaveStatus(ctx, r.lease(seg), st); errors.Is(err, ErrClaimLost) {
+			return
+		}
+	}
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.

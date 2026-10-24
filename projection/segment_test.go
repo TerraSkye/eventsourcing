@@ -562,3 +562,243 @@ func TestRunner_PublishesStall(t *testing.T) {
 		t.Errorf("stored LastError = %q after recovery, want empty", statuses[0].LastError)
 	}
 }
+
+// soloStore reports each runner as the only live instance, so it competes
+// for every segment, as it does while the other instances' heartbeats are
+// late.
+type soloStore struct{ projection.Store }
+
+func (s soloStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	instances, err := s.Store.Heartbeat(ctx, name, owner, version, ttl)
+	return slices.DeleteFunc(instances, func(m projection.Instance) bool { return m.Owner != owner }), err
+}
+
+// TestRunner_StallKeepsClaim covers a segment stalled for longer than its
+// ClaimTTL: it keeps refreshing its claim during the backoff, so another
+// instance does not take it over only to stall on the same event.
+func TestRunner_StallKeepsClaim(t *testing.T) {
+	es := &testStore{}
+	ps := memory.NewProjectionStore()
+	failing := newCounter()
+	failing.fail = func(uint64) error { return errors.New("poison event") }
+	newDef := func(c *counter, owner string) projection.Definition {
+		return projection.Definition{
+			Name:         "test",
+			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+			EventTypes:   counterEvents,
+			Owner:        owner,
+			PollInterval: 20 * time.Millisecond,
+			// Below the first backoff of 0.5s, rounded down by jitter.
+			ClaimTTL: 200 * time.Millisecond,
+		}
+	}
+	save(t, es, 1)
+	a := projection.NewRunner(newDef(failing, "a"), es, ps)
+	defer runRunner(t, a)()
+	for a.Status().Phase != projection.Stalled {
+		if t.Context().Err() != nil {
+			t.Fatal("a never stalled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	b := projection.NewRunner(newDef(newCounter(), "b"), es, soloStore{ps})
+	defer runRunner(t, b)()
+	// Well past a's first backoff and several ClaimTTLs.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sts, err := ps.LoadStatuses(t.Context(), "test")
+		if err != nil {
+			t.Fatalf("LoadStatuses: %v", err)
+		}
+		if owner := sts[0].Owner; owner != a.Owner() {
+			t.Fatalf("segment owned by %q while a was stalled on it, want a to keep its claim", owner)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRunner_RebuildRetiresLeaseTakenOverDuringReset covers a segment that
+// takes its claim over after a rebuild starts but before its Store.Reset,
+// and commits under that new lease before the reset wipes the read model.
+// That commit's position was wiped, so WaitUntil after the rebuild must
+// wait for the replay rather than return at it.
+func TestRunner_RebuildRetiresLeaseTakenOverDuringReset(t *testing.T) {
+	es := &testStore{}
+	c := newCounter()
+	ps := &takeoverStore{
+		Store:     memory.NewProjectionStore(),
+		gated:     make(chan struct{}),
+		committed: make(chan struct{}),
+		resetDone: make(chan struct{}),
+		reclaimed: make(chan struct{}),
+		release:   make(chan struct{}),
+		held:      make(chan struct{}),
+	}
+	p := projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Reset:        c.Reset,
+		Version:      1,
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+		Segments:     2,
+		SegmentKey:   projection.ByStreamID,
+		BatchSize:    100,
+	}
+	r := projection.NewRunner(p, es, ps)
+	last := saveStreams(t, es, 8)
+	stop := runRunner(t, r)
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil before rebuilds: %v", err)
+	}
+	c.mu.Lock()
+	total := len(c.applied)
+	c.mu.Unlock()
+
+	// First rebuild: retires segment 1's lease, so its next Claim is a
+	// takeover with a new epoch. The store holds that Claim back.
+	if err := r.Rebuild(ctx); err != nil {
+		t.Fatalf("first Rebuild: %v", err)
+	}
+	select {
+	case <-ps.gated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("segment 1 never claimed again after the first rebuild")
+	}
+
+	// Second rebuild: its Reset lets segment 1 take over and commit first.
+	if err := r.Rebuild(ctx); err != nil {
+		t.Fatalf("second Rebuild: %v", err)
+	}
+	if ps.failed.Load() {
+		t.Fatal("segment 1 did not commit before the second reset")
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		close(ps.release)
+	}()
+	// Segment 1 makes its next store call only after its commit returned.
+	select {
+	case <-ps.held:
+	case <-time.After(3 * time.Second):
+		t.Fatal("segment 1 never made a store call after its commit")
+	}
+	start := time.Now()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil after rebuild: %v", err)
+	}
+	took := time.Since(start)
+	c.mu.Lock()
+	n := len(c.applied)
+	c.mu.Unlock()
+	if n != total {
+		t.Errorf("after the second Rebuild, WaitUntil(%d) returned after %v with %d of %d events in the wiped read model; Status() = %+v", last, took, n, total, r.Status())
+	}
+}
+
+// takeoverStore orders segment 1's takeover and commit after the second
+// rebuild starts and before its Store.Reset wipes the read model.
+type takeoverStore struct {
+	projection.Store
+	resets    atomic.Int32
+	gate      atomic.Pointer[chan struct{}]
+	gateOnce  sync.Once
+	gated     chan struct{} // segment 1 is waiting at the gate
+	stage2    atomic.Bool   // the gate is open
+	commitOne sync.Once
+	committed chan struct{} // segment 1 committed after the gate opened
+	resetDone chan struct{}
+	reclOnce  sync.Once
+	reclaimed chan struct{} // segment 0 reclaimed after the second reset
+	hold      atomic.Bool   // hold segment 1's next store calls
+	release   chan struct{}
+	heldOnce  sync.Once
+	held      chan struct{} // segment 1 is being held
+	failed    atomic.Bool
+}
+
+func (s *takeoverStore) holdSeg1(ctx context.Context, l projection.Lease) {
+	if l.Segment == 1 && s.hold.Load() {
+		s.heldOnce.Do(func() { close(s.held) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+	}
+}
+
+func (s *takeoverStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+	s.holdSeg1(ctx, l)
+	if g := s.gate.Load(); g != nil && l.Segment == 1 {
+		s.gateOnce.Do(func() { close(s.gated) })
+		select {
+		case <-*g:
+		case <-ctx.Done():
+			return projection.Lease{}, projection.Checkpoint{}, false, ctx.Err()
+		}
+	}
+	nl, cp, ok, err := s.Store.Claim(ctx, l, ttl)
+	if l.Segment == 0 && s.resets.Load() == 2 {
+		select {
+		case <-s.resetDone:
+			s.reclOnce.Do(func() { close(s.reclaimed) })
+		default:
+		}
+	}
+	return nl, cp, ok, err
+}
+
+func (s *takeoverStore) Reset(ctx context.Context, l projection.Lease, v int, wipe func(context.Context) error) error {
+	switch s.resets.Add(1) {
+	case 1:
+		g := make(chan struct{})
+		s.gate.Store(&g)
+		return s.Store.Reset(ctx, l, v, wipe)
+	case 2:
+		// The rebuild is under way by now.
+		s.stage2.Store(true)
+		g := s.gate.Load()
+		s.gate.Store(nil)
+		close(*g)
+		select {
+		case <-s.committed:
+		case <-time.After(2 * time.Second):
+			s.failed.Store(true)
+		}
+		err := s.Store.Reset(ctx, l, v, wipe)
+		close(s.resetDone)
+		return err
+	}
+	return s.Store.Reset(ctx, l, v, wipe)
+}
+
+func (s *takeoverStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, st projection.Status, fn func(context.Context) error) error {
+	s.holdSeg1(ctx, l)
+	err := s.Store.Commit(ctx, l, cp, st, fn)
+	if err == nil && l.Segment == 1 && s.stage2.Load() {
+		first := false
+		s.commitOne.Do(func() { first = true })
+		if first {
+			close(s.committed)
+			// Return only once rebuild has reset the in-memory statuses
+			// and reclaimed segment 0, then hold segment 1 for a while.
+			select {
+			case <-s.reclaimed:
+			case <-time.After(2 * time.Second):
+			}
+			s.hold.Store(true)
+		}
+	}
+	return err
+}
+
+func (s *takeoverStore) SaveStatus(ctx context.Context, l projection.Lease, st projection.Status) error {
+	s.holdSeg1(ctx, l)
+	return s.Store.SaveStatus(ctx, l, st)
+}
