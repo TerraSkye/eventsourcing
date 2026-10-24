@@ -151,6 +151,12 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"Age":              s.heartbeatAge,
 		"NamesIndependent": s.heartbeatNamesIndependent,
 	})
+	s.group(t, "LoadInstances", map[string]func(*testing.T){
+		"UnknownName":      s.loadInstancesUnknownName,
+		"DoesNotRegister":  s.loadInstancesDoesNotRegister,
+		"ExpiresByOwnTTL":  s.loadInstancesExpiresByOwnTTL,
+		"MatchesHeartbeat": s.loadInstancesMatchesHeartbeat,
+	})
 	if _, ok := store.(projection.DeadLetterStore); ok {
 		s.group(t, "DeadLetter", map[string]func(*testing.T){
 			"InsideCommit":        s.deadLetterInsideCommit,
@@ -925,6 +931,51 @@ func (s *storeAcceptance) loadStatusesClaimTTL(t *testing.T) {
 	}
 }
 
+// --- LoadInstances ---
+
+func (s *storeAcceptance) loadInstancesUnknownName(t *testing.T) {
+	if got := s.instances(t, "projectiontest-"+uuid.NewString()); len(got) != 0 {
+		t.Fatalf("LoadInstances for an unknown name = %+v, want none", got)
+	}
+}
+
+func (s *storeAcceptance) loadInstancesDoesNotRegister(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, longTTL)
+	for range 2 {
+		if got := s.instances(t, name); !slices.Equal(instanceOwners(got), []string{other}) {
+			t.Fatalf("LoadInstances returned owners %v, want only %s, which sent a heartbeat", instanceOwners(got), other)
+		}
+	}
+}
+
+func (s *storeAcceptance) loadInstancesExpiresByOwnTTL(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, owner, 0, longTTL)
+	s.heartbeat(t, name, other, 0, shortTTL)
+	time.Sleep(2 * shortTTL)
+	if got := s.instances(t, name); !slices.Equal(instanceOwners(got), []string{owner}) {
+		t.Fatalf("LoadInstances returned owners %v after %s's ttl passed, want only %s", instanceOwners(got), other, owner)
+	}
+}
+
+func (s *storeAcceptance) loadInstancesMatchesHeartbeat(t *testing.T) {
+	name := s.newProjection(t, 3)
+	s.claim(t, name, 0, other, longTTL)
+	s.claim(t, name, 1, other, longTTL)
+	s.heartbeat(t, name, other, 2, longTTL)
+	want := s.heartbeat(t, name, owner, 1, longTTL)
+	got := s.instances(t, name)
+	if len(got) != len(want) {
+		t.Fatalf("LoadInstances = %+v, want the %d instances Heartbeat listed: %+v", got, len(want), want)
+	}
+	for i := range want {
+		if got[i].Owner != want[i].Owner || got[i].Version != want[i].Version || got[i].Segments != want[i].Segments {
+			t.Errorf("LoadInstances[%d] = %+v, want %+v as Heartbeat listed it", i, got[i], want[i])
+		}
+	}
+}
+
 // --- DeadLetter ---
 
 func (s *storeAcceptance) deadLetterInsideCommit(t *testing.T) {
@@ -1168,6 +1219,16 @@ func (s *storeAcceptance) heartbeat(t *testing.T, name, who string, version int,
 	instances, err := s.store.Heartbeat(t.Context(), name, who, version, ttl)
 	if err != nil {
 		t.Fatalf("Heartbeat(%s, ttl %s): %v", who, ttl, err)
+	}
+	return instances
+}
+
+// instances calls LoadInstances and fails the test on an error.
+func (s *storeAcceptance) instances(t *testing.T, name string) []projection.Instance {
+	t.Helper()
+	instances, err := s.store.LoadInstances(t.Context(), name)
+	if err != nil {
+		t.Fatalf("LoadInstances: %v", err)
 	}
 	return instances
 }

@@ -345,6 +345,39 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	return out, nil
 }
 
+// LoadInstances implements [projection.Store]: it reads the rows whose own
+// ttl has not passed, with the number of segments each one claims.
+func (s *ProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.owner, m.version, `+nowMS+` - m.heartbeat,
+		       (SELECT count(*) FROM projection_segments s WHERE s.name = m.name AND s.owner = m.owner)
+		FROM projection_instances m
+		WHERE m.name = ? AND m.heartbeat >= `+nowMS+` - m.ttl_ms
+		ORDER BY m.owner`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load instances of %q: %w", name, err)
+	}
+	defer rows.Close()
+	var out []projection.Instance
+	for rows.Next() {
+		var (
+			m     projection.Instance
+			ageMS int64
+		)
+		if err := rows.Scan(&m.Owner, &m.Version, &ageMS, &m.Segments); err != nil {
+			return nil, fmt.Errorf("sqlite: load instances of %q: %w", name, err)
+		}
+		m.Age = time.Duration(max(ageMS, 0)) * time.Millisecond
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: load instances of %q: %w", name, err)
+	}
+	return out, nil
+}
+
 // RequestRebuild implements [projection.Store].
 func (s *ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
 	var n int64

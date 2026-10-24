@@ -197,6 +197,11 @@ func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner str
 	return instances, nil
 }
 
+// LoadInstances implements [projection.Store].
+func (t TelemetryProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
+	return t.next.LoadInstances(ctx, name)
+}
+
 // telemetryDeadLetterStore is a [TelemetryProjectionStore] around a store
 // that also implements [projection.DeadLetterStore].
 type telemetryDeadLetterStore struct {
