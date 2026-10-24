@@ -75,7 +75,7 @@ release may break the API; every break is listed under **Breaking**.
   `projectiontest.StoreAcceptanceTest` checks them.
 - The Postgres and SQLite schemas add a `projection_instances` table. Apply
   the new schema before deploying: `Runner.Run` returns an error when its
-  first heartbeat fails.
+  first heartbeat keeps failing for `ClaimTTL`.
 
 ### Added
 
