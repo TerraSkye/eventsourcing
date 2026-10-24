@@ -7,6 +7,16 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Fixed
+
+- The stores no longer keep every `ReplayStream` request forever.
+  `FinishReplay` deletes a request once every segment tried it without
+  an error, together with the earlier finished requests of its stream;
+  a failed request is kept until then, or until `Reset`. A stream
+  without dead letters records no request: `RequestReplay` returns 0.
+  `StoreAcceptanceTest` checks the deleting, so a store outside this
+  module that keeps its requests now fails it.
+
 ## [0.4.0] - 2026-10-24
 
 ### Breaking
