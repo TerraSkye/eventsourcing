@@ -163,6 +163,14 @@ type Definition struct {
 	// such as an instance of the previous deployment during a rollout,
 	// stands by instead of rebuilding back.
 	//
+	// During a rollout, the segments go to the instances on the highest
+	// Version only: once one instance of a new Version runs, the older
+	// ones get no share. So the first new instance, a canary or the first
+	// pod of a slow rolling deploy, takes every segment and runs the whole
+	// rebuild on its own, and the rest of the new instances share the
+	// segments with it as they start. Size it for that, or build the new
+	// version under a new Name, as above.
+	//
 	// Default 0: no automatic rebuilds (Rebuild can still be called).
 	// Setting a non-zero Version requires Reset.
 	Version int
@@ -190,8 +198,11 @@ type Definition struct {
 	// Segments parallelize the handlers, not the reads: every segment reads
 	// the filtered log on its own and drops the events of other segments,
 	// so N segments read the log N times. Every segment also writes a
-	// heartbeat to the store once per PollInterval while idle, so many
-	// segments across many instances add a steady write load. A read model
+	// heartbeat to the store once per PollInterval while idle, and every
+	// Runner sends one more to list itself among the instances, so many
+	// segments and projections across many instances add a steady write
+	// load. On Postgres every such write leaves a dead row for autovacuum
+	// to clean up. A read model
 	// that combines events of many streams into one row, such as a total
 	// or a count, cannot be segmented: no SegmentKey keeps that row within
 	// one segment.
