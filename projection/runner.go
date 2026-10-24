@@ -80,10 +80,15 @@ type Runner struct {
 	// every request queued and not yet finished or dropped, so a poll does
 	// not queue it twice. checkReplays asks the poll to run at once, and
 	// replayed is closed and replaced whenever a segment here finishes one.
+	// While replayWaiters ReplayStream calls wait here, replayErrs keeps the
+	// errors segments here failed each request with, so those calls return
+	// them as they were rather than as their text.
 	pendingReplays map[int][]Replay
 	queuedReplays  map[Replay]bool
 	checkReplays   chan struct{}
 	replayed       chan struct{}
+	replayWaiters  int
+	replayErrs     map[uint64][]error
 
 	// checkRebuild asks segment 0 to look for a rebuild request in the
 	// store at once, rather than at its next regular check.
@@ -204,6 +209,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 
 		pendingReplays: map[int][]Replay{},
 		queuedReplays:  map[Replay]bool{},
+		replayErrs:     map[uint64][]error{},
 		checkReplays:   make(chan struct{}, 1),
 		replayed:       make(chan struct{}),
 		changed:        make(chan struct{}),

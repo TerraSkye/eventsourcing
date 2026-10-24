@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -21,8 +22,10 @@ import (
 // instance, whichever segments it holds, and the request survives restarts
 // and claims moving between instances. ReplayStream then waits until every
 // one of those segments has tried it, and returns the errors they failed
-// with, joined; an error from a segment on another instance comes back as
-// its text. A stream with nothing to replay returns nil at once.
+// with, joined. An error from a segment on this instance comes back as it
+// was, for [errors.Is] and [errors.As]; one from a segment on another
+// instance only as its text. A stream with nothing to replay returns nil
+// at once.
 //
 // ctx only bounds how long ReplayStream waits: the request is kept in the
 // store and still served when ctx ends first. While no instance runs the
@@ -35,6 +38,18 @@ func (r *Runner) ReplayStream(ctx context.Context, streamID string) error {
 	if !ok {
 		return ErrNoDeadLetterStore
 	}
+	r.mu.Lock()
+	r.replayWaiters++
+	r.mu.Unlock()
+	var n uint64
+	defer func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.replayErrs, n)
+		if r.replayWaiters--; r.replayWaiters == 0 {
+			clear(r.replayErrs)
+		}
+	}()
 	n, err := dls.RequestReplay(ctx, r.p.Name, streamID)
 	if err != nil {
 		return fmt.Errorf("projection %q: request replay of stream %q: %w", r.p.Name, streamID, err)
@@ -55,11 +70,7 @@ func (r *Runner) ReplayStream(ctx context.Context, streamID string) error {
 			return fmt.Errorf("projection %q: replay of stream %q: read result: %w", r.p.Name, streamID, err)
 		}
 		if pending == 0 {
-			errs := make([]error, len(msgs))
-			for i, msg := range msgs {
-				errs[i] = errors.New(msg)
-			}
-			return errors.Join(errs...)
+			return r.replayError(n, msgs)
 		}
 		select {
 		case <-ctx.Done():
@@ -68,6 +79,26 @@ func (r *Runner) ReplayStream(ctx context.Context, streamID string) error {
 		case <-tick.C: // one on another instance only shows in the store
 		}
 	}
+}
+
+// replayError joins the errors msgs that the segments failed request n
+// with. Each one a segment on this instance failed with is returned as it
+// was; the others are rebuilt from their text.
+func (r *Runner) replayError(n uint64, msgs []string) error {
+	r.mu.Lock()
+	local := slices.Clone(r.replayErrs[n])
+	r.mu.Unlock()
+	errs := make([]error, len(msgs))
+	for i, msg := range msgs {
+		j := slices.IndexFunc(local, func(err error) bool { return err.Error() == msg })
+		if j < 0 {
+			errs[i] = errors.New(msg)
+			continue
+		}
+		errs[i] = local[j]
+		local = slices.Delete(local, j, j+1)
+	}
+	return errors.Join(errs...)
 }
 
 // runReplays queues the replay requests pending in the store for the
@@ -142,6 +173,11 @@ func (r *Runner) serveReplays(ctx context.Context, seg int, cp Checkpoint) error
 		var msg string
 		if err != nil {
 			msg = err.Error()
+			r.mu.Lock()
+			if r.replayWaiters > 0 {
+				r.replayErrs[rp.Number] = append(r.replayErrs[rp.Number], err)
+			}
+			r.mu.Unlock()
 		}
 		// A failed FinishReplay other than a lost claim leaves the request
 		// pending: the next poll queues it again, and with its dead letters
