@@ -209,10 +209,11 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		changed:        make(chan struct{}),
 		rebuilt:        make(chan struct{}),
 	}
-	r.probe = NewProbe(store, p.Name,
-		WithPollInterval(p.PollInterval),
-		WithClaimTTL(p.ClaimTTL),
-	)
+	r.probe = NewProbe(ProbeDefinition{
+		Name:         p.Name,
+		PollInterval: p.PollInterval,
+		ClaimTTL:     p.ClaimTTL,
+	}, store)
 	r.probe.segments = segments
 	for i := range r.segs {
 		r.segs[i] = &segmentState{

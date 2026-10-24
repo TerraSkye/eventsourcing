@@ -312,7 +312,7 @@ func TestRunner_OneByOneRetryCommitsScannedPosition(t *testing.T) {
 	// must return within a few poll intervals.
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	probe := projection.NewProbe(ps, "p", projection.WithPollInterval(5*time.Millisecond))
+	probe := projection.NewProbe(projection.ProbeDefinition{Name: "p", PollInterval: 5 * time.Millisecond}, ps)
 	if err := probe.WaitUntil(ctx, last); err != nil {
 		statuses, _ := ps.LoadStatuses(t.Context(), "p")
 		t.Fatalf("Probe.WaitUntil(%d) = %v\nin memory: %+v\nin store: %+v", last, err, r.Status(), statuses)

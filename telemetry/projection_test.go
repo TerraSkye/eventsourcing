@@ -315,9 +315,9 @@ func TestWithEventTelemetry_RecordsErrors(t *testing.T) {
 	}
 }
 
-// TestTelemetryStore_ReadAllEmptyPageNotTraced checks a read that returns no
+// TestEventStore_ReadAllEmptyPageNotTraced checks a read that returns no
 // events records no span, while one that returns events does.
-func TestTelemetryStore_ReadAllEmptyPageNotTraced(t *testing.T) {
+func TestEventStore_ReadAllEmptyPageNotTraced(t *testing.T) {
 	stub := &stubStore{events: []*eventsourcing.Envelope{
 		{StreamID: "agg-1", Event: stubEvent{}, Version: 1, GlobalPosition: 1},
 	}}
