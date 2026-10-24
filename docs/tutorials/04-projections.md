@@ -274,7 +274,7 @@ if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
 If the projection runs in another process, such as a worker, there is no runner to call. Wait on the projection store instead, with a `projection.Probe`; it needs only the store and the projection's name:
 
 ```go
-probe := projection.NewProbe(store, "task-list")
+probe := projection.NewProbe(projection.ProbeDefinition{Name: "task-list"}, store)
 if err := probe.WaitUntil(ctx, res.GlobalPosition); err != nil {
     return err // a *projection.NotReachedError says which segment is behind, and why if it stalled
 }

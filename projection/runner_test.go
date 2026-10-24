@@ -1301,7 +1301,7 @@ func TestRunner_RebuildWithoutResetStaysPending(t *testing.T) {
 // waitPosition waits until segment 0 of "test" has processed position.
 func waitPosition(ctx context.Context, t *testing.T, ps projection.Store, position uint64) {
 	t.Helper()
-	if err := projection.NewProbe(ps, "test", projection.WithPollInterval(5*time.Millisecond)).WaitUntil(ctx, position); err != nil {
+	if err := projection.NewProbe(projection.ProbeDefinition{Name: "test", PollInterval: 5 * time.Millisecond}, ps).WaitUntil(ctx, position); err != nil {
 		t.Fatalf("waiting for position %d: %v", position, err)
 	}
 }

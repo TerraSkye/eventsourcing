@@ -26,12 +26,12 @@ func newSharedRunner(c *counter, es *testStore, ps projection.Store) *projection
 	}, es, ps)
 }
 
-func fastProbe(ps projection.Store, opts ...projection.ProbeOption) *projection.Probe {
-	opts = append([]projection.ProbeOption{
-		projection.WithPollInterval(5 * time.Millisecond),
-		projection.WithClaimTTL(time.Second),
-	}, opts...)
-	return projection.NewProbe(ps, "test", opts...)
+func fastProbe(ps projection.Store) *projection.Probe {
+	return projection.NewProbe(projection.ProbeDefinition{
+		Name:         "test",
+		PollInterval: 5 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, ps)
 }
 
 // fakeStatuses is a Store whose one segment's position and read error a
@@ -138,7 +138,7 @@ func TestProbe_UnstartedProjectionHasReachedNothing(t *testing.T) {
 // number of waiters, and that the poller stops with the last wait.
 func TestProbe_WaitsShareOneRead(t *testing.T) {
 	store := newFakeStatuses(0)
-	probe := fastProbe(store, projection.WithPollInterval(20*time.Millisecond))
+	probe := projection.NewProbe(projection.ProbeDefinition{Name: "test", PollInterval: 20 * time.Millisecond, ClaimTTL: time.Second}, store)
 
 	const waiters = 50
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
@@ -261,7 +261,7 @@ func TestProbe_Instances(t *testing.T) {
 	b := newSpreadRunner(es, ps, "b", 1, 0)
 	defer runRunner(t, b)()
 
-	probe := projection.NewProbe(ps, "spread")
+	probe := projection.NewProbe(projection.ProbeDefinition{Name: "spread"}, ps)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		instances, err := probe.Instances(t.Context())
@@ -279,5 +279,28 @@ func TestProbe_Instances(t *testing.T) {
 			t.Fatalf("Instances = %+v, want %s holding the segment and %s on standby", instances, a.Owner(), b.Owner())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestNewProbe_Panics covers the wiring mistakes NewProbe refuses, as
+// NewRunner does its own.
+func TestNewProbe_Panics(t *testing.T) {
+	tests := []struct {
+		name  string
+		def   projection.ProbeDefinition
+		store projection.Store
+	}{
+		{name: "empty name", def: projection.ProbeDefinition{}, store: memory.NewProjectionStore()},
+		{name: "nil store", def: projection.ProbeDefinition{Name: "x"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewProbe did not panic")
+				}
+			}()
+			projection.NewProbe(tt.def, tt.store)
+		})
 	}
 }
