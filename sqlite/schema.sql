@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS projection_segments (
     owner        TEXT,
     epoch        INTEGER NOT NULL DEFAULT 0,
     heartbeat    INTEGER NOT NULL DEFAULT 0,
+    ttl_ms       INTEGER NOT NULL DEFAULT 15000, -- the claim's own ttl
     PRIMARY KEY (name, segment)
 );
 
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS projection_instances (
     owner     TEXT    NOT NULL,
     version   INTEGER NOT NULL,
     heartbeat INTEGER NOT NULL,
+    ttl_ms    INTEGER NOT NULL,
     PRIMARY KEY (name, owner)
 );
 

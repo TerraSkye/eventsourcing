@@ -54,11 +54,15 @@ func phaseRank(p Phase) int {
 
 // IsLive reports whether s, as returned by [Store.LoadStatuses], shows a
 // live segment: caught up with the head of the log, held by an owner, and
-// published no longer than claimTTL ago. claimTTL is the
-// [Definition.ClaimTTL] the projection runs with; a live owner publishes
-// its status at least every [Definition.PollInterval], so a status older
-// than its claim is one whose owner stopped without releasing it.
+// published no longer than its claim's ttl ago. That is s.ClaimTTL when
+// the store reports it, and otherwise claimTTL, the [Definition.ClaimTTL]
+// the projection runs with. A live owner publishes its status at least
+// every [Definition.PollInterval], so a status older than its claim is one
+// whose owner stopped without releasing it.
 func (s Status) IsLive(claimTTL time.Duration) bool {
+	if s.ClaimTTL > 0 {
+		claimTTL = s.ClaimTTL
+	}
 	return s.Phase == Live && s.Owner != "" && s.Age <= claimTTL
 }
 

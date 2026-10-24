@@ -9,6 +9,19 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- A claim expires by the ttl its holder claimed it with, not by the
+  ttl of the instance trying to take it over; instance rows expire the
+  same way. The `projection_segments` and `projection_instances` tables
+  gain a `ttl_ms` column. The Postgres schema adds it to an existing
+  `projection_segments` itself. For an existing SQLite database, run
+  this once before applying the new schema:
+
+  ```sql
+  ALTER TABLE projection_segments ADD COLUMN ttl_ms INTEGER NOT NULL DEFAULT 15000;
+  ```
+
+  Claims taken before the upgrade count with 15s, the default
+  `ClaimTTL`, until they are claimed again.
 - `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
   instead of a `BackOff`. Wrap the existing value:
   `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
@@ -29,6 +42,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- Instances configured with different `ClaimTTL` or `PollInterval`
+  values, as during a rollout that changes them, judged each other's
+  claims and heartbeats by their own ttl. One with a short ttl took over
+  the segments of one that refreshes less often, and deleted its
+  instance row, so the instances disagreed on how many there were and
+  stopped shedding. `Status.ClaimTTL` now carries a claim's own ttl, and
+  `Status.IsLive` uses it.
 - A command handler built with `WithRetryStrategy` shared one `BackOff`
   across every command. On a `CommandBus` with several shards that was a
   data race, and commands lost or took each other's retries. Each command

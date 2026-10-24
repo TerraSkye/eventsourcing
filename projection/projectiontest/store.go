@@ -89,6 +89,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"TakeoverRaisesEpoch": s.claimTakeoverRaisesEpoch,
 		"HeldByOther":         s.claimHeldByOther,
 		"Expired":             s.claimExpired,
+		"ExpiresByHolderTTL":  s.claimExpiresByHolderTTL,
 		"SegmentsIndependent": s.claimSegmentsIndependent,
 		"ReturnsCheckpoint":   s.claimReturnsCheckpoint,
 		"SetsOwner":           s.claimSetsOwner,
@@ -131,6 +132,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"UnknownName": s.loadStatusesUnknownName,
 		"Age":         s.loadStatusesAge,
 		"ReplayUntil": s.loadStatusesReplayUntil,
+		"ClaimTTL":    s.loadStatusesClaimTTL,
 	})
 	s.group(t, "RebuildRequests", map[string]func(*testing.T){
 		"UnknownName":   s.rebuildUnknownName,
@@ -142,6 +144,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"ListsSelf":        s.heartbeatListsSelf,
 		"OrderedByOwner":   s.heartbeatOrderedByOwner,
 		"Expires":          s.heartbeatExpires,
+		"ExpiresByOwnTTL":  s.heartbeatExpiresByOwnTTL,
 		"ZeroTTLRemoves":   s.heartbeatZeroTTLRemoves,
 		"CountsSegments":   s.heartbeatCountsSegments,
 		"UpdatesVersion":   s.heartbeatUpdatesVersion,
@@ -303,6 +306,16 @@ func (s *storeAcceptance) claimExpired(t *testing.T) {
 	s.claim(t, name, 0, owner, shortTTL)
 	time.Sleep(2 * shortTTL)
 	s.claim(t, name, 0, other, shortTTL)
+}
+
+// claimExpiresByHolderTTL covers a claim taken with a long ttl: a claimer
+// with a shorter ttl still waits for the holder's, as instances configured
+// with different ClaimTTLs must judge a claim alike.
+func (s *storeAcceptance) claimExpiresByHolderTTL(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.claim(t, name, 0, owner, longTTL)
+	time.Sleep(2 * shortTTL)
+	s.claimFails(t, name, 0, other, shortTTL)
 }
 
 func (s *storeAcceptance) claimSegmentsIndependent(t *testing.T) {
@@ -836,6 +849,19 @@ func (s *storeAcceptance) heartbeatExpires(t *testing.T) {
 	}
 }
 
+// heartbeatExpiresByOwnTTL covers instances that send heartbeats with
+// different ttls: a caller with a short ttl still lists an instance whose
+// longer ttl has not passed, and does not delete its row.
+func (s *storeAcceptance) heartbeatExpiresByOwnTTL(t *testing.T) {
+	name := s.newProjection(t, 1)
+	s.heartbeat(t, name, other, 0, longTTL)
+	time.Sleep(2 * shortTTL)
+	s.heartbeat(t, name, owner, 0, shortTTL)
+	if got := s.heartbeat(t, name, owner, 0, shortTTL); !slices.Equal(instanceOwners(got), []string{owner, other}) {
+		t.Fatalf("Heartbeat with a short ttl returned owners %v, want %s, whose own ttl has not passed, as well", instanceOwners(got), other)
+	}
+}
+
 func (s *storeAcceptance) heartbeatZeroTTLRemoves(t *testing.T) {
 	name := s.newProjection(t, 1)
 	s.heartbeat(t, name, other, 0, longTTL)
@@ -887,6 +913,15 @@ func (s *storeAcceptance) heartbeatNamesIndependent(t *testing.T) {
 	s.heartbeat(t, a, other, 0, longTTL)
 	if got := s.heartbeat(t, b, owner, 0, longTTL); !slices.Equal(instanceOwners(got), []string{owner}) {
 		t.Fatalf("Heartbeat on another projection returned owners %v, want only %s", instanceOwners(got), owner)
+	}
+}
+
+func (s *storeAcceptance) loadStatusesClaimTTL(t *testing.T) {
+	name := s.newProjection(t, 2)
+	s.claim(t, name, 1, owner, longTTL)
+	sts := s.statuses(t, name)
+	if sts[0].ClaimTTL != 0 || sts[1].ClaimTTL != longTTL {
+		t.Fatalf("ClaimTTL of an unowned segment and one claimed for %s = %s, %s; want 0, %s", longTTL, sts[0].ClaimTTL, sts[1].ClaimTTL, longTTL)
 	}
 }
 
