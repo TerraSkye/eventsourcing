@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
-	github.com/terraskye/eventsourcing v0.3.0
+	github.com/terraskye/eventsourcing v0.4.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 )
 
