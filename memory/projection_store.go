@@ -76,7 +76,7 @@ type memoryRow struct {
 	owner       string
 	epoch       uint64
 	heartbeat   time.Time
-	ttl         time.Duration // the claim's own, from the Claim that took it
+	ttl         time.Duration           // the claim's own, from the Claim that took it
 	deadLetters []projection.DeadLetter // ordered by Position
 }
 
