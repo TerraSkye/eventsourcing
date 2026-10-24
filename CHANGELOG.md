@@ -7,13 +7,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- `sqlite.ApplySchema` applies `sqlite.Schema` in one transaction, after
-  adding the columns later releases added to the tables a database
-  already has: `correlation_id` and `causation_id` on `events` (v0.3.0)
-  and `ttl_ms` on `projection_segments` (v0.4.0). A database an earlier
-  release created no longer needs the manual `ALTER TABLE`.
+- `Runner.ReplayStream` returns an error a segment on its own instance
+  failed with as it was, so `errors.Is` and `errors.As` work on it, as
+  they did before 0.4.0. Only an error from a segment on another
+  instance comes back as its text.
 
 ## [0.4.0] - 2026-10-24
 

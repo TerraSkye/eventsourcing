@@ -19,12 +19,12 @@ if err != nil {
 }
 defer db.Close()
 
-if err := sqlite.ApplySchema(ctx, db); err != nil {
+if _, err := db.ExecContext(ctx, sqlite.Schema); err != nil {
     log.Fatal(err)
 }
 ```
 
-`Open` limits the database to **one connection**. Writers never meet `SQLITE_BUSY`, and an in-memory database stays one database. For a file it also turns on WAL journaling, begins every transaction with the write lock, and waits up to five seconds for a lock another process holds. `sqlite.ApplySchema` creates every table below, and upgrades a database an earlier release created by adding the columns added since. `sqlite.Schema` (also shipped as `sqlite/schema.sql`) is the plain SQL for your own migrations: it is idempotent, but only creates what is missing, so it adds no column to an existing table.
+`Open` limits the database to **one connection**. Writers never meet `SQLITE_BUSY`, and an in-memory database stays one database. For a file it also turns on WAL journaling, begins every transaction with the write lock, and waits up to five seconds for a lock another process holds. `sqlite.Schema` (also shipped as `sqlite/schema.sql`) is idempotent and creates every table below, as this release uses them. It adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between.
 
 ## Constructors
 

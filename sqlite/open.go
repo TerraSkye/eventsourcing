@@ -1,7 +1,6 @@
 package sqlite
 
 import (
-	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -16,55 +15,12 @@ import (
 // your migrations, or once at startup. The same SQL ships as schema.sql in
 // this package's directory.
 //
-// Schema only creates what is missing, so it does not add a column a
-// later release added to an existing table. [ApplySchema] does both.
+// Schema has the tables as this release uses them, and only creates what
+// is missing: it adds no column to a table an earlier release created.
+// The changelog lists the ALTER TABLE statements to run when upgrading.
 //
 //go:embed schema.sql
 var Schema string
-
-// addedColumns are the columns added to a table after it shipped, which
-// Schema's CREATE TABLE IF NOT EXISTS does not add to an existing table.
-var addedColumns = []struct{ table, column, definition string }{
-	{"events", "correlation_id", "TEXT NOT NULL DEFAULT ''"},            // v0.3.0
-	{"events", "causation_id", "TEXT NOT NULL DEFAULT ''"},              // v0.3.0
-	{"projection_segments", "ttl_ms", "INTEGER NOT NULL DEFAULT 15000"}, // v0.4.0
-}
-
-// ApplySchema brings db up to the current [Schema], in one transaction. It
-// adds the columns that later releases added to tables db already has,
-// then applies Schema, which creates the tables and indexes db lacks. Run
-// it once at startup instead of executing Schema, on a new database or one
-// created by an earlier release; on a current one it changes nothing.
-func ApplySchema(ctx context.Context, db *sql.DB) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("sqlite: apply schema: %w", err)
-	}
-	defer tx.Rollback()
-	for _, c := range addedColumns {
-		var exists, missing bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?),
-			       NOT EXISTS (SELECT 1 FROM pragma_table_info(?) WHERE name = ?)`,
-			c.table, c.table, c.column,
-		).Scan(&exists, &missing); err != nil {
-			return fmt.Errorf("sqlite: apply schema: inspect %s: %w", c.table, err)
-		}
-		if !exists || !missing {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+c.table+" ADD COLUMN "+c.column+" "+c.definition); err != nil {
-			return fmt.Errorf("sqlite: apply schema: add %s.%s: %w", c.table, c.column, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, Schema); err != nil {
-		return fmt.Errorf("sqlite: apply schema: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlite: apply schema: %w", err)
-	}
-	return nil
-}
 
 // Open opens the SQLite database at path, creating the file if it does not
 // exist; ":memory:" opens a database that lives as long as the returned
