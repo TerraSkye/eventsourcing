@@ -9,6 +9,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- The telemetry wrapper types drop the package name they repeated:
+  `telemetry.TelemetryEventBus` is `telemetry.EventBus`,
+  `telemetry.TelemetryStore` is `telemetry.EventStore` and
+  `telemetry.TelemetryProjectionStore` is `telemetry.ProjectionStore`.
+  The `With…Telemetry` constructors keep their names.
 - A claim expires by the ttl its holder claimed it with, not by the
   ttl of the instance trying to take it over; instance rows expire the
   same way. The `projection_segments` and `projection_instances` tables

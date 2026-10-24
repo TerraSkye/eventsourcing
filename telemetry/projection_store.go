@@ -14,12 +14,12 @@ import (
 )
 
 var (
-	_ projection.Store           = TelemetryProjectionStore{}
+	_ projection.Store           = ProjectionStore{}
 	_ projection.Store           = telemetryDeadLetterStore{}
 	_ projection.DeadLetterStore = telemetryDeadLetterStore{}
 )
 
-// TelemetryProjectionStore wraps a [projection.Store], tracing the units of
+// ProjectionStore wraps a [projection.Store], tracing the units of
 // work a [projection.Runner] commits through it. Create one with
 // [WithProjectionStoreTelemetry].
 //
@@ -32,12 +32,12 @@ var (
 // [ProjectionClaims]; Heartbeat records [ProjectionHeartbeats],
 // [ProjectionInstanceCount] and [ProjectionSegmentHeld]. The other calls,
 // made on every poll, are not traced.
-type TelemetryProjectionStore struct {
+type ProjectionStore struct {
 	next projection.Store
 	cfg  *config
 }
 
-// WithProjectionStoreTelemetry wraps next in a [TelemetryProjectionStore].
+// WithProjectionStoreTelemetry wraps next in a [ProjectionStore].
 // Options such as [WithAttributes] add attributes to its spans; operation
 // options are ignored.
 //
@@ -49,9 +49,9 @@ func WithProjectionStoreTelemetry(next projection.Store, options ...Option) proj
 	for _, o := range options {
 		o.apply(cfg)
 	}
-	store := TelemetryProjectionStore{next: next, cfg: cfg}
+	store := ProjectionStore{next: next, cfg: cfg}
 	if dls, ok := next.(projection.DeadLetterStore); ok {
-		return telemetryDeadLetterStore{TelemetryProjectionStore: store, dls: dls}
+		return telemetryDeadLetterStore{ProjectionStore: store, dls: dls}
 	}
 	return store
 }
@@ -70,7 +70,7 @@ func leaseAttrs(l projection.Lease) []attribute.KeyValue {
 
 // spanAttrs returns the attributes for a span on l, including the
 // configured ones.
-func (t TelemetryProjectionStore) spanAttrs(ctx context.Context, l projection.Lease, extra ...attribute.KeyValue) []attribute.KeyValue {
+func (t ProjectionStore) spanAttrs(ctx context.Context, l projection.Lease, extra ...attribute.KeyValue) []attribute.KeyValue {
 	attrs := append(leaseAttrs(l), extra...)
 	attrs = append(attrs, t.cfg.Attributes...)
 	if t.cfg.GetAttributes != nil {
@@ -80,13 +80,13 @@ func (t TelemetryProjectionStore) spanAttrs(ctx context.Context, l projection.Le
 }
 
 // Declare implements [projection.Store].
-func (t TelemetryProjectionStore) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
+func (t ProjectionStore) Declare(ctx context.Context, name string, segments int, replayUntil uint64) error {
 	return t.next.Declare(ctx, name, segments, replayUntil)
 }
 
 // Claim implements [projection.Store] and records [ProjectionClaims]. It is
 // not traced: an instance on standby claims on every poll.
-func (t TelemetryProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
+func (t ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	claimed, cp, ok, err := t.next.Claim(ctx, l, ttl)
 	result := "acquired"
 	switch {
@@ -101,7 +101,7 @@ func (t TelemetryProjectionStore) Claim(ctx context.Context, l projection.Lease,
 
 // Commit implements [projection.Store] inside a "process batch" span, and
 // records [ProjectionBatchDuration].
-func (t TelemetryProjectionStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
+func (t ProjectionStore) Commit(ctx context.Context, l projection.Lease, cp projection.Checkpoint, status projection.Status, fn func(ctx context.Context) error) error {
 	startedAt := time.Now()
 	ctx, span := tracer.Start(ctx, "process batch",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -129,7 +129,7 @@ func (t TelemetryProjectionStore) Commit(ctx context.Context, l projection.Lease
 
 // Reset implements [projection.Store] inside a "rebuild projection" span,
 // and records [ProjectionRebuilds].
-func (t TelemetryProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
+func (t ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVersion int, wipe func(ctx context.Context) error) error {
 	ctx, span := tracer.Start(ctx, "rebuild projection",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(t.spanAttrs(ctx, l)...),
@@ -148,27 +148,27 @@ func (t TelemetryProjectionStore) Reset(ctx context.Context, l projection.Lease,
 }
 
 // Release implements [projection.Store].
-func (t TelemetryProjectionStore) Release(ctx context.Context, l projection.Lease) error {
+func (t ProjectionStore) Release(ctx context.Context, l projection.Lease) error {
 	return t.next.Release(ctx, l)
 }
 
 // SaveStatus implements [projection.Store].
-func (t TelemetryProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
+func (t ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, status projection.Status) error {
 	return t.next.SaveStatus(ctx, l, status)
 }
 
 // LoadStatuses implements [projection.Store].
-func (t TelemetryProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
+func (t ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	return t.next.LoadStatuses(ctx, name)
 }
 
 // RequestRebuild implements [projection.Store].
-func (t TelemetryProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
+func (t ProjectionStore) RequestRebuild(ctx context.Context, name string) (uint64, error) {
 	return t.next.RequestRebuild(ctx, name)
 }
 
 // Rebuilds implements [projection.Store].
-func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
+func (t ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, done uint64, err error) {
 	return t.next.Rebuilds(ctx, name)
 }
 
@@ -177,7 +177,7 @@ func (t TelemetryProjectionStore) Rebuilds(ctx context.Context, name string) (re
 // for owner, [ProjectionSegmentHeld]. It is not traced: a runner sends a
 // heartbeat on every poll. The ttl-0 call a runner leaves with is not
 // counted as a heartbeat.
-func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+func (t ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	instances, err := t.next.Heartbeat(ctx, name, owner, version, ttl)
 	if ttl == 0 {
 		return instances, err
@@ -198,14 +198,14 @@ func (t TelemetryProjectionStore) Heartbeat(ctx context.Context, name, owner str
 }
 
 // LoadInstances implements [projection.Store].
-func (t TelemetryProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
+func (t ProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
 	return t.next.LoadInstances(ctx, name)
 }
 
-// telemetryDeadLetterStore is a [TelemetryProjectionStore] around a store
+// telemetryDeadLetterStore is a [ProjectionStore] around a store
 // that also implements [projection.DeadLetterStore].
 type telemetryDeadLetterStore struct {
-	TelemetryProjectionStore
+	ProjectionStore
 	dls projection.DeadLetterStore
 }
 
