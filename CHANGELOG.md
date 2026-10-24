@@ -51,6 +51,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A one-off store or log error while `Runner.Run` started (reading the
+  head, `Declare` or the first heartbeat) ended `Run`, while the same
+  error later was tolerated. `Run` now tries the start again with the
+  stall backoff for up to `ClaimTTL`, so a store that keeps failing,
+  such as one missing a table, still fails `Run`. A changed segment
+  count still fails at once.
 - Instances configured with different `ClaimTTL` or `PollInterval`
   values, as during a rollout that changes them, judged each other's
   claims and heartbeats by their own ttl. One with a short ttl took over
