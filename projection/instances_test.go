@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -334,6 +335,71 @@ func waitOwners(t *testing.T, ps projection.Store, want map[string]int, timeout 
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("segments held %v after %s, want %v", got, timeout, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// failExitStore fails every Release, and the heartbeat with ttl 0 that a
+// stopping runner leaves with.
+type failExitStore struct{ projection.Store }
+
+func (s failExitStore) Release(context.Context, projection.Lease) error {
+	return errors.New("connection reset")
+}
+
+func (s failExitStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	if ttl == 0 {
+		return nil, errors.New("connection reset")
+	}
+	return s.Store.Heartbeat(ctx, name, owner, version, ttl)
+}
+
+// TestRunner_LogsFailedReleaseAndLeave covers the two best-effort calls
+// whose failure delays another instance by up to ClaimTTL: the Release of
+// a segment shed to a joining instance, and the heartbeat a stopping
+// runner leaves with. Each failure is logged as a warning.
+func TestRunner_LogsFailedReleaseAndLeave(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	save(t, es, 5)
+	logs := &logRecorder{}
+	a := projection.NewRunner(projection.Definition{
+		Name:         "spread",
+		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
+		EventTypes:   counterEvents,
+		Owner:        "a",
+		Segments:     2,
+		SegmentKey:   projection.ByStreamID,
+		Logger:       slog.New(logs),
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, failExitStore{ps})
+	stopA := runRunner(t, a)
+	waitHeld(t, ps, map[string]int{"a": 2}, 2*time.Second)
+
+	// b joining makes a shed a segment, whose Release fails.
+	defer runRunner(t, newSpreadRunner(es, ps, "b", 2, 0))()
+	waitLog(t, logs, "projection segment release failed; it moves once its claim expires", 2*time.Second)
+
+	stopA()
+	waitLog(t, logs, "projection leave failed; the others take this instance's share once it expires", time.Second)
+}
+
+// waitLog waits until logs holds a warning with message msg.
+func waitLog(t *testing.T, logs *logRecorder, msg string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, r := range logs.snapshot() {
+			if r.Message == msg && r.Level == slog.LevelWarn {
+				if _, ok := attrs(r)["error"]; !ok {
+					t.Fatalf("warning %q has no error attribute", msg)
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no warning %q after %s", msg, timeout)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

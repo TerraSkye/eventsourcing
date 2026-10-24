@@ -296,8 +296,12 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 // it, and reports Standby. The instance is at its quota afterwards, so
 // seg's loop does not claim it back.
 func (r *Runner) shed(ctx context.Context, seg int) {
-	// Best effort: if Release fails, the claim expires after ClaimTTL.
-	_ = r.store.Release(ctx, r.lease(seg))
+	// Best effort: if Release fails, the claim expires after ClaimTTL, and
+	// the instance that should take the segment waits until then.
+	if err := r.store.Release(ctx, r.lease(seg)); err != nil {
+		r.log(ctx, slog.LevelWarn, seg, r.position(seg), "projection segment release failed; it moves once its claim expires",
+			slog.String("error", err.Error()), slog.Duration("claim_ttl", r.p.ClaimTTL))
+	}
 	r.unreserve(seg)
 	r.setPhase(seg, Standby, "", false)
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection segment released to another instance")
