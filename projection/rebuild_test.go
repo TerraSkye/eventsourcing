@@ -113,7 +113,7 @@ func TestRunner_SegmentedVersionBumpKeepsEveryRow(t *testing.T) {
 	defer runRunner(t, a)()
 	defer runRunner(t, b)()
 
-	probe := projection.NewProbe(ps, "rows", projection.WithPollInterval(5*time.Millisecond))
+	probe := projection.NewProbe(projection.ProbeDefinition{Name: "rows", PollInterval: 5 * time.Millisecond}, ps)
 	for {
 		statuses, err := ps.LoadStatuses(ctx, "rows")
 		if err != nil {
