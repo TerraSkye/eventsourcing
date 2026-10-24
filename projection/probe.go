@@ -10,7 +10,8 @@ import (
 
 const (
 	// DefaultProbeInterval is how often a [Probe] reads the store while a
-	// wait is in progress, unless [WithPollInterval] says otherwise.
+	// wait is in progress, unless [ProbeDefinition.PollInterval] says
+	// otherwise.
 	DefaultProbeInterval = 100 * time.Millisecond
 
 	// probeReadTimeout bounds one read of the store by a Probe's poller, so
@@ -53,36 +54,46 @@ type Probe struct {
 	changed  chan struct{}      // closed and replaced after every read
 }
 
-// ProbeOption configures a [Probe].
-type ProbeOption func(*Probe)
+// ProbeDefinition says which projection a [Probe] follows, and how, as a
+// [Definition] does for a [Runner]. Only Name is required.
+type ProbeDefinition struct {
+	// Name is the projection's name; see [Definition.Name].
+	Name string
 
-// WithPollInterval sets how often the Probe reads the store while a wait is
-// in progress. Default [DefaultProbeInterval].
-func WithPollInterval(d time.Duration) ProbeOption {
-	return func(p *Probe) { p.interval = d }
+	// PollInterval is how often the Probe reads the store while a wait is
+	// in progress. Default [DefaultProbeInterval].
+	PollInterval time.Duration
+
+	// ClaimTTL is the [Definition.ClaimTTL] the projection runs with, so
+	// [Probe.IsLive] can tell a segment whose runner stopped from a live
+	// one when the store does not report the claim's own ttl. Default
+	// [DefaultClaimTTL].
+	ClaimTTL time.Duration
 }
 
-// WithClaimTTL sets the [Definition.ClaimTTL] the projection runs with, so
-// [Probe.IsLive] can tell a segment whose runner stopped from a live one.
-// Default [DefaultClaimTTL].
-func WithClaimTTL(ttl time.Duration) ProbeOption {
-	return func(p *Probe) { p.claimTTL = ttl }
-}
-
-// NewProbe returns a [Probe] for the projection called name, as published
-// to store.
-func NewProbe(store Store, name string, opts ...ProbeOption) *Probe {
-	p := &Probe{store: store, name: name, changed: make(chan struct{})}
-	for _, opt := range opts {
-		opt(p)
+// NewProbe returns a [Probe] for the projection p names, as published to
+// store. It panics on an empty Name or a nil store, wiring mistakes that
+// would otherwise fail silently.
+func NewProbe(p ProbeDefinition, store Store) *Probe {
+	switch {
+	case p.Name == "":
+		panic("projection: ProbeDefinition.Name is required")
+	case store == nil:
+		panic(fmt.Sprintf("projection %q: store is required", p.Name))
 	}
-	if p.interval <= 0 {
-		p.interval = DefaultProbeInterval
+	if p.PollInterval <= 0 {
+		p.PollInterval = DefaultProbeInterval
 	}
-	if p.claimTTL <= 0 {
-		p.claimTTL = DefaultClaimTTL
+	if p.ClaimTTL <= 0 {
+		p.ClaimTTL = DefaultClaimTTL
 	}
-	return p
+	return &Probe{
+		store:    store,
+		name:     p.Name,
+		interval: p.PollInterval,
+		claimTTL: p.ClaimTTL,
+		changed:  make(chan struct{}),
+	}
 }
 
 // Name returns the projection's name.

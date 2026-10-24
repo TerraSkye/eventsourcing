@@ -14,6 +14,11 @@ release may break the API; every break is listed under **Breaking**.
   `telemetry.TelemetryStore` is `telemetry.EventStore` and
   `telemetry.TelemetryProjectionStore` is `telemetry.ProjectionStore`.
   The `With…Telemetry` constructors keep their names.
+- `projection.NewProbe` takes a `projection.ProbeDefinition`, as
+  `NewRunner` takes a `Definition`, instead of a name and options:
+  `NewProbe(projection.ProbeDefinition{Name: "task-list", PollInterval: 50 * time.Millisecond}, store)`.
+  `ProbeOption`, `WithPollInterval` and `WithClaimTTL` are removed.
+  `NewProbe` panics on an empty `Name` or a nil store.
 - A claim expires by the ttl its holder claimed it with, not by the
   ttl of the instance trying to take it over; instance rows expire the
   same way. The `projection_segments` and `projection_instances` tables
