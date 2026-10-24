@@ -7,6 +7,20 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Changed
+
+- The Postgres schema no longer adds columns to tables an earlier
+  release created: like the SQLite one, it has the tables as this
+  release uses them, and the changelog lists the statements to upgrade.
+  When upgrading from before v0.4.0, run this once before applying the
+  schema; `IF NOT EXISTS` skips what an earlier upgrade already added:
+
+  ```sql
+  ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT NOT NULL DEFAULT '';   -- v0.3.0
+  ALTER TABLE events ADD COLUMN IF NOT EXISTS causation_id   TEXT NOT NULL DEFAULT '';   -- v0.3.0
+  ALTER TABLE projection_segments ADD COLUMN IF NOT EXISTS ttl_ms BIGINT NOT NULL DEFAULT 15000; -- v0.4.0
+  ```
+
 ### Fixed
 
 - The stores no longer keep every `ReplayStream` request forever.
