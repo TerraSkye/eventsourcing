@@ -172,6 +172,16 @@ func (t ProjectionStore) Rebuilds(ctx context.Context, name string) (requested, 
 	return t.next.Rebuilds(ctx, name)
 }
 
+// FailRebuild implements [projection.Store].
+func (t ProjectionStore) FailRebuild(ctx context.Context, l projection.Lease, requested uint64, errMsg string) error {
+	return t.next.FailRebuild(ctx, l, requested, errMsg)
+}
+
+// RebuildFailure implements [projection.Store].
+func (t ProjectionStore) RebuildFailure(ctx context.Context, name string) (failed uint64, errMsg string, err error) {
+	return t.next.RebuildFailure(ctx, name)
+}
+
 // Heartbeat implements [projection.Store], records [ProjectionHeartbeats],
 // and from the instances it lists records [ProjectionInstanceCount] and,
 // for owner, [ProjectionSegmentHeld]. It is not traced: a runner sends a

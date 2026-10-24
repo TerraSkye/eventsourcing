@@ -372,6 +372,41 @@ func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested,
 	return requested, done, nil
 }
 
+// FailRebuild implements [projection.Store], fenced by locking l's segment
+// row as Commit does.
+func (s *ProjectionStore) FailRebuild(ctx context.Context, l projection.Lease, requested uint64, errMsg string) error {
+	return s.runTx(ctx, "fail rebuild", l, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := lockOwned(ctx, tx, l); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE projection_rebuilds SET failed = $2, error = $3 WHERE name = $1 AND failed <= $2`,
+			l.Name, requested, errMsg,
+		); err != nil {
+			return fmt.Errorf("postgres: fail rebuild %d of %q: %w", requested, l.Name, err)
+		}
+		return nil
+	})
+}
+
+// RebuildFailure implements [projection.Store].
+func (s *ProjectionStore) RebuildFailure(ctx context.Context, name string) (failed uint64, errMsg string, err error) {
+	var msg *string
+	err = s.db.QueryRow(ctx,
+		`SELECT failed, error FROM projection_rebuilds WHERE name = $1`, name,
+	).Scan(&failed, &msg)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", nil
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("postgres: read rebuild failure of %q: %w", name, err)
+	}
+	if msg != nil {
+		errMsg = *msg
+	}
+	return failed, errMsg, nil
+}
+
 // Heartbeat implements [projection.Store] in one statement: it upserts
 // owner's row, deletes the rows of other instances whose own ttl has
 // passed, and returns the live ones with the number of segments each one

@@ -70,6 +70,10 @@ type memoryProjection struct {
 	// the requests Reset has served.
 	rebuildsRequested uint64
 	rebuildsDone      uint64
+	// rebuildFailed is the last request a rebuild failed to serve, and
+	// rebuildErr what it failed with; see FailRebuild.
+	rebuildFailed uint64
+	rebuildErr    string
 
 	// replays holds the replay requests by number; Reset deletes them.
 	replays map[uint64]*memoryReplay
@@ -321,6 +325,29 @@ func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested,
 		return p.rebuildsRequested, p.rebuildsDone, nil
 	}
 	return 0, 0, nil
+}
+
+// FailRebuild implements [projection.Store].
+func (s *ProjectionStore) FailRebuild(ctx context.Context, l projection.Lease, requested uint64, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owned(l) == nil {
+		return projection.ErrClaimLost
+	}
+	if p := s.projections[l.Name]; requested >= p.rebuildFailed {
+		p.rebuildFailed, p.rebuildErr = requested, errMsg
+	}
+	return nil
+}
+
+// RebuildFailure implements [projection.Store].
+func (s *ProjectionStore) RebuildFailure(ctx context.Context, name string) (failed uint64, errMsg string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.projections[name]; ok {
+		return p.rebuildFailed, p.rebuildErr, nil
+	}
+	return 0, "", nil
 }
 
 // SaveDeadLetter implements [projection.DeadLetterStore]. Like Commit, it

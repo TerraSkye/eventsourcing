@@ -276,6 +276,20 @@ type Store interface {
 	// asked to rebuild, or not declared.
 	Rebuilds(ctx context.Context, name string) (requested, done uint64, err error)
 
+	// FailRebuild records that a rebuild of the projection l.Name, run by
+	// the holder of segment 0 to serve the requests up to requested,
+	// failed with errMsg, for [Runner.Rebuild] calls waiting on another
+	// instance. It keeps the failure of the highest requested only. When l
+	// is not the segment's current claim it changes nothing and returns
+	// [ErrClaimLost].
+	FailRebuild(ctx context.Context, l Lease, requested uint64, errMsg string) error
+
+	// RebuildFailure returns the last failure FailRebuild recorded for the
+	// projection name: the request number it was trying to serve, and its
+	// error. failed is 0 when no rebuild failed. A Reset that serves the
+	// request afterwards leaves the failure, as done then covers it.
+	RebuildFailure(ctx context.Context, name string) (failed uint64, errMsg string, err error)
+
 	// Heartbeat records owner as a live instance of the projection name
 	// running version until ttl passes without another heartbeat, and
 	// returns the instances whose own ttl has not passed, owner included, ordered by Owner, with Age measured by the store's clock
