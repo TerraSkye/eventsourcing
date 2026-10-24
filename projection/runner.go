@@ -153,7 +153,8 @@ func (req *replayRequest) finish(err error) {
 //
 // It panics on wiring mistakes that would otherwise fail silently: an empty
 // Name, nil Handler/reader/store, no EventTypes or an unregistered one,
-// Version > 0 without Reset, or Segments > 1 without SegmentKey.
+// Version > 0 without Reset, Segments > 1 without SegmentKey, or a
+// PollInterval no shorter than ClaimTTL.
 func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Runner {
 	switch {
 	case p.Name == "":
@@ -188,6 +189,11 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 	}
 	if p.ClaimTTL <= 0 {
 		p.ClaimTTL = DefaultClaimTTL
+	}
+	if p.PollInterval >= p.ClaimTTL {
+		// An idle segment refreshes its claim once per PollInterval, so
+		// the claim would expire between two polls and move on every one.
+		panic(fmt.Sprintf("projection %q: PollInterval (%s) must be shorter than ClaimTTL (%s)", p.Name, p.PollInterval, p.ClaimTTL))
 	}
 	p.Owner = ownerOf(p.Owner)
 	if p.Logger == nil {

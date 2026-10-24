@@ -356,6 +356,12 @@ func TestRunner_Panics(t *testing.T) {
 			c := newCounter()
 			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(c.Handle), EventTypes: counterEvents, Segments: 2}, &nopReader{}, memory.NewProjectionStore())
 		}},
+		{"poll interval equal to claim ttl", func() {
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents, PollInterval: time.Second, ClaimTTL: time.Second}, &nopReader{}, memory.NewProjectionStore())
+		}},
+		{"poll interval above the default claim ttl", func() {
+			projection.NewRunner(projection.Definition{Name: "x", Handler: eventsourcing.NewEventHandlerFunc(newCounter().Handle), EventTypes: counterEvents, PollInterval: time.Minute}, &nopReader{}, memory.NewProjectionStore())
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

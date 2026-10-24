@@ -140,7 +140,7 @@ func (r *Runner) runSegment(ctx context.Context, seg int) {
 			r.publishStatus(ctx, seg)
 			wait := retry.NextBackOff()
 			r.logStall(ctx, seg, err, wait)
-			sleepCtx(ctx, wait)
+			r.waitStalled(ctx, seg, wait)
 		}
 	}
 }
@@ -638,6 +638,31 @@ func (r *Runner) publishStatus(ctx context.Context, seg int) {
 	st := r.segs[seg].status
 	r.mu.Unlock()
 	_ = r.store.SaveStatus(ctx, r.lease(seg), st)
+}
+
+// waitStalled waits d before stalled seg retries, publishing its status
+// every PollInterval meanwhile. That refreshes the claim, which a backoff
+// longer than ClaimTTL would otherwise let expire: another instance would
+// take the segment over only to stall on the same event. It returns early
+// when ctx is done or the claim is lost.
+func (r *Runner) waitStalled(ctx context.Context, seg int, d time.Duration) {
+	deadline := time.Now().Add(d)
+	for {
+		left := time.Until(deadline)
+		if left <= 0 || ctx.Err() != nil {
+			return
+		}
+		sleepCtx(ctx, min(left, r.p.PollInterval))
+		if time.Until(deadline) <= 0 || ctx.Err() != nil {
+			return
+		}
+		r.mu.Lock()
+		st := r.segs[seg].status
+		r.mu.Unlock()
+		if err := r.store.SaveStatus(ctx, r.lease(seg), st); errors.Is(err, ErrClaimLost) {
+			return
+		}
+	}
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.
