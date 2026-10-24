@@ -19,6 +19,34 @@ jobs:
       - name: Run unit tests
         run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.work
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "These files are not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+
+      - name: Vet the integration tests and benchmarks
+        # They build only under these tags, so the step above skips them.
+        run: go vet -tags=integration,bench ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+
   root-minimum-go:
     # The root module promises to build on the Go version in its go.mod, so a
     # user of the in-memory store is not pushed to the newest Go by a driver.
