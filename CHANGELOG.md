@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-24
+
 ### Changed
 
 - The Postgres schema no longer adds columns to tables an earlier
