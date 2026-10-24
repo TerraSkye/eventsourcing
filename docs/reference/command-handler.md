@@ -116,17 +116,19 @@ Sets the concurrency check for saving events. Default: `Any{}`. See [Stream stat
 ### WithRetryStrategy
 
 ```go
-func WithRetryStrategy(strategy backoff.BackOff) CommandHandlerOption
+func WithRetryStrategy(newBackOff func() backoff.BackOff) CommandHandlerOption
 ```
 
 Retries the entire load-evolve-decide-save cycle on `StreamRevisionConflictError`. Default: no retries.
 
+The handler calls `newBackOff` once per command. A `BackOff` is stateful and not safe for concurrent use, and a `CommandBus` runs a handler on several shards at once, so each command needs its own. The handler binds it to the command's context: a wait between retries ends when the context is done.
+
 ```go
 import "github.com/cenkalti/backoff/v4"
 
-eventsourcing.WithRetryStrategy(
-    backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 5),
-)
+eventsourcing.WithRetryStrategy(func() backoff.BackOff {
+    return backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 5)
+})
 ```
 
 ### WithMetadataExtractor

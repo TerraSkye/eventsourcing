@@ -70,7 +70,7 @@ func TestNewCommandHandler_LoadError(t *testing.T) {
 		func() int { return 0 },
 		func(s int, e *Envelope) int { return s },
 		func(s int, c testEvent) ([]Event, error) { return nil, nil },
-		WithRetryStrategy(&backoff.StopBackOff{}),
+		WithRetryStrategy(func() backoff.BackOff { return &backoff.StopBackOff{} }),
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "a", typ: "t"})
@@ -236,7 +236,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 		WithStreamNamer(func(ctx context.Context, cmd Command) string {
 			return "stream-" + cmd.AggregateID()
 		}),
-		WithRetryStrategy(&backoff.StopBackOff{}),
+		WithRetryStrategy(func() backoff.BackOff { return &backoff.StopBackOff{} }),
 	)
 
 	res, err := handler(context.Background(), testEvent{agg: "agg-1", typ: "cmd"})
@@ -270,7 +270,7 @@ func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: "a", typ: "e", val: "v"}}, nil
 		},
-		WithRetryStrategy(&backoff.StopBackOff{}),
+		WithRetryStrategy(func() backoff.BackOff { return &backoff.StopBackOff{} }),
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "a", typ: "cmd"})
@@ -309,7 +309,9 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e", val: "v"}}, nil
 		},
 		// use a retry backoff that allows at least one retry
-		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Millisecond), 3)),
+		WithRetryStrategy(func() backoff.BackOff {
+			return backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Millisecond), 3)
+		}),
 	)
 
 	res, err := handler(context.Background(), testEvent{agg: "agg", typ: "c"})
@@ -411,7 +413,7 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
-		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+		WithRetryStrategy(func() backoff.BackOff { return backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3) }),
 	)
 
 	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -454,7 +456,7 @@ func TestNewCommandHandler_ExplicitRevision_ConflictNotRetried(t *testing.T) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
 		WithStreamState(Revision(0)),
-		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 5)),
+		WithRetryStrategy(func() backoff.BackOff { return backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 5) }),
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -494,7 +496,7 @@ func TestNewCommandHandler_StreamExists_MissingStreamFailsFast(t *testing.T) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
 		WithStreamState(StreamExists{}),
-		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+		WithRetryStrategy(func() backoff.BackOff { return backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3) }),
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -543,7 +545,7 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "e"}}, nil
 		},
 		WithStreamState(StreamExists{}),
-		WithRetryStrategy(backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3)),
+		WithRetryStrategy(func() backoff.BackOff { return backoff.WithMaxRetries(backoff.NewConstantBackOff(time.Millisecond), 3) }),
 	)
 
 	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
@@ -696,7 +698,7 @@ func TestNewCommandHandler_UnregisteredEventError(t *testing.T) {
 		func(s int, cmd testEvent) ([]Event, error) {
 			return []Event{testEvent{agg: cmd.AggregateID(), typ: "new"}}, nil
 		},
-		WithRetryStrategy(&backoff.StopBackOff{}),
+		WithRetryStrategy(func() backoff.BackOff { return &backoff.StopBackOff{} }),
 	)
 
 	_, err := handler(context.Background(), testEvent{agg: "test-stream", typ: "cmd"})
@@ -820,6 +822,18 @@ func TestNewCommandHandler_NilRetryStrategyPanicsInsteadOfNoRetry(t *testing.T) 
 	_, err := handler(context.Background(), testEvent{agg: "a", typ: "t"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A factory that returns a nil BackOff means no retries as well.
+	handler = NewCommandHandler(
+		store,
+		func() int { return 0 },
+		func(s int, e *Envelope) int { return s },
+		func(s int, cmd testEvent) ([]Event, error) { return nil, nil },
+		WithRetryStrategy(func() backoff.BackOff { return nil }),
+	)
+	if _, err := handler(context.Background(), testEvent{agg: "a", typ: "t"}); err != nil {
+		t.Fatalf("unexpected error with a nil BackOff: %v", err)
 	}
 }
 
@@ -1105,7 +1119,7 @@ func chainHandler(t *testing.T) (CommandHandler[testEvent], *[]Envelope) {
 		}, nil
 	}
 	h := NewCommandHandler(store, func() int { return 0 }, func(s int, e *Envelope) int { return s }, decide,
-		WithRetryStrategy(&backoff.StopBackOff{}))
+		WithRetryStrategy(func() backoff.BackOff { return &backoff.StopBackOff{} }))
 	return h, &saved
 }
 

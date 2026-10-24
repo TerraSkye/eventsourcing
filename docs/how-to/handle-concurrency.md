@@ -39,11 +39,13 @@ handler := eventsourcing.NewCommandHandler(
     initialState,
     evolve,
     decide,
-    eventsourcing.WithRetryStrategy(
-        backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3),
-    ),
+    eventsourcing.WithRetryStrategy(func() backoff.BackOff {
+        return backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+    }),
 )
 ```
+
+The handler calls the function once per command, so every command gets its own retry budget, and a wait between retries ends when the command's context is cancelled.
 
 The retry loop:
 1. Reloads the stream from the last known revision.

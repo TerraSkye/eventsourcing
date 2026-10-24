@@ -9,6 +9,9 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
+  instead of a `BackOff`. Wrap the existing value:
+  `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
 - `projection.Store` has a new method, `Heartbeat`, which records a
   runner as a live instance of its projection and lists the others as
   `projection.Instance`s. Stores outside this module must implement it, and
@@ -26,6 +29,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A command handler built with `WithRetryStrategy` shared one `BackOff`
+  across every command. On a `CommandBus` with several shards that was a
+  data race, and commands lost or took each other's retries. Each command
+  now gets a `BackOff` of its own from the function.
+- The wait between retries ignored the command's context, so a cancelled
+  command kept its `CommandBus` shard busy until the wait ended. The
+  handler now binds each `BackOff` to the command's context.
 - The segments of a projection spread across its instances (#182).
   Before, the first instance to start claimed every segment and the
   others stood by, so more instances added failover but no throughput.
