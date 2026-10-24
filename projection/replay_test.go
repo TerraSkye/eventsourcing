@@ -3,8 +3,10 @@ package projection_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,5 +161,81 @@ func TestRunner_ReplayStreamNothingToReplay(t *testing.T) {
 	defer cancel()
 	if err := r.ReplayStream(ctx, "s9"); err != nil {
 		t.Fatalf("ReplayStream of a stream without dead letters = %v, want nil", err)
+	}
+}
+
+// pollStore counts PendingReplays calls, and fails them while fail is set.
+type pollStore struct {
+	*memory.ProjectionStore
+	calls atomic.Int32
+	fail  atomic.Bool
+}
+
+func (s *pollStore) PendingReplays(ctx context.Context, name string) ([]projection.Replay, error) {
+	s.calls.Add(1)
+	if s.fail.Load() {
+		return nil, errors.New("connection reset")
+	}
+	return s.ProjectionStore.PendingReplays(ctx, name)
+}
+
+// TestRunner_ReplayPollIdleWithoutDeadLetters covers a projection whose
+// segments hold no dead letters: once its segments are claimed, the runner
+// stops reading replay requests.
+func TestRunner_ReplayPollIdleWithoutDeadLetters(t *testing.T) {
+	es, ps := &testStore{}, &pollStore{ProjectionStore: memory.NewProjectionStore()}
+	save(t, es, 3)
+	r := newReplayRunner(&streamLog{}, es, ps, "a")
+	defer runRunner(t, r)()
+	waitHeldBy(t, ps, "replay", map[string]int{r.Owner(): 2}, 2*time.Second)
+
+	time.Sleep(5 * 10 * time.Millisecond)
+	before := ps.calls.Load()
+	time.Sleep(20 * 10 * time.Millisecond)
+	if n := ps.calls.Load() - before; n != 0 {
+		t.Fatalf("PendingReplays called %d times in 20 poll intervals without dead letters, want 0", n)
+	}
+}
+
+// TestRunner_ReplayPollLogsFailure covers a failing read of the replay
+// requests: it is logged as one warning however often it fails, and its
+// recovery once.
+func TestRunner_ReplayPollLogsFailure(t *testing.T) {
+	es, ps := &testStore{}, &pollStore{ProjectionStore: memory.NewProjectionStore()}
+	ps.fail.Store(true)
+	logs := &logRecorder{}
+	r := projection.NewRunner(projection.Definition{
+		Name:         "replay",
+		Handler:      &streamLog{},
+		EventTypes:   []string{"projection_test.TaskCreated", "projection_test.TaskRenamed"},
+		Owner:        "a",
+		Segments:     2,
+		SegmentKey:   projection.ByStreamID,
+		Logger:       slog.New(logs),
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+	}, es, ps)
+	defer runRunner(t, r)()
+	const warning = "projection replay poll failed; requested replays wait"
+	waitLog(t, logs, warning, 2*time.Second)
+	for ps.calls.Load() < 5 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	ps.fail.Store(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for !slices.ContainsFunc(logs.snapshot(), func(r slog.Record) bool { return r.Message == "projection replay poll recovered" }) {
+		if time.Now().After(deadline) {
+			t.Fatal("no recovery logged after PendingReplays succeeded again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	warned := 0
+	for _, r := range logs.snapshot() {
+		if r.Message == warning {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Fatalf("logged %d warnings for %d failed polls, want 1", warned, ps.calls.Load()-1)
 	}
 }

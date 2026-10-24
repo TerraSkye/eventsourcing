@@ -353,6 +353,7 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	// The replay runs every event through the handler again, so nothing
 	// stays parked; Reset deleted the dead letters that parked it.
 	r.segs[seg].parked = map[string]bool{}
+	r.noteParked(seg)
 	cp, err := r.reclaim(ctx, seg)
 	if err != nil {
 		return Checkpoint{}, err
@@ -440,6 +441,7 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 				return err
 			}
 			r.segs[seg].parked[env.StreamID] = true
+			r.noteParked(seg)
 		default:
 			return err
 		}
@@ -507,6 +509,7 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 func (r *Runner) loadParked(ctx context.Context, seg int, cp Checkpoint) error {
 	if cp.Position == 0 {
 		r.segs[seg].parked = map[string]bool{}
+		r.noteParked(seg)
 		return nil
 	}
 	dls, ok := r.store.(DeadLetterStore)
@@ -522,6 +525,7 @@ func (r *Runner) loadParked(ctx context.Context, seg int, cp Checkpoint) error {
 		parked[d.StreamID] = true
 	}
 	r.segs[seg].parked = parked
+	r.noteParked(seg)
 	return nil
 }
 
@@ -566,6 +570,7 @@ func (r *Runner) replayStream(ctx context.Context, seg int, cp Checkpoint, strea
 		}
 	}
 	delete(r.segs[seg].parked, streamID)
+	r.noteParked(seg)
 	r.notifyWatchers()
 	return nil
 }
