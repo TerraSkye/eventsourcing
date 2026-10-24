@@ -133,6 +133,11 @@ type Status struct {
 	// on new events. Only set on a status returned by [Store.LoadStatuses].
 	ReplayUntil uint64
 
+	// ClaimTTL is the ttl the owner took its claim with: the claim expires
+	// once Age passes it. 0 when no instance holds the segment. Only set
+	// on a status returned by [Store.LoadStatuses].
+	ClaimTTL time.Duration
+
 	// RebuildRequested reports that a rebuild of the projection was
 	// requested with [Store.RequestRebuild] and has not run yet. It is the
 	// same on every segment. Only set on a status returned by
@@ -198,11 +203,14 @@ type Store interface {
 	// [ErrSegmentsChanged].
 	Declare(ctx context.Context, name string, segments int, replayUntil uint64) error
 
-	// Claim takes the segment for l.Owner. When l is the segment's current
-	// claim (same Owner and Epoch), Claim refreshes it and keeps its epoch.
-	// Otherwise it takes the segment over when it is unowned or its last
-	// heartbeat is older than ttl (so a dead instance's claim is reclaimed),
-	// giving the claim a higher epoch than any before it. On success it
+	// Claim takes the segment for l.Owner for ttl. When l is the segment's
+	// current claim (same Owner and Epoch), Claim refreshes it and keeps its
+	// epoch. Otherwise it takes the segment over when it is unowned or its
+	// last heartbeat is older than the ttl its current claim was taken with
+	// (so a dead instance's claim is reclaimed), giving the claim a higher
+	// epoch than any before it. The claim's ttl is the holder's, not the
+	// caller's: instances configured with different ClaimTTLs judge a claim
+	// alike. On success it
 	// refreshes the heartbeat and returns the claim's Lease, the segment's
 	// checkpoint and true; pass that Lease to every later call. When another
 	// claim holds the segment it returns false.
@@ -248,8 +256,8 @@ type Store interface {
 	SaveStatus(ctx context.Context, l Lease, status Status) error
 
 	// LoadStatuses returns the status of every segment of the projection
-	// name, ordered by segment, with Age, ReplayUntil and RebuildRequested
-	// set.
+	// name, ordered by segment, with Age, ClaimTTL, ReplayUntil and
+	// RebuildRequested set.
 	LoadStatuses(ctx context.Context, name string) ([]Status, error)
 
 	// RequestRebuild asks for the projection name to be rebuilt, wherever
@@ -268,8 +276,8 @@ type Store interface {
 	Rebuilds(ctx context.Context, name string) (requested, done uint64, err error)
 
 	// Heartbeat records owner as a live instance of the projection name
-	// running version, and returns the instances seen within ttl, owner
-	// included, ordered by Owner, with Age measured by the store's clock
+	// running version until ttl passes without another heartbeat, and
+	// returns the instances whose own ttl has not passed, owner included, ordered by Owner, with Age measured by the store's clock
 	// and Segments counting the claims each one holds on name. A ttl of 0
 	// removes owner instead, for a clean shutdown, and returns no instances.
 	// The runner calls it to spread the segments over its instances.

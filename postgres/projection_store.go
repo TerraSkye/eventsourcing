@@ -90,19 +90,20 @@ func (s *ProjectionStore) insertSegments(ctx context.Context, name string, segme
 //
 // A refresh of the current claim keeps its epoch; a takeover raises it.
 // On the right-hand side of SET, owner and epoch are the row's values
-// before the update.
+// before the update, and WHERE judges expiry by the current claim's own
+// ttl_ms.
 func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	var cp projection.Checkpoint
 	err := s.db.QueryRow(ctx, `
 		UPDATE projection_segments
-		SET owner = $3, heartbeat = clock_timestamp(),
+		SET owner = $3, heartbeat = clock_timestamp(), ttl_ms = $4,
 		    epoch = CASE WHEN owner = $3 AND epoch = $5 THEN epoch ELSE epoch + 1 END
 		WHERE name = $1 AND segment = $2
 		  AND ((owner = $3 AND epoch = $5)
 		       OR owner IS NULL
-		       OR heartbeat < clock_timestamp() - make_interval(secs => $4))
+		       OR heartbeat < clock_timestamp() - make_interval(secs => ttl_ms / 1000.0))
 		RETURNING epoch, position, version, replay_until, fingerprint`,
-		l.Name, l.Segment, l.Owner, ttl.Seconds(), l.Epoch,
+		l.Name, l.Segment, l.Owner, ttl.Milliseconds(), l.Epoch,
 	).Scan(&l.Epoch, &cp.Position, &cp.Version, &cp.ReplayUntil, &cp.Fingerprint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
@@ -276,7 +277,7 @@ func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, st
 func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT s.segment, s.phase, s.position, s.version, s.head, s.last_error, s.owner,
-		       EXTRACT(EPOCH FROM (clock_timestamp() - s.heartbeat)),
+		       EXTRACT(EPOCH FROM (clock_timestamp() - s.heartbeat)), s.ttl_ms,
 		       s.replay_until, COALESCE(r.requested > r.done, false)
 		FROM projection_segments s
 		LEFT JOIN projection_rebuilds r ON r.name = s.name
@@ -300,10 +301,11 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 			lastErr    *string
 			owner      *string
 			ageSeconds float64
+			ttlMS      int64
 			replay     uint64
 			pending    bool
 		)
-		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds, &replay, &pending); err != nil {
+		if err := rows.Scan(&seg, &phase, &position, &version, &head, &lastErr, &owner, &ageSeconds, &ttlMS, &replay, &pending); err != nil {
 			return nil, fmt.Errorf("postgres: load statuses of %q: %w", name, err)
 		}
 		st := projection.Status{
@@ -322,6 +324,7 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		}
 		if owner != nil {
 			st.Owner = *owner
+			st.ClaimTTL = time.Duration(ttlMS) * time.Millisecond
 		}
 		out = append(out, st)
 	}
@@ -366,10 +369,10 @@ func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested,
 }
 
 // Heartbeat implements [projection.Store] in one statement: it upserts
-// owner's row, deletes the expired rows of other instances, and returns the
-// live ones with the number of segments each one claims. The statement's
-// reads see the table as it was before its writes, so owner's row comes
-// from the upsert and is left out of the read.
+// owner's row, deletes the rows of other instances whose own ttl has
+// passed, and returns the live ones with the number of segments each one
+// claims. The statement's reads see the table as it was before its writes,
+// so owner's row comes from the upsert and is left out of the read.
 func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	if ttl == 0 {
 		if _, err := s.db.Exec(ctx,
@@ -381,17 +384,18 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	}
 	rows, err := s.db.Query(ctx, `
 		WITH me AS (
-			INSERT INTO projection_instances (name, owner, version, heartbeat)
-			VALUES ($1, $2, $3, clock_timestamp())
-			ON CONFLICT (name, owner) DO UPDATE SET version = EXCLUDED.version, heartbeat = EXCLUDED.heartbeat
+			INSERT INTO projection_instances (name, owner, version, heartbeat, ttl_ms)
+			VALUES ($1, $2, $3, clock_timestamp(), $4)
+			ON CONFLICT (name, owner) DO UPDATE
+			SET version = EXCLUDED.version, heartbeat = EXCLUDED.heartbeat, ttl_ms = EXCLUDED.ttl_ms
 			RETURNING owner, version, 0::float8 AS age
 		), expired AS (
 			DELETE FROM projection_instances
-			WHERE name = $1 AND owner <> $2 AND heartbeat < clock_timestamp() - make_interval(secs => $4)
+			WHERE name = $1 AND owner <> $2 AND heartbeat < clock_timestamp() - make_interval(secs => ttl_ms / 1000.0)
 		), live AS (
 			SELECT owner, version, EXTRACT(EPOCH FROM (clock_timestamp() - heartbeat))::float8 AS age
 			FROM projection_instances
-			WHERE name = $1 AND owner <> $2 AND heartbeat >= clock_timestamp() - make_interval(secs => $4)
+			WHERE name = $1 AND owner <> $2 AND heartbeat >= clock_timestamp() - make_interval(secs => ttl_ms / 1000.0)
 			UNION ALL
 			SELECT owner, version, age FROM me
 		)
@@ -399,7 +403,7 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 		       (SELECT COUNT(*) FROM projection_segments s WHERE s.name = $1 AND s.owner = l.owner)
 		FROM live l
 		ORDER BY l.owner`,
-		name, owner, version, ttl.Seconds(),
+		name, owner, version, ttl.Milliseconds(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: heartbeat %q as %q: %w", name, owner, err)

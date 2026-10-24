@@ -89,3 +89,29 @@ func TestRunner_WatchCalledWhenPhaseGoesLiveWithoutEvents(t *testing.T) {
 		})
 	}
 }
+
+// TestStatus_IsLiveUsesClaimTTL covers a status that carries its claim's
+// ttl: IsLive judges its age by that ttl rather than the reader's own.
+func TestStatus_IsLiveUsesClaimTTL(t *testing.T) {
+	live := projection.Status{Phase: projection.Live, Owner: "a", Age: 10 * time.Second}
+	tests := []struct {
+		name     string
+		claimTTL time.Duration // the status's own
+		readTTL  time.Duration // the reader's
+		want     bool
+	}{
+		{name: "reader's ttl when the status has none", readTTL: 15 * time.Second, want: true},
+		{name: "reader's ttl too short when the status has none", readTTL: 5 * time.Second, want: false},
+		{name: "claim's longer ttl over a shorter reader's", claimTTL: 15 * time.Second, readTTL: 5 * time.Second, want: true},
+		{name: "claim's shorter ttl over a longer reader's", claimTTL: 5 * time.Second, readTTL: 15 * time.Second, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := live
+			st.ClaimTTL = tt.claimTTL
+			if got := st.IsLive(tt.readTTL); got != tt.want {
+				t.Errorf("IsLive(%s) with ClaimTTL %s = %v, want %v", tt.readTTL, tt.claimTTL, got, tt.want)
+			}
+		})
+	}
+}

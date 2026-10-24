@@ -59,8 +59,13 @@ CREATE TABLE IF NOT EXISTS projection_segments (
     owner        TEXT,
     epoch        BIGINT      NOT NULL DEFAULT 0,
     heartbeat    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ttl_ms       BIGINT      NOT NULL DEFAULT 15000,
     PRIMARY KEY (name, segment)
 );
+
+-- The claim's own ttl, so every instance expires a claim alike; 15s, the
+-- default ClaimTTL, for rows claimed before the column existed.
+ALTER TABLE projection_segments ADD COLUMN IF NOT EXISTS ttl_ms BIGINT NOT NULL DEFAULT 15000;
 
 -- Rebuild requests per projection: requested counts RequestRebuild calls,
 -- done the ones a Reset has served.
@@ -77,6 +82,7 @@ CREATE TABLE IF NOT EXISTS projection_instances (
     owner     TEXT        NOT NULL,
     version   INT         NOT NULL,
     heartbeat TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ttl_ms    BIGINT      NOT NULL,
     PRIMARY KEY (name, owner)
 );
 

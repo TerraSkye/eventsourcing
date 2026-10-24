@@ -9,6 +9,22 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- A claim expires by the ttl its holder claimed it with, not by the
+  ttl of the instance trying to take it over; instance rows expire the
+  same way. The `projection_segments` and `projection_instances` tables
+  gain a `ttl_ms` column. The Postgres schema adds it to an existing
+  `projection_segments` itself. For an existing SQLite database, run
+  this once before applying the new schema:
+
+  ```sql
+  ALTER TABLE projection_segments ADD COLUMN ttl_ms INTEGER NOT NULL DEFAULT 15000;
+  ```
+
+  Claims taken before the upgrade count with 15s, the default
+  `ClaimTTL`, until they are claimed again.
+- `projection.NewRunner` panics when `PollInterval` is not shorter than
+  `ClaimTTL`. An idle segment refreshes its claim once per poll, so such
+  a runner's claims expired between polls and moved on every one.
 - A runner appends a random part to a configured `Definition.Owner`, as
   it already did to the default: `Owner: "orders-7f9c"` runs as
   `orders-7f9c/1a2b3c4d`. Every runner is then an instance of its own,
@@ -41,6 +57,17 @@ release may break the API; every break is listed under **Breaking**.
   stall backoff for up to `ClaimTTL`, so a store that keeps failing,
   such as one missing a table, still fails `Run`. A changed segment
   count still fails at once.
+- Instances configured with different `ClaimTTL` or `PollInterval`
+  values, as during a rollout that changes them, judged each other's
+  claims and heartbeats by their own ttl. One with a short ttl took over
+  the segments of one that refreshes less often, and deleted its
+  instance row, so the instances disagreed on how many there were and
+  stopped shedding. `Status.ClaimTTL` now carries a claim's own ttl, and
+  `Status.IsLive` uses it.
+- A stalled segment kept its claim only until `ClaimTTL` ran out, while
+  its retry backoff grows to 30s. Another instance then took the segment
+  over and stalled on the same event. The segment now publishes its
+  status every `PollInterval` during the backoff, which keeps the claim.
 - A rebuild could keep a position from before its wipe: a segment that
   took its claim over while the reset ran kept its new lease, and a
   commit it had landed before the wipe reached the in-memory status.

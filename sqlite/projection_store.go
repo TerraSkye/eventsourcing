@@ -89,7 +89,8 @@ func (s *ProjectionStore) Declare(ctx context.Context, name string, segments int
 
 // Claim implements [projection.Store]. A refresh of the current claim
 // keeps its epoch; a takeover raises it. On the right-hand side of SET,
-// owner and epoch are the row's values before the update.
+// owner and epoch are the row's values before the update, and WHERE judges
+// expiry by the current claim's own ttl_ms.
 func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time.Duration) (projection.Lease, projection.Checkpoint, bool, error) {
 	var (
 		cp          projection.Checkpoint
@@ -99,12 +100,12 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 	)
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE projection_segments
-		SET owner = ?3, heartbeat = `+nowMS+`,
+		SET owner = ?3, heartbeat = `+nowMS+`, ttl_ms = ?4,
 		    epoch = CASE WHEN owner = ?3 AND epoch = ?5 THEN epoch ELSE epoch + 1 END
 		WHERE name = ?1 AND segment = ?2
 		  AND ((owner = ?3 AND epoch = ?5)
 		       OR owner IS NULL
-		       OR heartbeat < `+nowMS+` - ?4)
+		       OR heartbeat < `+nowMS+` - ttl_ms)
 		RETURNING epoch, position, version, replay_until, fingerprint`,
 		l.Name, l.Segment, l.Owner, ttl.Milliseconds(), int64(l.Epoch),
 	).Scan(&epoch, &position, &cp.Version, &replayUntil, &cp.Fingerprint)
@@ -235,7 +236,7 @@ func (s *ProjectionStore) SaveStatus(ctx context.Context, l projection.Lease, st
 func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]projection.Status, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.segment, s.phase, s.position, s.version, s.head, s.last_error, s.owner,
-		       `+nowMS+` - s.heartbeat,
+		       `+nowMS+` - s.heartbeat, s.ttl_ms,
 		       s.replay_until, COALESCE(r.requested > r.done, 0)
 		FROM projection_segments s
 		LEFT JOIN projection_rebuilds r ON r.name = s.name
@@ -258,10 +259,11 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 			lastErr  sql.NullString
 			owner    sql.NullString
 			ageMS    int64
+			ttlMS    int64
 			replay   int64
 			pending  bool
 		)
-		if err := rows.Scan(&st.Segment, &phase, &position, &st.Version, &head, &lastErr, &owner, &ageMS, &replay, &pending); err != nil {
+		if err := rows.Scan(&st.Segment, &phase, &position, &st.Version, &head, &lastErr, &owner, &ageMS, &ttlMS, &replay, &pending); err != nil {
 			return nil, fmt.Errorf("sqlite: load statuses of %q: %w", name, err)
 		}
 		st.Phase = parsePhase(phase)
@@ -269,6 +271,9 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		st.Head = uint64(head)
 		st.LastError = lastErr.String
 		st.Owner = owner.String
+		if owner.Valid {
+			st.ClaimTTL = time.Duration(ttlMS) * time.Millisecond
+		}
 		st.Age = time.Duration(max(ageMS, 0)) * time.Millisecond
 		st.ReplayUntil = uint64(replay)
 		st.RebuildRequested = pending
@@ -281,7 +286,7 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 }
 
 // Heartbeat implements [projection.Store], in one transaction that upserts
-// owner's row, deletes the expired rows of other instances, and reads the
+// owner's row, deletes the rows whose own ttl has passed, and reads the
 // live ones with the number of segments each one claims.
 func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
 	if ttl == 0 {
@@ -295,16 +300,17 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	var out []projection.Instance
 	err := s.runTx(ctx, "heartbeat", name, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO projection_instances (name, owner, version, heartbeat)
-			VALUES (?1, ?2, ?3, `+nowMS+`)
-			ON CONFLICT (name, owner) DO UPDATE SET version = excluded.version, heartbeat = excluded.heartbeat`,
-			name, owner, version,
+			INSERT INTO projection_instances (name, owner, version, heartbeat, ttl_ms)
+			VALUES (?1, ?2, ?3, `+nowMS+`, ?4)
+			ON CONFLICT (name, owner) DO UPDATE
+			SET version = excluded.version, heartbeat = excluded.heartbeat, ttl_ms = excluded.ttl_ms`,
+			name, owner, version, ttl.Milliseconds(),
 		); err != nil {
 			return fmt.Errorf("sqlite: heartbeat %q as %q: %w", name, owner, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM projection_instances WHERE name = ? AND heartbeat < `+nowMS+` - ?`,
-			name, ttl.Milliseconds(),
+			DELETE FROM projection_instances WHERE name = ? AND heartbeat < `+nowMS+` - ttl_ms`,
+			name,
 		); err != nil {
 			return fmt.Errorf("sqlite: heartbeat %q as %q: delete expired instances: %w", name, owner, err)
 		}
