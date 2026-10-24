@@ -218,10 +218,11 @@ type Definition struct {
 	Logger *slog.Logger
 
 	// Owner identifies this instance to the store, so other instances see
-	// who holds a segment. Claims are fenced by [Lease.Epoch], so two
-	// runners under the same Owner, such as a process restarted under a
-	// fixed pod name, still never hold a segment at once. Defaults to
-	// "hostname/pid/random", unique per Runner.
+	// who holds a segment, such as a pod name. The runner appends a random
+	// part, as in "orders-7f9c/1a2b3c4d", so every Runner is an instance of
+	// its own even when several share an Owner: each gets its own share of
+	// the segments. [Runner.Owner] returns the result. Defaults to
+	// "hostname/pid", with the random part appended too.
 	Owner string
 
 	// BatchSize is the maximum number of events read and committed in one

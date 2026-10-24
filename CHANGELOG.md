@@ -9,6 +9,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- A runner appends a random part to a configured `Definition.Owner`, as
+  it already did to the default: `Owner: "orders-7f9c"` runs as
+  `orders-7f9c/1a2b3c4d`. Every runner is then an instance of its own,
+  so replicas given the same `Owner` split the segments instead of
+  holding twice their share. `Status.Owner` and the logs show the full
+  value, and `Runner.Owner` returns it.
 - `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
   instead of a `BackOff`. Wrap the existing value:
   `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
