@@ -139,6 +139,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 		"Counted":       s.rebuildCounted,
 		"ServedByReset": s.rebuildServedByReset,
 		"InStatus":      s.rebuildInStatus,
+		"Failure":       s.rebuildFailure,
 	})
 	s.group(t, "Heartbeat", map[string]func(*testing.T){
 		"ListsSelf":        s.heartbeatListsSelf,
@@ -1314,6 +1315,38 @@ func (s *storeAcceptance) rebuildUnknownName(t *testing.T) {
 	requested, done, err := s.store.Rebuilds(t.Context(), name)
 	if err != nil || requested != 0 || done != 0 {
 		t.Errorf("Rebuilds of an undeclared projection = %d, %d, %v; want 0, 0, nil", requested, done, err)
+	}
+	if failed, msg, err := s.store.RebuildFailure(t.Context(), name); err != nil || failed != 0 || msg != "" {
+		t.Errorf("RebuildFailure of an undeclared projection = %d, %q, %v; want 0, \"\", nil", failed, msg, err)
+	}
+}
+
+// rebuildFailure covers that FailRebuild records the failure of the
+// highest request, fenced on segment 0's claim, and RebuildFailure reads
+// it back.
+func (s *storeAcceptance) rebuildFailure(t *testing.T) {
+	name := s.newProjection(t, 2)
+	if failed, msg, err := s.store.RebuildFailure(t.Context(), name); err != nil || failed != 0 || msg != "" {
+		t.Fatalf("RebuildFailure before any failed = %d, %q, %v; want 0, \"\", nil", failed, msg, err)
+	}
+	s.requestRebuild(t, name)
+	s.requestRebuild(t, name)
+	s.claim(t, name, 0, owner, longTTL)
+	if err := s.store.FailRebuild(t.Context(), s.lease(name, 0, owner), 2, "wipe failed"); err != nil {
+		t.Fatalf("FailRebuild: %v", err)
+	}
+	if err := s.store.FailRebuild(t.Context(), s.lease(name, 0, owner), 1, "older"); err != nil {
+		t.Fatalf("FailRebuild of an earlier request: %v", err)
+	}
+	if failed, msg, err := s.store.RebuildFailure(t.Context(), name); err != nil || failed != 2 || msg != "wipe failed" {
+		t.Errorf("RebuildFailure = %d, %q, %v; want 2, \"wipe failed\", nil: an earlier request does not replace it", failed, msg, err)
+	}
+	err := s.store.FailRebuild(t.Context(), s.lease(name, 0, other), 3, "stale")
+	if !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("FailRebuild by an owner without the claim: got %v, want ErrClaimLost", err)
+	}
+	if failed, _, _ := s.store.RebuildFailure(t.Context(), name); failed != 2 {
+		t.Errorf("RebuildFailure after a refused FailRebuild = %d, want 2", failed)
 	}
 }
 

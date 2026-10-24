@@ -68,11 +68,14 @@ CREATE TABLE IF NOT EXISTS projection_segments (
 ALTER TABLE projection_segments ADD COLUMN IF NOT EXISTS ttl_ms BIGINT NOT NULL DEFAULT 15000;
 
 -- Rebuild requests per projection: requested counts RequestRebuild calls,
--- done the ones a Reset has served.
+-- done the ones a Reset has served, and failed the last one a rebuild
+-- failed to serve, with its error.
 CREATE TABLE IF NOT EXISTS projection_rebuilds (
     name      TEXT   PRIMARY KEY,
     requested BIGINT NOT NULL DEFAULT 0,
-    done      BIGINT NOT NULL DEFAULT 0
+    done      BIGINT NOT NULL DEFAULT 0,
+    failed    BIGINT NOT NULL DEFAULT 0,
+    error     TEXT
 );
 
 -- The live instances of each projection, to spread its segments over:
