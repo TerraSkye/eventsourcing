@@ -195,9 +195,7 @@ func NewRunner(p Definition, reader eventsourcing.GlobalReader, store Store) *Ru
 		// the claim would expire between two polls and move on every one.
 		panic(fmt.Sprintf("projection %q: PollInterval (%s) must be shorter than ClaimTTL (%s)", p.Name, p.PollInterval, p.ClaimTTL))
 	}
-	if p.Owner == "" {
-		p.Owner = defaultOwner()
-	}
+	p.Owner = ownerOf(p.Owner)
 	if p.Logger == nil {
 		p.Logger = slog.Default()
 	}
@@ -241,22 +239,33 @@ func fingerprint(eventTypes []string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// defaultOwner returns "hostname/pid/random", with "unknown" for a hostname
-// that cannot be read. The random part tells apart, in LoadStatuses, two
-// runners in one process and a restarted process from the one before it,
-// which in a container usually had the same pid.
-func defaultOwner() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		host = "unknown"
+// ownerOf returns the Owner a runner configured with owner runs under:
+// owner, or "hostname/pid" when it is empty (with "unknown" for a hostname
+// that cannot be read), followed by a random part. The random part makes
+// every Runner its own instance in [Store.Heartbeat], even when several
+// share a configured Owner, and tells apart, in LoadStatuses, two runners
+// in one process and a restarted process from the one before it, which in
+// a container usually had the same pid.
+func ownerOf(owner string) string {
+	if owner == "" {
+		host, err := os.Hostname()
+		if err != nil || host == "" {
+			host = "unknown"
+		}
+		owner = host + "/" + strconv.Itoa(os.Getpid())
 	}
 	var b [4]byte
 	_, _ = rand.Read(b[:]) // never returns an error
-	return host + "/" + strconv.Itoa(os.Getpid()) + "/" + hex.EncodeToString(b[:])
+	return owner + "/" + hex.EncodeToString(b[:])
 }
 
 // Name returns the projection's name.
 func (r *Runner) Name() string { return r.p.Name }
+
+// Owner returns the Owner this runner claims segments and sends heartbeats
+// under: [Definition.Owner] with a random part appended; see
+// [Definition.Owner].
+func (r *Runner) Owner() string { return r.p.Owner }
 
 // CanRebuild reports whether the projection has a [Definition.Reset], which
 // [Runner.Rebuild] needs to wipe the read model.

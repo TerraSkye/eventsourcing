@@ -12,6 +12,12 @@ release may break the API; every break is listed under **Breaking**.
 - `projection.NewRunner` panics when `PollInterval` is not shorter than
   `ClaimTTL`. An idle segment refreshes its claim once per poll, so such
   a runner's claims expired between polls and moved on every one.
+- A runner appends a random part to a configured `Definition.Owner`, as
+  it already did to the default: `Owner: "orders-7f9c"` runs as
+  `orders-7f9c/1a2b3c4d`. Every runner is then an instance of its own,
+  so replicas given the same `Owner` split the segments instead of
+  holding twice their share. `Status.Owner` and the logs show the full
+  value, and `Runner.Owner` returns it.
 - `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
   instead of a `BackOff`. Wrap the existing value:
   `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
@@ -36,6 +42,12 @@ release may break the API; every break is listed under **Breaking**.
   its retry backoff grows to 30s. Another instance then took the segment
   over and stalled on the same event. The segment now publishes its
   status every `PollInterval` during the backoff, which keeps the claim.
+- A rebuild could keep a position from before its wipe: a segment that
+  took its claim over while the reset ran kept its new lease, and a
+  commit it had landed before the wipe reached the in-memory status.
+  `WaitUntil` then returned while that segment's events were missing
+  from the read model. The rebuild now retires every other segment's
+  lease after the reset.
 - A command handler built with `WithRetryStrategy` shared one `BackOff`
   across every command. On a `CommandBus` with several shards that was a
   data race, and commands lost or took each other's retries. Each command
