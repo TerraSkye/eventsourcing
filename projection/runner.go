@@ -373,7 +373,17 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 			// a WaitUntil after Rebuild does not see positions from
 			// before the wipe.
 		case failed >= n:
-			return failErr
+			// The failure was recorded after the rebuild's Reset, which
+			// may have served request n even so, and done was read
+			// before it: ask the store again.
+			_, done, err := r.store.Rebuilds(ctx, r.p.Name)
+			if err != nil {
+				return fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
+			}
+			if done < n {
+				return failErr
+			}
+			continue // served: the next pass returns
 		}
 		select {
 		case <-ctx.Done():
