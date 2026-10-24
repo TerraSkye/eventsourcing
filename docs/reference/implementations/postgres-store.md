@@ -10,7 +10,7 @@ github.com/terraskye/eventsourcing/postgres
 
 ## Schema
 
-Apply `postgres.Schema` before use. It creates the tables of the event store, the event bus and the projection store; the same SQL ships as `postgres/schema.sql`. The events table:
+Apply `postgres.Schema` before use. It creates the tables of the event store, the event bus and the projection store; the same SQL ships as `postgres/schema.sql`. It has the tables as this release uses them and adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between. The events table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS events (

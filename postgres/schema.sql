@@ -16,10 +16,6 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE (stream_id, stream_position)
 );
 
--- Added after v0.2.0; adds the chain columns to an existing events table.
-ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT NOT NULL DEFAULT '';
-ALTER TABLE events ADD COLUMN IF NOT EXISTS causation_id   TEXT NOT NULL DEFAULT '';
-
 CREATE INDEX IF NOT EXISTS idx_events_stream_id ON events (stream_id);
 CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events (correlation_id);
 
@@ -62,10 +58,6 @@ CREATE TABLE IF NOT EXISTS projection_segments (
     ttl_ms       BIGINT      NOT NULL DEFAULT 15000,
     PRIMARY KEY (name, segment)
 );
-
--- The claim's own ttl, so every instance expires a claim alike; 15s, the
--- default ClaimTTL, for rows claimed before the column existed.
-ALTER TABLE projection_segments ADD COLUMN IF NOT EXISTS ttl_ms BIGINT NOT NULL DEFAULT 15000;
 
 -- Rebuild requests per projection: requested counts RequestRebuild calls,
 -- done the ones a Reset has served.
