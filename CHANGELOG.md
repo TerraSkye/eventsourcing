@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-24
+
 ### Breaking
 
 - `projection.DeadLetterStore` has four new methods, `RequestReplay`,
