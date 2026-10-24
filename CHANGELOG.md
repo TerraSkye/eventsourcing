@@ -29,6 +29,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A rebuild could keep a position from before its wipe: a segment that
+  took its claim over while the reset ran kept its new lease, and a
+  commit it had landed before the wipe reached the in-memory status.
+  `WaitUntil` then returned while that segment's events were missing
+  from the read model. The rebuild now retires every other segment's
+  lease after the reset.
 - A command handler built with `WithRetryStrategy` shared one `BackOff`
   across every command. On a `CommandBus` with several shards that was a
   data race, and commands lost or took each other's retries. Each command
