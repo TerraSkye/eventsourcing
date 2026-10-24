@@ -13,6 +13,10 @@ release may break the API; every break is listed under **Breaking**.
   failed with as it was, so `errors.Is` and `errors.As` work on it, as
   they did before 0.4.0. Only an error from a segment on another
   instance comes back as its text.
+- A runner only reads replay requests from the store while one of its
+  segments holds dead letters, and once after it claims a segment or
+  serves a replay, instead of every `PollInterval` regardless. A failed
+  read is logged as a warning, once until a read succeeds.
 
 ## [0.4.0] - 2026-10-24
 

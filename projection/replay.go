@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 )
@@ -102,9 +103,12 @@ func (r *Runner) replayError(n uint64, msgs []string) error {
 }
 
 // runReplays queues the replay requests pending in the store for the
-// segments this instance holds, once per PollInterval and at once after a
-// ReplayStream on this instance, until ctx is done. One read covers every
-// segment of the projection.
+// segments this instance holds, until ctx is done. One read covers every
+// segment of the projection. It reads at once after a ReplayStream on this
+// instance, and otherwise once per PollInterval while [Runner.replaysWanted]
+// says a request may be pending here; a projection without dead letters
+// costs no reads. A failed read is logged once, until a read succeeds, and
+// tried again at the next poll.
 func (r *Runner) runReplays(ctx context.Context) {
 	dls, ok := r.store.(DeadLetterStore)
 	if !ok {
@@ -112,24 +116,65 @@ func (r *Runner) runReplays(ctx context.Context) {
 	}
 	t := time.NewTicker(r.p.PollInterval)
 	defer t.Stop()
+	failing := false
 	for {
-		r.queueReplays(ctx, dls)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if !r.replaysWanted() {
+				continue
+			}
 		case <-r.checkReplays:
+		}
+		err := r.queueReplays(ctx, dls)
+		switch {
+		case err != nil && ctx.Err() == nil && !failing:
+			r.p.Logger.WarnContext(ctx, "projection replay poll failed; requested replays wait",
+				slog.String("projection", r.p.Name), slog.String("owner", r.p.Owner), slog.String("error", err.Error()))
+			failing = true
+		case err == nil && failing:
+			r.p.Logger.InfoContext(ctx, "projection replay poll recovered",
+				slog.String("projection", r.p.Name), slog.String("owner", r.p.Owner))
+			failing = false
 		}
 	}
 }
 
+// replaysWanted reports whether the regular poll should read the store:
+// while a segment here holds dead letters, as only those get requests, and
+// once after a segment here was claimed or served a replay, for a request
+// whose dead letters an instance before it already applied, or one made
+// while it served another.
+func (r *Runner) replaysWanted() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pollReplays || slices.ContainsFunc(r.segs, func(s *segmentState) bool { return s.active && s.hasParked })
+}
+
+// noteParked records whether seg has parked streams, for
+// [Runner.replaysWanted]. The segment's goroutine calls it after each
+// change to parked.
+func (r *Runner) noteParked(seg int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.segs[seg].hasParked = len(r.segs[seg].parked) > 0
+}
+
 // queueReplays reads the pending replay requests and queues each one for
 // its segment when this instance processes that segment and has not queued
-// it yet. A failed read is tried again at the next poll.
-func (r *Runner) queueReplays(ctx context.Context, dls DeadLetterStore) {
+// it yet.
+func (r *Runner) queueReplays(ctx context.Context, dls DeadLetterStore) error {
+	// Cleared before the read, so a segment claimed meanwhile asks again.
+	r.mu.Lock()
+	r.pollReplays = false
+	r.mu.Unlock()
 	pending, err := dls.PendingReplays(ctx, r.p.Name)
 	if err != nil {
-		return
+		r.mu.Lock()
+		r.pollReplays = true
+		r.mu.Unlock()
+		return fmt.Errorf("projection %q: load replay requests: %w", r.p.Name, err)
 	}
 	r.mu.Lock()
 	var wake []int
@@ -148,6 +193,7 @@ func (r *Runner) queueReplays(ctx context.Context, dls DeadLetterStore) {
 		default: // a nudge is already pending
 		}
 	}
+	return nil
 }
 
 // serveReplays replays the requests queued for seg, between two batches,
@@ -162,6 +208,11 @@ func (r *Runner) serveReplays(ctx context.Context, seg int, cp Checkpoint) error
 	}
 	dls := r.store.(DeadLetterStore) // checked by runReplays
 	defer r.dropReplays(reqs)
+	defer func() {
+		r.mu.Lock()
+		r.pollReplays = true
+		r.mu.Unlock()
+	}()
 	for _, rp := range reqs {
 		err := r.replayStream(ctx, seg, cp, rp.StreamID)
 		if ctx.Err() != nil {
@@ -221,6 +272,7 @@ func (r *Runner) setActive(seg int, active bool) {
 	defer r.mu.Unlock()
 	r.segs[seg].active = active
 	if active {
+		r.pollReplays = true
 		return
 	}
 	for _, rp := range r.pendingReplays[seg] {
