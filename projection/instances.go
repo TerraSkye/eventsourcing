@@ -91,7 +91,11 @@ func (r *Runner) heartbeat(ctx context.Context) error {
 func (r *Runner) leave(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
-	_, _ = r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, 0)
+	if _, err := r.store.Heartbeat(ctx, r.p.Name, r.p.Owner, r.p.Version, 0); err != nil {
+		r.p.Logger.WarnContext(ctx, "projection leave failed; the others take this instance's share once it expires",
+			slog.String("projection", r.p.Name), slog.String("owner", r.p.Owner),
+			slog.String("error", err.Error()), slog.Duration("claim_ttl", r.p.ClaimTTL))
+	}
 }
 
 // membership identifies a set of instances by owner and version, to tell
