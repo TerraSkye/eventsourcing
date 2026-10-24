@@ -362,7 +362,18 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	}
 	now := time.Now()
 	instances[owner] = &memoryInstance{version: version, heartbeat: now, ttl: ttl}
+	for o, m := range instances {
+		if now.Sub(m.heartbeat) > m.ttl {
+			delete(instances, o) // expired by its own ttl
+		}
+	}
+	return s.liveInstances(name, now), nil
+}
 
+// liveInstances returns the instances of name whose own ttl has not passed
+// at now, ordered by Owner, with the segments each one claims. s.mu must be
+// held.
+func (s *ProjectionStore) liveInstances(name string, now time.Time) []projection.Instance {
 	held := make(map[string]int)
 	if p, ok := s.projections[name]; ok {
 		for _, row := range p.rows {
@@ -371,15 +382,19 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 			}
 		}
 	}
-	out := make([]projection.Instance, 0, len(instances))
-	for o, m := range instances {
-		age := now.Sub(m.heartbeat)
-		if age > m.ttl {
-			delete(instances, o) // expired by its own ttl
-			continue
+	out := make([]projection.Instance, 0, len(s.instances[name]))
+	for o, m := range s.instances[name] {
+		if age := now.Sub(m.heartbeat); age <= m.ttl {
+			out = append(out, projection.Instance{Owner: o, Version: m.version, Segments: held[o], Age: age})
 		}
-		out = append(out, projection.Instance{Owner: o, Version: m.version, Segments: held[o], Age: age})
 	}
 	slices.SortFunc(out, func(a, b projection.Instance) int { return cmp.Compare(a.Owner, b.Owner) })
-	return out, nil
+	return out
+}
+
+// LoadInstances implements [projection.Store].
+func (s *ProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveInstances(name, time.Now()), nil
 }

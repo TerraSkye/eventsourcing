@@ -88,6 +88,13 @@ func NewProbe(store Store, name string, opts ...ProbeOption) *Probe {
 // Name returns the projection's name.
 func (p *Probe) Name() string { return p.name }
 
+// Instances returns the live instances of the projection, including those
+// on standby that hold no segment, through [Store.LoadInstances]. It reads
+// the store on every call.
+func (p *Probe) Instances(ctx context.Context) ([]Instance, error) {
+	return p.store.LoadInstances(ctx, p.name)
+}
+
 // IsLive reports whether the projection is live: every segment caught up
 // with the head of the log and held by a runner that is still publishing,
 // as judged by [Status.IsLive]. A projection no runner has started yet is

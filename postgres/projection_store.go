@@ -427,6 +427,39 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	return out, nil
 }
 
+// LoadInstances implements [projection.Store]: it reads the rows whose own
+// ttl has not passed, with the number of segments each one claims.
+func (s *ProjectionStore) LoadInstances(ctx context.Context, name string) ([]projection.Instance, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT m.owner, m.version, EXTRACT(EPOCH FROM (clock_timestamp() - m.heartbeat))::float8,
+		       (SELECT COUNT(*) FROM projection_segments s WHERE s.name = m.name AND s.owner = m.owner)
+		FROM projection_instances m
+		WHERE m.name = $1 AND m.heartbeat >= clock_timestamp() - make_interval(secs => m.ttl_ms / 1000.0)
+		ORDER BY m.owner`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load instances of %q: %w", name, err)
+	}
+	defer rows.Close()
+	var out []projection.Instance
+	for rows.Next() {
+		var (
+			m          projection.Instance
+			ageSeconds float64
+		)
+		if err := rows.Scan(&m.Owner, &m.Version, &ageSeconds, &m.Segments); err != nil {
+			return nil, fmt.Errorf("postgres: load instances of %q: %w", name, err)
+		}
+		m.Age = time.Duration(ageSeconds * float64(time.Second))
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: load instances of %q: %w", name, err)
+	}
+	return out, nil
+}
+
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
 // inside the Commit that moves the checkpoint past the event.
 func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, d projection.DeadLetter) error {

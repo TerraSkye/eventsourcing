@@ -282,10 +282,16 @@ type Store interface {
 	// removes owner instead, for a clean shutdown, and returns no instances.
 	// The runner calls it to spread the segments over its instances.
 	Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]Instance, error)
+
+	// LoadInstances returns the live instances of the projection name, as
+	// Heartbeat would, but without recording the caller as one: for a
+	// dashboard or health check that only watches. It changes nothing, so
+	// it may still list instances whose rows the next Heartbeat deletes.
+	LoadInstances(ctx context.Context, name string) ([]Instance, error)
 }
 
 // Instance is a runner of a projection that sent a heartbeat within the
-// ttl, as returned by [Store.Heartbeat].
+// ttl, as returned by [Store.Heartbeat] and [Store.LoadInstances].
 type Instance struct {
 	// Owner identifies the instance; see [Definition.Owner].
 	Owner string

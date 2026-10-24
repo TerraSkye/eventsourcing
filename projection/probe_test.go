@@ -248,3 +248,36 @@ func TestProbe_CancelledWaitLeavesOthersWaiting(t *testing.T) {
 		t.Fatal("other WaitUntil did not return after the position was reached")
 	}
 }
+
+// TestProbe_Instances covers a Probe listing a projection's instances: a
+// runner on standby, which holds no segment, is listed beside the one that
+// holds it, and the Probe does not count as an instance itself.
+func TestProbe_Instances(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	save(t, es, 1)
+	a := newSpreadRunner(es, ps, "a", 1, 0)
+	defer runRunner(t, a)()
+	waitHeld(t, ps, map[string]int{"a": 1}, 2*time.Second)
+	b := newSpreadRunner(es, ps, "b", 1, 0)
+	defer runRunner(t, b)()
+
+	probe := projection.NewProbe(ps, "spread")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		instances, err := probe.Instances(t.Context())
+		if err != nil {
+			t.Fatalf("Instances: %v", err)
+		}
+		held := map[string]int{}
+		for _, m := range instances {
+			held[m.Owner] = m.Segments
+		}
+		if len(held) == 2 && held[a.Owner()] == 1 && held[b.Owner()] == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Instances = %+v, want %s holding the segment and %s on standby", instances, a.Owner(), b.Owner())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

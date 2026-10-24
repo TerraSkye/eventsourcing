@@ -34,16 +34,21 @@ release may break the API; every break is listed under **Breaking**.
 - `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
   instead of a `BackOff`. Wrap the existing value:
   `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
-- `projection.Store` has a new method, `Heartbeat`, which records a
-  runner as a live instance of its projection and lists the others as
-  `projection.Instance`s. Stores outside this module must implement it, and
-  `projectiontest.StoreAcceptanceTest` checks it.
+- `projection.Store` has two new methods. `Heartbeat` records a runner
+  as a live instance of its projection and lists the others as
+  `projection.Instance`s; `LoadInstances` lists them without recording
+  the caller. Stores outside this module must implement both, and
+  `projectiontest.StoreAcceptanceTest` checks them.
 - The Postgres and SQLite schemas add a `projection_instances` table. Apply
   the new schema before deploying: `Runner.Run` returns an error when its
   first heartbeat fails.
 
 ### Added
 
+- `Probe.Instances` lists a projection's live instances, including those
+  on standby that hold no segment, through `Store.LoadInstances`. A
+  dashboard or health check can watch them without becoming an
+  instance with a share of the segments it never uses.
 - The telemetry projection store records `eventsourcing.projection.heartbeats`,
   `eventsourcing.projection.instance.count` and
   `eventsourcing.projection.segment.held`, so a dashboard shows how the
