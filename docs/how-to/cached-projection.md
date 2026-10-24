@@ -237,7 +237,9 @@ A skipped event parks its stream: the runner skips that stream's later events to
 if err := runner.ReplayStream(ctx, "order-42"); err != nil {
     log.Printf("replay order-42: %v", err) // the stream stays parked
 }
-``` A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
+```
+
+`ReplayStream` works from any instance, whichever segments it holds: it records the request in the store, and the instance holding each segment with the stream's dead letters serves it between two batches. The call waits until they have all tried, so an admin endpoint can call it on any replica. A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
 The runner logs its lifecycle to `Logger` (default `slog.Default()`): a segment claimed, released or lost, a rebuild started and finished, an event skipped, and a segment stalled with its error. It logs nothing per applied event and nothing while idle. To log every handler call as well, wrap the handler, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
 

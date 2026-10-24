@@ -2,7 +2,6 @@ package projection_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -313,15 +312,8 @@ func TestRunner_ReplayStreamAppliesEachPositionOnce(t *testing.T) {
 	h.mu.Unlock()
 	r = newLogRunner(h, es, ps, 0)
 	defer runRunner(t, r)()
-	for {
-		err := r.ReplayStream(ctx, "s1")
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, projection.ErrNotActive) || ctx.Err() != nil {
-			t.Fatalf("ReplayStream: %v", err)
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := r.ReplayStream(ctx, "s1"); err != nil {
+		t.Fatalf("ReplayStream: %v", err)
 	}
 
 	want := []string{"s1:projection_test.TaskCreated", "s1:projection_test.TaskRenamed"}

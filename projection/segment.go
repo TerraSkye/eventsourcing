@@ -205,17 +205,8 @@ func (r *Runner) work(ctx context.Context, seg int, cp Checkpoint) error {
 				}
 			}
 		}
-		reqs := r.takeReplays(seg)
-		for i, req := range reqs {
-			err := r.replayStream(ctx, seg, cp, req.streamID)
-			req.finish(err)
-			if errors.Is(err, ErrClaimLost) {
-				// The segment is no longer this instance's to replay on.
-				for _, rest := range reqs[i+1:] {
-					rest.finish(ErrNotActive)
-				}
-				return err
-			}
+		if err := r.serveReplays(ctx, seg, cp); err != nil {
+			return err
 		}
 
 		res, err := r.reader.ReadAll(ctx, cp.Position, r.readOptions())
@@ -538,7 +529,7 @@ func (r *Runner) loadParked(ctx context.Context, seg int, cp Checkpoint) error {
 // a Commit that leaves the checkpoint at cp and removes the dead letter,
 // and un-parks the stream once all of them apply.
 func (r *Runner) replayStream(ctx context.Context, seg int, cp Checkpoint, streamID string) error {
-	dls := r.store.(DeadLetterStore) // checked by ReplayStream
+	dls := r.store.(DeadLetterStore) // checked by runReplays
 	letters, err := dls.LoadDeadLetters(ctx, r.p.Name, seg)
 	if err != nil {
 		return fmt.Errorf("projection %q: replay stream %q: load dead letters: %w", r.p.Name, streamID, err)

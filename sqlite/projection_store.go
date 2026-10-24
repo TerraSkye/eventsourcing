@@ -175,6 +175,16 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		if _, err := tx.ExecContext(ctx, `DELETE FROM projection_dead_letters WHERE projection = ?`, l.Name); err != nil {
 			return fmt.Errorf("sqlite: clear dead letters of %q: %w", l.Name, err)
 		}
+		// The segments' rows go first, so this does not rely on foreign
+		// keys being on for the connection.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM projection_replay_segments
+			WHERE replay IN (SELECT id FROM projection_replays WHERE name = ?)`, l.Name); err != nil {
+			return fmt.Errorf("sqlite: clear replay requests of %q: %w", l.Name, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM projection_replays WHERE name = ?`, l.Name); err != nil {
+			return fmt.Errorf("sqlite: clear replay requests of %q: %w", l.Name, err)
+		}
 		// Every rebuild requested so far is served by this one. The
 		// transaction holds the write lock, so a request runs before or
 		// after it, never in between.
@@ -511,6 +521,126 @@ func claimHeld(res sql.Result) error {
 		return projection.ErrClaimLost
 	}
 	return nil
+}
+
+// RequestReplay implements [projection.DeadLetterStore], in one transaction
+// that records the request and a row for each segment holding dead letters
+// of streamID.
+func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
+	var n int64
+	err := s.runTx(ctx, "request replay", name, func(ctx context.Context, tx *sql.Tx) error {
+		var declared bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM projection_segments WHERE name = ?)`, name,
+		).Scan(&declared); err != nil {
+			return fmt.Errorf("sqlite: request replay of %q stream %q: %w", name, streamID, err)
+		}
+		if !declared {
+			return projection.ErrUnknownProjection
+		}
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO projection_replays (name, stream_id) VALUES (?, ?) RETURNING id`, name, streamID,
+		).Scan(&n); err != nil {
+			return fmt.Errorf("sqlite: request replay of %q stream %q: %w", name, streamID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO projection_replay_segments (replay, segment)
+			SELECT DISTINCT ?, segment FROM projection_dead_letters WHERE projection = ? AND stream_id = ?`,
+			n, name, streamID,
+		); err != nil {
+			return fmt.Errorf("sqlite: request replay of %q stream %q: %w", name, streamID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return uint64(n), nil
+}
+
+// PendingReplays implements [projection.DeadLetterStore].
+func (s *ProjectionStore) PendingReplays(ctx context.Context, name string) ([]projection.Replay, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.stream_id, s.segment
+		FROM projection_replays r JOIN projection_replay_segments s ON s.replay = r.id
+		WHERE r.name = ? AND NOT s.done
+		ORDER BY r.id, s.segment`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load replay requests of %q: %w", name, err)
+	}
+	defer rows.Close()
+	var out []projection.Replay
+	for rows.Next() {
+		var (
+			rp projection.Replay
+			n  int64
+		)
+		if err := rows.Scan(&n, &rp.StreamID, &rp.Segment); err != nil {
+			return nil, fmt.Errorf("sqlite: load replay requests of %q: %w", name, err)
+		}
+		rp.Number = uint64(n)
+		out = append(out, rp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: load replay requests of %q: %w", name, err)
+	}
+	return out, nil
+}
+
+// FinishReplay implements [projection.DeadLetterStore], fenced on l in the
+// same transaction.
+func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, number uint64, errMsg string) error {
+	return s.runTx(ctx, "finish replay", l.Name, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := ownedPosition(ctx, tx, l); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE projection_replay_segments SET done = 1, error = ?
+			WHERE replay = ? AND segment = ?
+			  AND replay IN (SELECT id FROM projection_replays WHERE name = ?)`,
+			nullString(errMsg), int64(number), l.Segment, l.Name,
+		); err != nil {
+			return fmt.Errorf("sqlite: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
+		return nil
+	})
+}
+
+// ReplayResult implements [projection.DeadLetterStore].
+func (s *ProjectionStore) ReplayResult(ctx context.Context, name string, number uint64) (int, []string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.done, s.error
+		FROM projection_replays r JOIN projection_replay_segments s ON s.replay = r.id
+		WHERE r.name = ? AND r.id = ?
+		ORDER BY s.segment`,
+		name, int64(number),
+	)
+	if err != nil {
+		return 0, nil, fmt.Errorf("sqlite: read replay %d of %q: %w", number, name, err)
+	}
+	defer rows.Close()
+	pending, errs := 0, []string(nil)
+	for rows.Next() {
+		var (
+			done bool
+			msg  sql.NullString
+		)
+		if err := rows.Scan(&done, &msg); err != nil {
+			return 0, nil, fmt.Errorf("sqlite: read replay %d of %q: %w", number, name, err)
+		}
+		switch {
+		case !done:
+			pending++
+		case msg.Valid:
+			errs = append(errs, msg.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("sqlite: read replay %d of %q: %w", number, name, err)
+	}
+	return pending, errs, nil
 }
 
 func nullString(s string) any {

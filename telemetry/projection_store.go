@@ -231,6 +231,26 @@ func (t telemetryDeadLetterStore) DeleteDeadLetter(ctx context.Context, l projec
 	return t.dls.DeleteDeadLetter(ctx, l, position)
 }
 
+// RequestReplay implements [projection.DeadLetterStore].
+func (t telemetryDeadLetterStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
+	return t.dls.RequestReplay(ctx, name, streamID)
+}
+
+// PendingReplays implements [projection.DeadLetterStore].
+func (t telemetryDeadLetterStore) PendingReplays(ctx context.Context, name string) ([]projection.Replay, error) {
+	return t.dls.PendingReplays(ctx, name)
+}
+
+// FinishReplay implements [projection.DeadLetterStore].
+func (t telemetryDeadLetterStore) FinishReplay(ctx context.Context, l projection.Lease, number uint64, errMsg string) error {
+	return t.dls.FinishReplay(ctx, l, number, errMsg)
+}
+
+// ReplayResult implements [projection.DeadLetterStore].
+func (t telemetryDeadLetterStore) ReplayResult(ctx context.Context, name string, number uint64) (int, []string, error) {
+	return t.dls.ReplayResult(ctx, name, number)
+}
+
 // endSpan sets span's status from err.
 func endSpan(span trace.Span, err error) {
 	if err != nil {

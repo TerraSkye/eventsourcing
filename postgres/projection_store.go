@@ -203,6 +203,10 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 		if _, err := tx.Exec(ctx, `DELETE FROM projection_dead_letters WHERE projection = $1`, l.Name); err != nil {
 			return fmt.Errorf("postgres: clear dead letters of %q: %w", l.Name, err)
 		}
+		// Their segments' rows go with them, by ON DELETE CASCADE.
+		if _, err := tx.Exec(ctx, `DELETE FROM projection_replays WHERE name = $1`, l.Name); err != nil {
+			return fmt.Errorf("postgres: clear replay requests of %q: %w", l.Name, err)
+		}
 		// Every rebuild requested so far is served by this one. A request
 		// made after this statement waits for the row and stays pending.
 		if _, err := tx.Exec(ctx, `UPDATE projection_rebuilds SET done = requested WHERE name = $1`, l.Name); err != nil {
@@ -522,6 +526,119 @@ func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lea
 		return fmt.Errorf("postgres: delete dead letter of %q segment %d at %d: %w", l.Name, l.Segment, position, err)
 	}
 	return nil
+}
+
+// RequestReplay implements [projection.DeadLetterStore], in one statement
+// that records the request and a row for each segment holding dead letters
+// of streamID.
+func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
+	var n uint64
+	err := s.db.QueryRow(ctx, `
+		WITH r AS (
+			INSERT INTO projection_replays (name, stream_id)
+			SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM projection_segments WHERE name = $1)
+			RETURNING id
+		), segs AS (
+			INSERT INTO projection_replay_segments (replay, segment)
+			SELECT r.id, d.segment
+			FROM r, (SELECT DISTINCT segment FROM projection_dead_letters WHERE projection = $1 AND stream_id = $2) d
+		)
+		SELECT id FROM r`,
+		name, streamID,
+	).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, projection.ErrUnknownProjection
+	}
+	if err != nil {
+		return 0, fmt.Errorf("postgres: request replay of %q stream %q: %w", name, streamID, err)
+	}
+	return n, nil
+}
+
+// PendingReplays implements [projection.DeadLetterStore].
+func (s *ProjectionStore) PendingReplays(ctx context.Context, name string) ([]projection.Replay, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT r.id, r.stream_id, s.segment
+		FROM projection_replays r JOIN projection_replay_segments s ON s.replay = r.id
+		WHERE r.name = $1 AND NOT s.done
+		ORDER BY r.id, s.segment`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load replay requests of %q: %w", name, err)
+	}
+	defer rows.Close()
+	var out []projection.Replay
+	for rows.Next() {
+		var rp projection.Replay
+		if err := rows.Scan(&rp.Number, &rp.StreamID, &rp.Segment); err != nil {
+			return nil, fmt.Errorf("postgres: load replay requests of %q: %w", name, err)
+		}
+		out = append(out, rp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: load replay requests of %q: %w", name, err)
+	}
+	return out, nil
+}
+
+// FinishReplay implements [projection.DeadLetterStore], fenced by locking
+// l's segment row as Commit does.
+func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, number uint64, errMsg string) error {
+	return s.runTx(ctx, "finish replay", l, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := lockOwned(ctx, tx, l); err != nil {
+			return err
+		}
+		var msg any
+		if errMsg != "" {
+			msg = errMsg
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE projection_replay_segments s SET done = true, error = $4
+			FROM projection_replays r
+			WHERE r.id = s.replay AND r.name = $1 AND s.replay = $2 AND s.segment = $3`,
+			l.Name, number, l.Segment, msg,
+		)
+		if err != nil {
+			return fmt.Errorf("postgres: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
+		return nil
+	})
+}
+
+// ReplayResult implements [projection.DeadLetterStore].
+func (s *ProjectionStore) ReplayResult(ctx context.Context, name string, number uint64) (int, []string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT s.done, s.error
+		FROM projection_replays r JOIN projection_replay_segments s ON s.replay = r.id
+		WHERE r.name = $1 AND r.id = $2
+		ORDER BY s.segment`,
+		name, number,
+	)
+	if err != nil {
+		return 0, nil, fmt.Errorf("postgres: read replay %d of %q: %w", number, name, err)
+	}
+	defer rows.Close()
+	pending, errs := 0, []string(nil)
+	for rows.Next() {
+		var (
+			done bool
+			msg  *string
+		)
+		if err := rows.Scan(&done, &msg); err != nil {
+			return 0, nil, fmt.Errorf("postgres: read replay %d of %q: %w", number, name, err)
+		}
+		switch {
+		case !done:
+			pending++
+		case msg != nil:
+			errs = append(errs, *msg)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, fmt.Errorf("postgres: read replay %d of %q: %w", number, name, err)
+	}
+	return pending, errs, nil
 }
 
 // runTx runs fn in a new transaction, committing it if fn returns nil and
