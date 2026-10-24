@@ -57,6 +57,7 @@ func NewProjectionStore() *ProjectionStore {
 type memoryInstance struct {
 	version   int
 	heartbeat time.Time
+	ttl       time.Duration // the instance's own, from its last heartbeat
 }
 
 type memoryProjection struct {
@@ -75,6 +76,7 @@ type memoryRow struct {
 	owner       string
 	epoch       uint64
 	heartbeat   time.Time
+	ttl         time.Duration           // the claim's own, from the Claim that took it
 	deadLetters []projection.DeadLetter // ordered by Position
 }
 
@@ -129,13 +131,14 @@ func (s *ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl tim
 		return projection.Lease{}, projection.Checkpoint{}, false, nil
 	}
 	if s.owned(l) == nil {
-		if row.owner != "" && time.Since(row.heartbeat) <= ttl {
+		if row.owner != "" && time.Since(row.heartbeat) <= row.ttl {
 			return projection.Lease{}, projection.Checkpoint{}, false, nil
 		}
 		row.epoch++
 	}
 	row.owner = l.Owner
 	row.heartbeat = time.Now()
+	row.ttl = ttl
 	row.status.Owner = l.Owner
 	l.Epoch = row.epoch
 	return l, row.cp, true, nil
@@ -270,6 +273,9 @@ func (s *ProjectionStore) LoadStatuses(ctx context.Context, name string) ([]proj
 		if !row.heartbeat.IsZero() {
 			st.Age = time.Since(row.heartbeat)
 		}
+		if row.owner != "" {
+			st.ClaimTTL = row.ttl
+		}
 		st.ReplayUntil = row.cp.ReplayUntil
 		st.RebuildRequested = p.rebuildsRequested > p.rebuildsDone
 		out = append(out, st)
@@ -355,7 +361,7 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 		s.instances[name] = instances
 	}
 	now := time.Now()
-	instances[owner] = &memoryInstance{version: version, heartbeat: now}
+	instances[owner] = &memoryInstance{version: version, heartbeat: now, ttl: ttl}
 
 	held := make(map[string]int)
 	if p, ok := s.projections[name]; ok {
@@ -368,8 +374,8 @@ func (s *ProjectionStore) Heartbeat(ctx context.Context, name, owner string, ver
 	out := make([]projection.Instance, 0, len(instances))
 	for o, m := range instances {
 		age := now.Sub(m.heartbeat)
-		if age > ttl {
-			delete(instances, o) // expired for every instance sharing ttl
+		if age > m.ttl {
+			delete(instances, o) // expired by its own ttl
 			continue
 		}
 		out = append(out, projection.Instance{Owner: o, Version: m.version, Segments: held[o], Age: age})

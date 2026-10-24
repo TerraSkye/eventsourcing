@@ -573,20 +573,36 @@ func TestRunner_ReplayUntilKeptAcrossRestart(t *testing.T) {
 	}
 }
 
+// pausedStore drops a runner's status publishes while paused, as a process
+// that stalls would not send them: its claim's heartbeat ages meanwhile.
+type pausedStore struct {
+	projection.Store
+	paused atomic.Bool
+}
+
+func (s *pausedStore) SaveStatus(ctx context.Context, l projection.Lease, st projection.Status) error {
+	if s.paused.Load() {
+		return nil
+	}
+	return s.Store.SaveStatus(ctx, l, st)
+}
+
 // TestRunner_DropsSegmentWhenSaveStatusLosesClaim covers that a runner
 // whose status publish is refused because another instance took the
 // segment stops reporting the segment as its own.
 func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 	es := &testStore{}
 	ps := memory.NewProjectionStore()
+	as := &pausedStore{Store: ps}
+	const claimTTL = 100 * time.Millisecond
 	r := projection.NewRunner(projection.Definition{
 		Name:         "test",
 		Handler:      eventsourcing.NewEventHandlerFunc(newCounter().Handle),
 		EventTypes:   counterEvents,
 		Owner:        "a",
 		PollInterval: 10 * time.Millisecond,
-		ClaimTTL:     time.Hour,
-	}, es, ps)
+		ClaimTTL:     claimTTL,
+	}, es, as)
 	defer runRunner(t, r)()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
@@ -598,11 +614,13 @@ func TestRunner_DropsSegmentWhenSaveStatusLosesClaim(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Take the segment over as b: with a ttl of 1ns, a's heartbeat counts
-	// as expired.
-	if _, _, ok, err := ps.Claim(t.Context(), projection.Lease{Name: "test", Owner: "b"}, time.Nanosecond); err != nil || !ok {
+	// Let a's claim expire by its own ttl, then take the segment over as b.
+	as.paused.Store(true)
+	time.Sleep(2 * claimTTL)
+	if _, _, ok, err := ps.Claim(t.Context(), projection.Lease{Name: "test", Owner: "b"}, time.Hour); err != nil || !ok {
 		t.Fatalf("Claim(b) = %v, %v; want true, nil", ok, err)
 	}
+	as.paused.Store(false)
 
 	for r.Status().Phase != projection.Standby {
 		if ctx.Err() != nil {
