@@ -38,9 +38,9 @@ import "github.com/cenkalti/backoff/v4"
 
 handler := eventsourcing.NewCommandHandler(
     store, initialState, evolve, decide,
-    eventsourcing.WithRetryStrategy(
-        backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 5),
-    ),
+    eventsourcing.WithRetryStrategy(func() backoff.BackOff {
+        return backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 5)
+    }),
 )
 ```
 

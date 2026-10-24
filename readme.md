@@ -128,7 +128,9 @@ On each dispatch the handler loads the stream, folds it through `evolve`, calls 
 ```go
 eventsourcing.NewCommandHandler(store, initial, evolve, decide,
 	eventsourcing.WithStreamState(eventsourcing.NoStream{}),       // must not exist yet
-	eventsourcing.WithRetryStrategy(backoff.NewExponentialBackOff()), // retry save conflicts
+	eventsourcing.WithRetryStrategy(func() backoff.BackOff { // retry save conflicts
+		return backoff.NewExponentialBackOff()
+	}),
 	eventsourcing.WithMetadataExtractor(func(ctx context.Context) map[string]any {
 		return map[string]any{"user_id": userFromContext(ctx)}
 	}),

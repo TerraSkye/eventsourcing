@@ -106,8 +106,9 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // [StreamExists] only asserts non-emptiness, once loading has confirmed the
 // stream exists — so the handler saves against the revision it just loaded
 // and, on conflict, retries the whole load-evolve-decide-save cycle
-// according to the [backoff.BackOff] set via [WithRetryStrategy] (default:
-// no retries). [NoStream] and a specific [Revision] pin the stream to an
+// according to a [backoff.BackOff] from the factory set via
+// [WithRetryStrategy] (default: no retries). Each call gets a BackOff of
+// its own, and its waits end when ctx is done. [NoStream] and a specific [Revision] pin the stream to an
 // exact point (version 0, or N) that the caller explicitly asserted; a
 // conflict there means that expectation was violated, so it is returned
 // immediately rather than retried. A [StreamExists] load failure (the
@@ -134,7 +135,7 @@ func NewCommandHandler[T any, C Command](
 	// Apply handler options
 	options := &handlerOptions{
 		StreamState:   Any{}, // default
-		RetryStrategy: &backoff.StopBackOff{},
+		RetryStrategy: func() backoff.BackOff { return &backoff.StopBackOff{} },
 		MetadataFuncs: []func(ctx context.Context) map[string]any{},
 		StreamNamer:   DefaultStreamNamer,
 	}
@@ -304,7 +305,7 @@ func NewCommandHandler[T any, C Command](
 				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): failed to save event: %w", command, command.AggregateID(), streamID, err))
 			}
 			return result, nil
-		}, options.RetryStrategy)
+		}, retryStrategy(ctx, options.RetryStrategy))
 
 		return result, err
 
@@ -320,9 +321,10 @@ type handlerOptions struct {
 	// first read starts. The default is [Any].
 	StreamState StreamState
 
-	// RetryStrategy defines how the handler should retry operations in case of transient failures
-	// or version conflicts. If nil, no retries are performed.
-	RetryStrategy backoff.BackOff
+	// RetryStrategy returns a new [backoff.BackOff] for each call of the
+	// handler, defining how it retries after a save conflict. A nil
+	// BackOff means no retries.
+	RetryStrategy func() backoff.BackOff
 
 	// MetadataFuncs is a list of functions used to enrich events with metadata before saving.
 	// Each function receives the context and returns a map of key-value pairs.
@@ -357,8 +359,9 @@ func WithStreamState(state StreamState) CommandHandlerOption {
 	}
 }
 
-// WithRetryStrategy sets the [backoff.BackOff] a [NewCommandHandler] uses to
-// retry its load-evolve-decide-save cycle after a save conflict, when the
+// WithRetryStrategy sets the factory of the [backoff.BackOff] a
+// [NewCommandHandler] uses to retry its load-evolve-decide-save cycle after
+// a save conflict, when the
 // handler is configured (via [WithStreamState]) with [Any] (the default) or
 // [StreamExists] — neither pins the stream to an exact version, so a save
 // conflict can be resolved by retrying. It does not apply to a [StreamExists]
@@ -368,16 +371,35 @@ func WithStreamState(state StreamState) CommandHandlerOption {
 // [WithStreamState] is set to [NoStream] or a specific [Revision] — those
 // pin an exact point, so a conflict there is always returned immediately.
 //
+// The handler calls newBackOff once per command, so every command gets its
+// own retry budget: a BackOff is stateful and not safe for concurrent use,
+// and a [CommandBus] runs one handler on several shards at once. The
+// handler binds that BackOff to the command's ctx, so a wait between
+// retries ends when ctx is done.
+//
 // Usage:
 //
-//	handler := NewCommandHandler(store, initialState, evolve, decide, WithRetryStrategy(myBackoff))
-func WithRetryStrategy(strategy backoff.BackOff) CommandHandlerOption {
+//	handler := NewCommandHandler(store, initialState, evolve, decide,
+//		WithRetryStrategy(func() backoff.BackOff {
+//			return backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3)
+//		}))
+func WithRetryStrategy(newBackOff func() backoff.BackOff) CommandHandlerOption {
 	return func(cfg *handlerOptions) {
-		if strategy == nil {
+		if newBackOff == nil {
 			return
 		}
-		cfg.RetryStrategy = strategy
+		cfg.RetryStrategy = newBackOff
 	}
+}
+
+// retryStrategy returns a new BackOff from newBackOff for one call of a
+// command handler, bound to that call's ctx.
+func retryStrategy(ctx context.Context, newBackOff func() backoff.BackOff) backoff.BackOff {
+	b := newBackOff()
+	if b == nil {
+		b = &backoff.StopBackOff{}
+	}
+	return backoff.WithContext(b, ctx)
 }
 
 // WithMetadataExtractor adds fn to the metadata functions a
