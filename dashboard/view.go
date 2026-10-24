@@ -52,9 +52,27 @@ type projectionView struct {
 	Local    bool    `json:"local"`    // run by this program
 	CanReset bool    `json:"canReset"` // the page offers a rebuild
 
-	RebuildRequested bool          `json:"rebuildRequested"` // a rebuild is pending
-	Error            string        `json:"error,omitempty"`
-	Segments         []segmentView `json:"segments"`
+	RebuildRequested bool           `json:"rebuildRequested"` // a rebuild is pending
+	Error            string         `json:"error,omitempty"`
+	Segments         []segmentView  `json:"segments"`
+	Instances        []instanceView `json:"instances"` // standby ones included
+}
+
+// instanceView is one live instance of a projection as the page shows it.
+type instanceView struct {
+	Owner    string `json:"owner"`
+	Version  int    `json:"version"`
+	Segments int    `json:"segments"` // 0 for an instance on standby
+	AgeMs    int64  `json:"ageMs"`
+}
+
+// instancesView turns a projection's instances into what the page shows.
+func instancesView(instances []projection.Instance) []instanceView {
+	out := make([]instanceView, 0, len(instances))
+	for _, m := range instances {
+		out = append(out, instanceView{Owner: m.Owner, Version: m.Version, Segments: m.Segments, AgeMs: m.Age.Milliseconds()})
+	}
+	return out
 }
 
 // segmentView is one segment as the page shows it.
@@ -113,8 +131,13 @@ func view(name string, statuses []projection.Status, claimTTL time.Duration) pro
 	return v
 }
 
-// segmentState is the state the page shows for one segment.
+// segmentState is the state the page shows for one segment. A segment is
+// silent once its status is older than its claim's ttl: the one the store
+// reports, as [projection.Status.IsLive] judges it, or else claimTTL.
 func segmentState(s projection.Status, claimTTL time.Duration) string {
+	if s.ClaimTTL > 0 {
+		claimTTL = s.ClaimTTL
+	}
 	if s.Owner != "" && s.Age > claimTTL && s.Phase != projection.Standby {
 		return stateSilent
 	}

@@ -85,3 +85,29 @@ func TestView_ShowsAPendingRebuild(t *testing.T) {
 		t.Errorf("state = %s for a stalled segment with a pending rebuild, want stalled first", stalled.State)
 	}
 }
+
+// TestSegmentState_UsesClaimTTL covers a status that carries its claim's
+// ttl: a segment is silent by that ttl, not by the dashboard's own.
+func TestSegmentState_UsesClaimTTL(t *testing.T) {
+	st := projection.Status{Phase: projection.Live, Owner: "a", Age: 10 * time.Second}
+	if got := segmentState(st, 5*time.Second); got != stateSilent {
+		t.Errorf("without a ClaimTTL, state = %s, want %s by the dashboard's 5s", got, stateSilent)
+	}
+	st.ClaimTTL = 15 * time.Second
+	if got := segmentState(st, 5*time.Second); got != stateLive {
+		t.Errorf("with a 15s ClaimTTL, state = %s, want %s", got, stateLive)
+	}
+}
+
+// TestInstancesView covers the instances the page lists, a standby one
+// that holds no segment included.
+func TestInstancesView(t *testing.T) {
+	got := instancesView([]projection.Instance{
+		{Owner: "a/1", Version: 2, Segments: 3, Age: 1500 * time.Millisecond},
+		{Owner: "b/2", Version: 2, Segments: 0, Age: 0},
+	})
+	want := []instanceView{{Owner: "a/1", Version: 2, Segments: 3, AgeMs: 1500}, {Owner: "b/2", Version: 2}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("instancesView = %+v, want %+v", got, want)
+	}
+}

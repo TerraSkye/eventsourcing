@@ -107,6 +107,8 @@
   th { text-align: left; font-weight: 500; color: var(--muted); padding: 0.375rem 1.5rem 0.375rem 0; border-bottom: 1px solid var(--rule); }
   td { padding: 0.375rem 1.5rem 0.375rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
   td.num, th.num { text-align: right; }
+  table.instances { margin-top: 1rem; }
+  table.instances td.standby { color: var(--muted); }
 
   button {
     font: inherit; font-size: 0.9375rem; color: var(--ink); background: transparent;
@@ -233,15 +235,21 @@
         el("th", {}, "Segment"), el("th", {}, "State"),
         el("th", { class: "num" }, "Position"), el("th", {}, "Owner"), el("th", {}, "Last heard"))),
       tbody);
+    // Every live instance, those on standby that hold no segment included.
+    const itbody = el("tbody");
+    const itable = el("table", { class: "instances" },
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Instance"), el("th", { class: "num" }, "Segments"), el("th", {}, "Last heard"))),
+      itbody);
     const summary = el("summary");
-    const details = el("details", {}, summary, el("div", { class: "segments-wrap" }, table));
+    const details = el("details", {}, summary, el("div", { class: "segments-wrap" }, table, itable));
     // Once someone opens or closes the table themselves, leave it that way.
     summary.addEventListener("click", () => { details.dataset.touched = "1"; });
 
     const section = el("section", { class: "projection", "aria-label": name },
       el("div", { class: "head" }, h2, state, where, el("span", { class: "spacer" }), button),
       track, numbers, problem, details);
-    const parts = { section, state, where, button, track, stats, problem, details, summary, tbody, lanes: [] };
+    const parts = { section, state, where, button, track, stats, problem, details, summary, tbody, itable, itbody, lanes: [] };
     sections.set(name, parts);
     return parts;
   }
@@ -295,12 +303,21 @@
       if (problem.detail) parts.problem.append(el("p", { class: "detail" }, problem.detail));
     }
 
-    // The segment table shows who runs what; one healthy segment says
-    // nothing the line above does not.
+    // The segment table shows who runs what, and the instance table who
+    // stands by; one healthy segment on one instance says nothing the line
+    // above does not.
+    const instances = p.instances || [];
     const troubled = p.segments.some(s => !["live", "catching_up", "replaying"].includes(s.state));
-    parts.details.hidden = p.segments.length === 0 || (p.segments.length === 1 && !troubled);
+    parts.details.hidden = p.segments.length === 0 || (p.segments.length === 1 && !troubled && instances.length <= 1);
     if (troubled && !parts.details.dataset.touched) parts.details.open = true;
-    parts.summary.textContent = p.segments.length === 1 ? "1 segment" : `${p.segments.length} segments`;
+    const segText = p.segments.length === 1 ? "1 segment" : `${p.segments.length} segments`;
+    const instText = instances.length === 1 ? "1 instance" : `${instances.length} instances`;
+    parts.summary.textContent = instances.length ? `${segText} on ${instText}` : segText;
+    parts.itable.hidden = instances.length === 0;
+    parts.itbody.replaceChildren(...instances.map(m => el("tr", {},
+      el("td", {}, m.owner),
+      el("td", m.segments ? { class: "num" } : { class: "num standby" }, m.segments ? String(m.segments) : "Standby"),
+      el("td", {}, heard(m.ageMs)))));
     parts.tbody.replaceChildren(...p.segments.map(s => el("tr", { "data-state": s.state },
       el("td", {}, String(s.segment)),
       el("td", {}, el("span", { class: "state" }, STATE_TEXT[s.state] || s.state)),

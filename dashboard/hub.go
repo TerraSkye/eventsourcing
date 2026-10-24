@@ -134,11 +134,16 @@ func (h *hub) read(ctx context.Context, track bool) snapshot {
 	for _, name := range d.names {
 		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 		statuses, err := d.store.LoadStatuses(readCtx, name)
+		instances, instErr := d.store.LoadInstances(readCtx, name)
 		cancel()
+		if err == nil {
+			err = instErr
+		}
 		now := time.Now()
 
 		runner, local := d.runners[name]
 		v := view(name, statuses, d.claimTTL)
+		v.Instances = instancesView(instances)
 		v.Local = local
 		// A runner here says whether it has a Reset; for one elsewhere,
 		// only its own runner knows, and the request shows it.
