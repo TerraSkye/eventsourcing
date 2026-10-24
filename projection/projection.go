@@ -229,8 +229,9 @@ type Definition struct {
 	BatchSize int
 
 	// PollInterval is how often the runner reads again when nothing woke it
-	// earlier. Also how often it tries to claim segments it does not own.
-	// Default [DefaultPollInterval].
+	// earlier. Also how often it tries to claim segments it does not own,
+	// and how often an idle or stalled segment refreshes its claim, so it
+	// must be shorter than ClaimTTL. Default [DefaultPollInterval].
 	PollInterval time.Duration
 
 	// ClaimTTL is how long a claim stays valid without a Commit or

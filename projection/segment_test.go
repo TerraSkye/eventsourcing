@@ -562,3 +562,58 @@ func TestRunner_PublishesStall(t *testing.T) {
 		t.Errorf("stored LastError = %q after recovery, want empty", statuses[0].LastError)
 	}
 }
+
+// soloStore reports each runner as the only live instance, so it competes
+// for every segment, as it does while the other instances' heartbeats are
+// late.
+type soloStore struct{ projection.Store }
+
+func (s soloStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	instances, err := s.Store.Heartbeat(ctx, name, owner, version, ttl)
+	return slices.DeleteFunc(instances, func(m projection.Instance) bool { return m.Owner != owner }), err
+}
+
+// TestRunner_StallKeepsClaim covers a segment stalled for longer than its
+// ClaimTTL: it keeps refreshing its claim during the backoff, so another
+// instance does not take it over only to stall on the same event.
+func TestRunner_StallKeepsClaim(t *testing.T) {
+	es := &testStore{}
+	ps := memory.NewProjectionStore()
+	failing := newCounter()
+	failing.fail = func(uint64) error { return errors.New("poison event") }
+	newDef := func(c *counter, owner string) projection.Definition {
+		return projection.Definition{
+			Name:         "test",
+			Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+			EventTypes:   counterEvents,
+			Owner:        owner,
+			PollInterval: 20 * time.Millisecond,
+			// Below the first backoff of 0.5s, rounded down by jitter.
+			ClaimTTL: 200 * time.Millisecond,
+		}
+	}
+	save(t, es, 1)
+	a := projection.NewRunner(newDef(failing, "a"), es, ps)
+	defer runRunner(t, a)()
+	for a.Status().Phase != projection.Stalled {
+		if t.Context().Err() != nil {
+			t.Fatal("a never stalled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	b := projection.NewRunner(newDef(newCounter(), "b"), es, soloStore{ps})
+	defer runRunner(t, b)()
+	// Well past a's first backoff and several ClaimTTLs.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sts, err := ps.LoadStatuses(t.Context(), "test")
+		if err != nil {
+			t.Fatalf("LoadStatuses: %v", err)
+		}
+		if owner := sts[0].Owner; owner != "a" {
+			t.Fatalf("segment owned by %q while a was stalled on it, want a to keep its claim", owner)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

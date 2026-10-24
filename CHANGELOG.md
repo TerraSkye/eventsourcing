@@ -9,6 +9,9 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `projection.NewRunner` panics when `PollInterval` is not shorter than
+  `ClaimTTL`. An idle segment refreshes its claim once per poll, so such
+  a runner's claims expired between polls and moved on every one.
 - `WithRetryStrategy` takes a function that returns a `backoff.BackOff`
   instead of a `BackOff`. Wrap the existing value:
   `WithRetryStrategy(func() backoff.BackOff { return backoff.NewExponentialBackOff() })`.
@@ -29,6 +32,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A stalled segment kept its claim only until `ClaimTTL` ran out, while
+  its retry backoff grows to 30s. Another instance then took the segment
+  over and stalled on the same event. The segment now publishes its
+  status every `PollInterval` during the backoff, which keeps the claim.
 - A command handler built with `WithRetryStrategy` shared one `BackOff`
   across every command. On a `CommandBus` with several shards that was a
   data race, and commands lost or took each other's retries. Each command
