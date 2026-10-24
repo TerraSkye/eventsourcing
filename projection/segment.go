@@ -327,10 +327,6 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 	r.log(ctx, slog.LevelInfo, seg, r.position(seg), "projection rebuild started")
 	r.mu.Lock()
 	r.resetting = true // until the caller's rebuildTried
-	before := make([]Lease, len(r.segs))
-	for i, s := range r.segs {
-		before[i] = s.lease
-	}
 	r.mu.Unlock()
 	if err := r.store.Reset(ctx, r.lease(seg), r.p.Version, r.p.Reset); err != nil {
 		return Checkpoint{}, fmt.Errorf("projection %q: rebuild for version %d: %w", r.p.Name, r.p.Version, err)
@@ -346,13 +342,15 @@ func (r *Runner) rebuild(ctx context.Context, seg int) (Checkpoint, error) {
 		if i == seg {
 			continue // Reset kept seg's claim
 		}
-		// The store released the segment. Retire the lease it was held
-		// under, so a commit that reached the store before the reset
-		// cannot write its wiped position back through setStatus. A
-		// segment claimed again since keeps its new lease.
-		if s.lease == before[i] {
-			s.lease.Epoch = 0
-		}
+		// The store released the segment. Retire whatever lease it holds
+		// in memory, so a commit that reached the store before the reset
+		// cannot write its wiped position back through setStatus. That
+		// includes a lease taken over while Reset ran: its commits may
+		// have landed before the wipe. A lease claimed after the reset is
+		// retired too, and costs that segment one ErrClaimLost and a
+		// claim; one claimed after this point is kept, and the store
+		// fences its commits if it reached the store before the reset.
+		s.lease.Epoch = 0
 	}
 	r.signalChange()
 	r.mu.Unlock()
