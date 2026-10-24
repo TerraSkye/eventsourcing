@@ -9,6 +9,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- The stores no longer keep every `ReplayStream` request forever.
+  `FinishReplay` deletes a request once every segment tried it without
+  an error, together with the earlier finished requests of its stream;
+  a failed request is kept until then, or until `Reset`. A stream
+  without dead letters records no request: `RequestReplay` returns 0.
+  `StoreAcceptanceTest` checks the deleting, so a store outside this
+  module that keeps its requests now fails it.
 - `Runner.ReplayStream` returns an error a segment on its own instance
   failed with as it was, so `errors.Is` and `errors.As` work on it, as
   they did before 0.4.0. Only an error from a segment on another

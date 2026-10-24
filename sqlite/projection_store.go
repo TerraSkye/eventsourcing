@@ -525,7 +525,7 @@ func claimHeld(res sql.Result) error {
 
 // RequestReplay implements [projection.DeadLetterStore], in one transaction
 // that records the request and a row for each segment holding dead letters
-// of streamID.
+// of streamID. A stream without dead letters records nothing and gets 0.
 func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
 	var n int64
 	err := s.runTx(ctx, "request replay", name, func(ctx context.Context, tx *sql.Tx) error {
@@ -537,6 +537,15 @@ func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID stri
 		}
 		if !declared {
 			return projection.ErrUnknownProjection
+		}
+		var held bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM projection_dead_letters WHERE projection = ? AND stream_id = ?)`, name, streamID,
+		).Scan(&held); err != nil {
+			return fmt.Errorf("sqlite: request replay of %q stream %q: %w", name, streamID, err)
+		}
+		if !held {
+			return nil
 		}
 		if err := tx.QueryRowContext(ctx,
 			`INSERT INTO projection_replays (name, stream_id) VALUES (?, ?) RETURNING id`, name, streamID,
@@ -596,13 +605,37 @@ func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, 
 		if _, err := ownedPosition(ctx, tx, l); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE projection_replay_segments SET done = 1, error = ?
-			WHERE replay = ? AND segment = ?
-			  AND replay IN (SELECT id FROM projection_replays WHERE name = ?)`,
-			nullString(errMsg), int64(number), l.Segment, l.Name,
+		var streamID string
+		err := tx.QueryRowContext(ctx,
+			`SELECT stream_id FROM projection_replays WHERE id = ? AND name = ?`, int64(number), l.Name,
+		).Scan(&streamID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // deleted by Reset
+		}
+		if err != nil {
+			return fmt.Errorf("sqlite: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE projection_replay_segments SET done = 1, error = ? WHERE replay = ? AND segment = ?`,
+			nullString(errMsg), int64(number), l.Segment,
 		); err != nil {
 			return fmt.Errorf("sqlite: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
+		// Once every segment tried it without an error, delete it and the
+		// earlier requests of its stream that are finished. The segment
+		// rows go first, as the database may not enforce foreign keys.
+		finished := `
+			SELECT r.id FROM projection_replays r
+			WHERE r.name = ? AND r.stream_id = ? AND r.id <= ?
+			  AND NOT EXISTS (SELECT 1 FROM projection_replay_segments s WHERE s.replay = r.id AND NOT s.done)
+			  AND NOT EXISTS (SELECT 1 FROM projection_replay_segments s WHERE s.replay = ? AND (NOT s.done OR s.error IS NOT NULL))`
+		for _, del := range []string{
+			`DELETE FROM projection_replay_segments WHERE replay IN (` + finished + `)`,
+			`DELETE FROM projection_replays WHERE id IN (` + finished + `)`,
+		} {
+			if _, err := tx.ExecContext(ctx, del, l.Name, streamID, int64(number), int64(number)); err != nil {
+				return fmt.Errorf("sqlite: finish replay %d of %q segment %d: delete finished requests: %w", number, l.Name, l.Segment, err)
+			}
 		}
 		return nil
 	})
