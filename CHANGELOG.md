@@ -7,6 +7,14 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Added
+
+- `sqlite.ApplySchema` applies `sqlite.Schema` in one transaction, after
+  adding the columns later releases added to the tables a database
+  already has: `correlation_id` and `causation_id` on `events` (v0.3.0)
+  and `ttl_ms` on `projection_segments` (v0.4.0). A database an earlier
+  release created no longer needs the manual `ALTER TABLE`.
+
 ## [0.4.0] - 2026-10-24
 
 ### Breaking

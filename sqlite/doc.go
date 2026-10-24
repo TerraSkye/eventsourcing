@@ -7,13 +7,14 @@
 // services as well (WAL mode, replicated with a tool such as Litestream).
 // Use Postgres or KurrentDB when several processes share the log.
 //
-// Open a database with [Open] and apply [Schema]:
+// Open a database with [Open] and apply the schema with [ApplySchema],
+// which also upgrades a database an earlier release created:
 //
 //	db, err := sqlite.Open("events.db") // or ":memory:"
 //	if err != nil {
 //		return err
 //	}
-//	if _, err := db.ExecContext(ctx, sqlite.Schema); err != nil {
+//	if err := sqlite.ApplySchema(ctx, db); err != nil {
 //		return err
 //	}
 //	store := sqlite.NewEventStore(db)

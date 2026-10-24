@@ -190,7 +190,7 @@ Every store is run against the shared acceptance suite in [`eventsourcingtest`](
 
 ```go
 db, err := sqlite.Open("events.db") // or ":memory:"
-_, err = db.ExecContext(ctx, sqlite.Schema)
+err = sqlite.ApplySchema(ctx, db)
 store := sqlite.NewEventStore(db)
 ```
 
