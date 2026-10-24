@@ -350,9 +350,10 @@ func (s *replayDroppedLosingStore) Commit(ctx context.Context, l projection.Leas
 	return s.ProjectionStore.Commit(ctx, l, cp, status, fn)
 }
 
-// TestRunner_ReplayRequestsFinishAfterClaimLost covers that every queued
-// ReplayStream call returns when one replay loses the claim, instead of
-// the ones behind it waiting until their ctx ends.
+// TestRunner_ReplayRequestsFinishAfterClaimLost covers two queued replays
+// of which the first loses the claim: both stay pending in the store, are
+// served once the segment is claimed again, and both ReplayStream calls
+// return instead of waiting until their ctx ends.
 func TestRunner_ReplayRequestsFinishAfterClaimLost(t *testing.T) {
 	es := &testStore{}
 	var last uint64

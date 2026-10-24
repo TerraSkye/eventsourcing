@@ -116,6 +116,7 @@ Once nothing reads the old version, drop its table and its rows in the projectio
 DROP TABLE tasks_v1;
 DELETE FROM projection_segments WHERE name = 'task-list-v1';
 DELETE FROM projection_dead_letters WHERE projection = 'task-list-v1';
+DELETE FROM projection_replays WHERE name = 'task-list-v1';
 DELETE FROM projection_instances WHERE name = 'task-list-v1';
 ```
 

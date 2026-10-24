@@ -99,3 +99,22 @@ CREATE TABLE IF NOT EXISTS projection_dead_letters (
 
 CREATE INDEX IF NOT EXISTS idx_projection_dead_letters_projection
     ON projection_dead_letters (projection, segment, global_position);
+
+-- Requests to apply a stream's dead letters again (Runner.ReplayStream),
+-- and per segment holding dead letters of the stream, whether it tried the
+-- request and the error it got.
+CREATE TABLE IF NOT EXISTS projection_replays (
+    id        BIGSERIAL PRIMARY KEY,
+    name      TEXT      NOT NULL,
+    stream_id TEXT      NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_projection_replays_name ON projection_replays (name);
+
+CREATE TABLE IF NOT EXISTS projection_replay_segments (
+    replay  BIGINT  NOT NULL REFERENCES projection_replays (id) ON DELETE CASCADE,
+    segment INT     NOT NULL,
+    done    BOOLEAN NOT NULL DEFAULT false,
+    error   TEXT,
+    PRIMARY KEY (replay, segment)
+);

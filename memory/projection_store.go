@@ -3,6 +3,7 @@ package memory
 import (
 	"cmp"
 	"context"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ type ProjectionStore struct {
 
 	mu          sync.Mutex
 	projections map[string]*memoryProjection
+	replays     uint64                                // the last replay request's number, across projections
 	instances   map[string]map[string]*memoryInstance // by projection name, then owner
 }
 
@@ -68,6 +70,21 @@ type memoryProjection struct {
 	// the requests Reset has served.
 	rebuildsRequested uint64
 	rebuildsDone      uint64
+
+	// replays holds the replay requests by number; Reset deletes them.
+	replays map[uint64]*memoryReplay
+}
+
+// memoryReplay is a replay request: its stream, and per segment holding
+// dead letters of it, whether the segment tried it and the error it got.
+type memoryReplay struct {
+	streamID string
+	segments map[int]*memoryReplaySegment
+}
+
+type memoryReplaySegment struct {
+	done bool
+	err  string
 }
 
 type memoryRow struct {
@@ -201,6 +218,7 @@ func (s *ProjectionStore) Reset(ctx context.Context, l projection.Lease, newVers
 	}
 	p := s.projections[l.Name]
 	p.rebuildsDone = p.rebuildsRequested
+	p.replays = nil
 	for seg, row := range p.rows {
 		row.deadLetters = nil
 		row.cp = projection.Checkpoint{Position: 0, Version: newVersion, ReplayUntil: max(row.cp.ReplayUntil, row.cp.Position)}
@@ -397,4 +415,88 @@ func (s *ProjectionStore) LoadInstances(ctx context.Context, name string) ([]pro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.liveInstances(name, time.Now()), nil
+}
+
+// RequestReplay implements [projection.DeadLetterStore].
+func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projections[name]
+	if !ok {
+		return 0, projection.ErrUnknownProjection
+	}
+	s.replays++
+	req := &memoryReplay{streamID: streamID, segments: map[int]*memoryReplaySegment{}}
+	for seg, row := range p.rows {
+		if slices.ContainsFunc(row.deadLetters, func(d projection.DeadLetter) bool { return d.StreamID == streamID }) {
+			req.segments[seg] = &memoryReplaySegment{}
+		}
+	}
+	if p.replays == nil {
+		p.replays = map[uint64]*memoryReplay{}
+	}
+	p.replays[s.replays] = req
+	return s.replays, nil
+}
+
+// PendingReplays implements [projection.DeadLetterStore].
+func (s *ProjectionStore) PendingReplays(ctx context.Context, name string) ([]projection.Replay, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projections[name]
+	if !ok {
+		return nil, nil
+	}
+	var out []projection.Replay
+	for n, req := range p.replays {
+		for seg, st := range req.segments {
+			if !st.done {
+				out = append(out, projection.Replay{Number: n, StreamID: req.streamID, Segment: seg})
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b projection.Replay) int {
+		return cmp.Or(cmp.Compare(a.Number, b.Number), cmp.Compare(a.Segment, b.Segment))
+	})
+	return out, nil
+}
+
+// FinishReplay implements [projection.DeadLetterStore].
+func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, number uint64, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owned(l) == nil {
+		return projection.ErrClaimLost
+	}
+	if req, ok := s.projections[l.Name].replays[number]; ok {
+		if st, ok := req.segments[l.Segment]; ok {
+			st.done, st.err = true, errMsg
+		}
+	}
+	return nil
+}
+
+// ReplayResult implements [projection.DeadLetterStore].
+func (s *ProjectionStore) ReplayResult(ctx context.Context, name string, number uint64) (int, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projections[name]
+	if !ok {
+		return 0, nil, nil
+	}
+	req, ok := p.replays[number]
+	if !ok {
+		return 0, nil, nil
+	}
+	segs := slices.Sorted(maps.Keys(req.segments))
+	pending, errs := 0, []string(nil)
+	for _, seg := range segs {
+		switch st := req.segments[seg]; {
+		case !st.done:
+			pending++
+		case st.err != "":
+			errs = append(errs, st.err)
+		}
+	}
+	return pending, errs, nil
 }

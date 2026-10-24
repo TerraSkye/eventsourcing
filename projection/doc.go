@@ -163,7 +163,8 @@
 // events instead, recording them through [DeadLetterStore] when the Store
 // supports it. A skipped event parks its stream: later events of the same
 // stream are skipped and recorded too, until [Runner.ReplayStream] applies
-// them in order.
+// them in order, from any instance: whichever instance holds the stream's
+// segment serves the request.
 //
 // Exactly-once covers only what a handler writes through the Store's unit
 // of work, such as postgres.Tx(ctx). Anything else a handler does, such as

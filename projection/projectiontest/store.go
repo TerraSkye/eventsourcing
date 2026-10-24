@@ -166,6 +166,15 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 			"UnknownName":         s.deadLetterUnknownName,
 			"ClearedByReset":      s.deadLetterClearedByReset,
 		})
+		s.group(t, "Replay", map[string]func(*testing.T){
+			"UnknownName":       s.replayUnknownName,
+			"NothingToReplay":   s.replayNothingToReplay,
+			"PendingPerSegment": s.replayPendingPerSegment,
+			"Finish":            s.replayFinish,
+			"FinishFenced":      s.replayFinishFenced,
+			"NumbersIncrease":   s.replayNumbersIncrease,
+			"ClearedByReset":    s.replayClearedByReset,
+		})
 	}
 }
 
@@ -1061,6 +1070,151 @@ func (s *storeAcceptance) deadLetterClearedByReset(t *testing.T) {
 			t.Errorf("segment %d dead letters after Reset = %+v, want none", seg, got)
 		}
 	}
+}
+
+// --- Replay ---
+
+func (s *storeAcceptance) replayUnknownName(t *testing.T) {
+	_, err := s.store.(projection.DeadLetterStore).RequestReplay(t.Context(), "projectiontest-"+uuid.NewString(), "order-1")
+	if !errors.Is(err, projection.ErrUnknownProjection) {
+		t.Fatalf("RequestReplay for an unknown name: got %v, want ErrUnknownProjection", err)
+	}
+}
+
+func (s *storeAcceptance) replayNothingToReplay(t *testing.T) {
+	name := s.newProjection(t, 1)
+	n := s.requestReplay(t, name, "order-1")
+	if n == 0 {
+		t.Fatal("RequestReplay returned number 0, want a number above 0")
+	}
+	if got := s.pendingReplays(t, name); len(got) != 0 {
+		t.Errorf("PendingReplays for a stream without dead letters = %+v, want none", got)
+	}
+	if pending, errs := s.replayResult(t, name, n); pending != 0 || len(errs) != 0 {
+		t.Errorf("ReplayResult = %d pending, errors %v; want nothing pending", pending, errs)
+	}
+}
+
+// replayPendingPerSegment covers a stream with dead letters in two of
+// three segments, next to another stream's: the request is pending for
+// those two segments only.
+func (s *storeAcceptance) replayPendingPerSegment(t *testing.T) {
+	name := s.replayProjection(t)
+	n := s.requestReplay(t, name, "order-1")
+	want := []projection.Replay{{Number: n, StreamID: "order-1", Segment: 0}, {Number: n, StreamID: "order-1", Segment: 2}}
+	if got := s.pendingReplays(t, name); !slices.Equal(got, want) {
+		t.Fatalf("PendingReplays = %+v, want %+v", got, want)
+	}
+	if pending, _ := s.replayResult(t, name, n); pending != 2 {
+		t.Fatalf("ReplayResult = %d pending, want 2", pending)
+	}
+}
+
+func (s *storeAcceptance) replayFinish(t *testing.T) {
+	name := s.replayProjection(t)
+	n := s.requestReplay(t, name, "order-1")
+	dls := s.store.(projection.DeadLetterStore)
+	if err := dls.FinishReplay(t.Context(), s.lease(name, 0, owner), n, ""); err != nil {
+		t.Fatalf("FinishReplay(0): %v", err)
+	}
+	if pending, errs := s.replayResult(t, name, n); pending != 1 || len(errs) != 0 {
+		t.Fatalf("ReplayResult after segment 0 = %d pending, errors %v; want 1 pending and none", pending, errs)
+	}
+	if err := dls.FinishReplay(t.Context(), s.lease(name, 2, owner), n, "handler failed"); err != nil {
+		t.Fatalf("FinishReplay(2): %v", err)
+	}
+	if pending, errs := s.replayResult(t, name, n); pending != 0 || !slices.Equal(errs, []string{"handler failed"}) {
+		t.Fatalf("ReplayResult after both = %d pending, errors %v; want 0 and [handler failed]", pending, errs)
+	}
+	if got := s.pendingReplays(t, name); len(got) != 0 {
+		t.Errorf("PendingReplays after both finished = %+v, want none", got)
+	}
+}
+
+func (s *storeAcceptance) replayFinishFenced(t *testing.T) {
+	name := s.replayProjection(t)
+	n := s.requestReplay(t, name, "order-1")
+	err := s.store.(projection.DeadLetterStore).FinishReplay(t.Context(), s.lease(name, 0, other), n, "")
+	if !errors.Is(err, projection.ErrClaimLost) {
+		t.Fatalf("FinishReplay by an owner without the claim: got %v, want ErrClaimLost", err)
+	}
+	if pending, _ := s.replayResult(t, name, n); pending != 2 {
+		t.Fatalf("ReplayResult after a refused FinishReplay = %d pending, want 2", pending)
+	}
+}
+
+func (s *storeAcceptance) replayNumbersIncrease(t *testing.T) {
+	name := s.replayProjection(t)
+	first := s.requestReplay(t, name, "order-1")
+	second := s.requestReplay(t, name, "order-1")
+	if second <= first {
+		t.Fatalf("second RequestReplay returned %d after %d, want a higher number", second, first)
+	}
+	if got := s.pendingReplays(t, name); len(got) != 4 {
+		t.Fatalf("PendingReplays = %+v, want both requests on segments 0 and 2", got)
+	}
+}
+
+func (s *storeAcceptance) replayClearedByReset(t *testing.T) {
+	name := s.replayProjection(t)
+	n := s.requestReplay(t, name, "order-1")
+	if err := s.store.Reset(t.Context(), s.lease(name, 0, owner), 2, nop); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if got := s.pendingReplays(t, name); len(got) != 0 {
+		t.Errorf("PendingReplays after Reset = %+v, want none", got)
+	}
+	if pending, errs := s.replayResult(t, name, n); pending != 0 || len(errs) != 0 {
+		t.Errorf("ReplayResult after Reset = %d pending, errors %v; want nothing pending", pending, errs)
+	}
+	if err := s.store.(projection.DeadLetterStore).FinishReplay(t.Context(), s.lease(name, 0, owner), n, ""); err != nil {
+		t.Errorf("FinishReplay of a request Reset deleted: %v, want nil", err)
+	}
+}
+
+// replayProjection declares a projection of three segments, all claimed by
+// owner, with dead letters of order-1 in segments 0 and 2 and of order-2
+// in segment 1.
+func (s *storeAcceptance) replayProjection(t *testing.T) string {
+	t.Helper()
+	name := s.newProjection(t, 3)
+	for seg := range 3 {
+		s.claim(t, name, seg, owner, longTTL)
+	}
+	letter := func(stream string) projection.DeadLetter {
+		return projection.DeadLetter{Position: 1, StreamID: stream, EventType: "projectiontest.Event", Error: "boom"}
+	}
+	s.saveDeadLetters(t, name, 0, letter("order-1"))
+	s.saveDeadLetters(t, name, 1, letter("order-2"))
+	s.saveDeadLetters(t, name, 2, letter("order-1"))
+	return name
+}
+
+func (s *storeAcceptance) requestReplay(t *testing.T, name, streamID string) uint64 {
+	t.Helper()
+	n, err := s.store.(projection.DeadLetterStore).RequestReplay(t.Context(), name, streamID)
+	if err != nil {
+		t.Fatalf("RequestReplay(%s): %v", streamID, err)
+	}
+	return n
+}
+
+func (s *storeAcceptance) pendingReplays(t *testing.T, name string) []projection.Replay {
+	t.Helper()
+	got, err := s.store.(projection.DeadLetterStore).PendingReplays(t.Context(), name)
+	if err != nil {
+		t.Fatalf("PendingReplays: %v", err)
+	}
+	return got
+}
+
+func (s *storeAcceptance) replayResult(t *testing.T, name string, n uint64) (int, []string) {
+	t.Helper()
+	pending, errs, err := s.store.(projection.DeadLetterStore).ReplayResult(t.Context(), name, n)
+	if err != nil {
+		t.Fatalf("ReplayResult(%d): %v", n, err)
+	}
+	return pending, errs
 }
 
 func (s *storeAcceptance) saveDeadLetters(t *testing.T, name string, segment int, ds ...projection.DeadLetter) {

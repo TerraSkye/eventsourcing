@@ -234,9 +234,10 @@ type Store interface {
 	// segment's claim except l's, so an instance still working one gets
 	// [ErrClaimLost] on its next Commit instead of writing into the wiped
 	// read model, and claims it again at the new checkpoint. A store that
-	// implements [DeadLetterStore] also deletes every dead letter of the
-	// projection in that unit of work: the replay runs each event through
-	// the handler again, and records the ones that still fail afresh.
+	// implements [DeadLetterStore] also deletes every dead letter and
+	// replay request of the projection in that unit of work: the replay
+	// runs each event through the handler again, and records the ones that
+	// still fail afresh.
 	// Reset waits for Commits already in progress to finish, so none of
 	// their writes lands after wipe. It is fenced on l like Commit.
 	Reset(ctx context.Context, l Lease, newVersion int, wipe func(ctx context.Context) error) error
@@ -343,4 +344,44 @@ type DeadLetterStore interface {
 	// segment l. It is called inside the Commit that applies the event
 	// again, and ctx carries that Commit's unit of work.
 	DeleteDeadLetter(ctx context.Context, l Lease, position uint64) error
+
+	// RequestReplay asks for the dead letters of streamID in the
+	// projection name to be applied again, wherever their segments run;
+	// see [Runner.ReplayStream]. It records the request for each segment
+	// that holds dead letters of the stream, and returns the request's
+	// number, unique in the store and higher than any before it. A stream
+	// without dead letters gets a number with nothing pending. It returns
+	// [ErrUnknownProjection] when no runner has declared name.
+	RequestReplay(ctx context.Context, name, streamID string) (uint64, error)
+
+	// PendingReplays returns the replay requests of the projection name
+	// that a segment has not tried yet, one per segment, ordered by
+	// Number and then by Segment.
+	PendingReplays(ctx context.Context, name string) ([]Replay, error)
+
+	// FinishReplay records that segment l.Segment tried request number,
+	// with errMsg the error it failed with, or "" when every dead letter
+	// applied. When l is not the segment's current claim it changes
+	// nothing and returns [ErrClaimLost]. A request Reset deleted is not
+	// an error.
+	FinishReplay(ctx context.Context, l Lease, number uint64, errMsg string) error
+
+	// ReplayResult reports request number of the projection name: how many
+	// of its segments have not tried it yet, and the errors of those that
+	// tried and failed, ordered by segment. A request Reset deleted, or
+	// one never made, has nothing pending.
+	ReplayResult(ctx context.Context, name string, number uint64) (pending int, errs []string, err error)
+}
+
+// Replay is a request to apply a stream's dead letters again on one
+// segment, as returned by [DeadLetterStore.PendingReplays].
+type Replay struct {
+	// Number identifies the request; see [DeadLetterStore.RequestReplay].
+	Number uint64
+
+	// StreamID is the stream whose dead letters to apply.
+	StreamID string
+
+	// Segment is the segment that holds them.
+	Segment int
 }

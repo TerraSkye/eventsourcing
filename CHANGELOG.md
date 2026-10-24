@@ -9,6 +9,14 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `projection.DeadLetterStore` has four new methods, `RequestReplay`,
+  `PendingReplays`, `FinishReplay` and `ReplayResult`, which keep
+  `Runner.ReplayStream` requests in the store. Stores outside this
+  module must implement them, and `StoreAcceptanceTest` checks them. The
+  Postgres and SQLite schemas add the `projection_replays` and
+  `projection_replay_segments` tables. `projection.ErrNotActive` is
+  removed: `ReplayStream` no longer needs a segment on the instance it
+  is called on.
 - The telemetry wrapper types drop the package name they repeated:
   `telemetry.TelemetryEventBus` is `telemetry.EventBus`,
   `telemetry.TelemetryStore` is `telemetry.EventStore` and
@@ -66,6 +74,14 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- `Runner.ReplayStream` only replayed the segments the instance it was
+  called on held, and returned nil when the stream's segment was on
+  another instance, leaving the stream parked. With segments spread
+  over N instances that was most calls. The request now goes through
+  the store, the instance holding each segment with dead letters of the
+  stream serves it, and `ReplayStream` waits for all of them and returns
+  their errors. It works from any process with the store, even one not
+  running the projection.
 - A one-off store or log error while `Runner.Run` started (reading the
   head, `Declare` or the first heartbeat) ended `Run`, while the same
   error later was tolerated. `Run` now tries the start again with the
