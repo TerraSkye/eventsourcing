@@ -9,6 +9,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- The telemetry wrapper types drop the package name they repeated:
+  `telemetry.TelemetryEventBus` is `telemetry.EventBus`,
+  `telemetry.TelemetryStore` is `telemetry.EventStore` and
+  `telemetry.TelemetryProjectionStore` is `telemetry.ProjectionStore`.
+  The `With…Telemetry` constructors keep their names.
 - `projection.NewProbe` takes a `projection.ProbeDefinition`, as
   `NewRunner` takes a `Definition`, instead of a name and options:
   `NewProbe(projection.ProbeDefinition{Name: "task-list", PollInterval: 50 * time.Millisecond}, store)`.

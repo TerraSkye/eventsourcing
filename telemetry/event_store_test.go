@@ -11,7 +11,7 @@ import (
 )
 
 // TestSave_ConcurrentCallsSharingMetadataMapRace verifies that
-// TelemetryStore.Save clones each Envelope's Metadata map before stamping
+// EventStore.Save clones each Envelope's Metadata map before stamping
 // trace-propagation headers into it, rather than mutating the
 // caller-supplied map in place (events[i].Metadata["traceparent"] = ...). Callers
 // commonly build one "base" metadata map once (e.g. a tenant or request ID)
@@ -95,10 +95,10 @@ func (s *stubStore) Head(context.Context) (uint64, error) {
 
 func (s *stubStore) Close() error { return nil }
 
-// TestTelemetryStore_ReadAll forwards ReadAll and Head to a wrapped
+// TestEventStore_ReadAll forwards ReadAll and Head to a wrapped
 // GlobalReader unchanged, passes its errors through, and does not implement
 // GlobalReader itself for a store that cannot read the global log.
-func TestTelemetryStore_ReadAll(t *testing.T) {
+func TestEventStore_ReadAll(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubStore{}
 	for i := 1; i <= 3; i++ {
@@ -147,7 +147,7 @@ func TestTelemetryStore_ReadAll(t *testing.T) {
 // TestWithEventStoreTelemetry_WithOperationIgnoredForSaveSpan verifies
 // WithEventStoreTelemetry's doc comment promise that "Options such as
 // [WithAttributes] and [WithOperation] customize the spans produced" holds
-// for TelemetryStore.Save's span, not just its hardcoded default name
+// for EventStore.Save's span, not just its hardcoded default name
 // "append eventstore".
 func TestWithEventStoreTelemetry_WithOperationIgnoredForSaveSpan(t *testing.T) {
 	const wantSpanName = "custom-save-operation"
@@ -218,7 +218,7 @@ func (s *closeTrackingStore) LoadStreamFrom(ctx context.Context, _ string, _ eve
 
 func (s *closeTrackingStore) Close() error { return nil }
 
-// TestTelemetryStore_ClosesUnderlyingIterator pins the ownership half of the
+// TestEventStore_ClosesUnderlyingIterator pins the ownership half of the
 // Load* contract: the instrumented iterator owns the one it wraps, so
 // closing it closes the underlying iterator exactly once — whether the
 // caller reads to the end or stops early.
@@ -227,7 +227,7 @@ func (s *closeTrackingStore) Close() error { return nil }
 // database cursor or an open read stream, and a caller that breaks out of
 // the loop (as cqrs.NewCommandHandler's retry loop can, via its deferred
 // Close) would otherwise leak it.
-func TestTelemetryStore_ClosesUnderlyingIterator(t *testing.T) {
+func TestEventStore_ClosesUnderlyingIterator(t *testing.T) {
 	load := map[string]func(eventsourcing.EventStore, context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error){
 		"LoadStream": func(s eventsourcing.EventStore, ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 			return s.LoadStream(ctx, "agg-1")

@@ -14,15 +14,15 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var _ eventsourcing.EventBus = (*TelemetryEventBus)(nil)
+var _ eventsourcing.EventBus = (*EventBus)(nil)
 
-// TelemetryEventBus wraps an [eventsourcing.EventBus], instrumenting every
+// EventBus wraps an [eventsourcing.EventBus], instrumenting every
 // subscription registered through it with OpenTelemetry tracing and metrics.
 // For each received event it starts a consumer span linked back to the
 // original producer trace, enabling end-to-end distributed tracing from
 // command execution through event processing. Construct one with
 // [WithEventBusTelemetry].
-type TelemetryEventBus struct {
+type EventBus struct {
 	next eventsourcing.EventBus
 	cfg  *config
 }
@@ -39,7 +39,7 @@ type TelemetryEventBus struct {
 //
 //	bus := telemetry.WithEventBusTelemetry(eventBus)
 //	err := bus.Subscribe(ctx, "order-projector", orderProjector)
-func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eventsourcing.EventHandler, options ...eventsourcing.SubscriberOption) error {
+func (t *EventBus) Subscribe(ctx context.Context, name string, next eventsourcing.EventHandler, options ...eventsourcing.SubscriberOption) error {
 
 	return t.next.Subscribe(ctx, name, eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		// Extract the original trace context from event metadata
@@ -113,41 +113,41 @@ func (t *TelemetryEventBus) Subscribe(ctx context.Context, name string, next eve
 
 // Use delegates to the underlying [eventsourcing.EventBus], adding
 // middlewares to the chain applied to its subscribers.
-func (t *TelemetryEventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
+func (t *EventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
 	t.next.Use(middlewares...)
 }
 
 // Errors returns the error channel from the underlying event bus. This
 // method delegates directly to the wrapped [eventsourcing.EventBus] without
 // additional instrumentation, since errors are already tracked at the
-// handler level in [TelemetryEventBus.Subscribe].
-func (t *TelemetryEventBus) Errors() <-chan error {
+// handler level in [EventBus.Subscribe].
+func (t *EventBus) Errors() <-chan error {
 	return t.next.Errors()
 }
 
 // Close closes the underlying event bus and waits for all handlers to
 // finish. This method delegates directly to the wrapped
 // [eventsourcing.EventBus] without additional instrumentation.
-func (t *TelemetryEventBus) Close() error {
+func (t *EventBus) Close() error {
 	return t.next.Close()
 }
 
-// WithEventBusTelemetry wraps next in a [TelemetryEventBus], instrumenting
+// WithEventBusTelemetry wraps next in an [EventBus], instrumenting
 // every subscription registered through it with OpenTelemetry tracing and
-// metrics. See [TelemetryEventBus.Subscribe] for what is recorded; options
+// metrics. See [EventBus.Subscribe] for what is recorded; options
 // such as [WithAttributes] and [WithOperation] customize the spans produced.
 //
 //	bus := telemetry.WithEventBusTelemetry(eventBus,
 //	    telemetry.WithAttributes(attribute.String("service", "orders")),
 //	)
 //	err := bus.Subscribe(ctx, "order-projector", handler)
-func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *TelemetryEventBus {
+func WithEventBusTelemetry(next eventsourcing.EventBus, options ...Option) *EventBus {
 	cfg := &config{}
 	for _, o := range options {
 		o.apply(cfg)
 	}
 
-	return &TelemetryEventBus{
+	return &EventBus{
 		next: next,
 		cfg:  cfg,
 	}

@@ -17,16 +17,16 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = TelemetryStore{}
+	_ eventsourcing.EventStore   = EventStore{}
 	_ eventsourcing.EventStore   = telemetryGlobalStore{}
 	_ eventsourcing.GlobalReader = telemetryGlobalStore{}
 )
 
-// TelemetryStore wraps an [eventsourcing.EventStore], instrumenting every
+// EventStore wraps an [eventsourcing.EventStore], instrumenting every
 // save and load operation with OpenTelemetry tracing and metrics and
 // injecting trace propagation headers into appended events' metadata.
 // Construct one with [WithEventStoreTelemetry].
-type TelemetryStore struct {
+type EventStore struct {
 	next eventsourcing.EventStore
 	cfg  *config
 }
@@ -34,7 +34,7 @@ type TelemetryStore struct {
 // baseAttrs returns the span attributes common to every operation: the
 // configured db.system attribute (defaulting to "eventsourcing") followed by
 // any other attributes from cfg.
-func (t TelemetryStore) baseAttrs() []attribute.KeyValue {
+func (t EventStore) baseAttrs() []attribute.KeyValue {
 	dbSystem := "eventsourcing"
 	for _, kv := range t.cfg.Attributes {
 		if string(kv.Key) == string(AttrDBSystem) {
@@ -54,10 +54,10 @@ func (t TelemetryStore) baseAttrs() []attribute.KeyValue {
 // client span tagged with the stream ID, the requested revision, and the
 // events' correlation and causation IDs. Before saving, it stamps each
 // event's Metadata with injected trace-propagation headers, so a later
-// [TelemetryEventBus] or event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
+// [EventBus] or event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
 // [EventsAppended] for every call, and [EventStoreErrors] if the underlying
 // store returns an error.
-func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
+func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	var streamID string
 	for _, event := range events {
 		streamID = event.StreamID
@@ -136,7 +136,7 @@ func (t TelemetryStore) Save(ctx context.Context, events []eventsourcing.Envelop
 // iterator, ends the span, and records [EventStoreDuration], or
 // [EventStoreErrors] if the load failed. A caller that stops early is
 // therefore instrumented like any other, provided it closes the iterator.
-func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	src, err := t.next.LoadStream(ctx, id)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
@@ -193,10 +193,10 @@ func (t TelemetryStore) LoadStream(ctx context.Context, id string) (*eventsourci
 }
 
 // LoadStreamFrom loads stream id from version onward from the underlying
-// [eventsourcing.EventStore]. It behaves like [TelemetryStore.LoadStream],
+// [eventsourcing.EventStore]. It behaves like [EventStore.LoadStream],
 // additionally tagging the span with the requested version and, once the
 // iterator closes, with the number of events yielded.
-func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	src, err := t.next.LoadStreamFrom(ctx, id, version)
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
@@ -249,12 +249,12 @@ func (t TelemetryStore) LoadStreamFrom(ctx context.Context, id string, version e
 		}), nil
 }
 
-// telemetryGlobalStore is a [TelemetryStore] around a store that also
+// telemetryGlobalStore is an [EventStore] around a store that also
 // implements [eventsourcing.GlobalReader]. [WithEventStoreTelemetry] returns
 // one in that case, so the wrapper reads the global log exactly when the
 // wrapped store can.
 type telemetryGlobalStore struct {
-	TelemetryStore
+	EventStore
 	reader eventsourcing.GlobalReader
 }
 
@@ -305,13 +305,13 @@ func (t telemetryGlobalStore) Head(ctx context.Context) (uint64, error) {
 
 // Close closes the underlying [eventsourcing.EventStore]. It delegates
 // directly, without additional instrumentation.
-func (t TelemetryStore) Close() error {
+func (t EventStore) Close() error {
 	return t.next.Close()
 }
 
-// WithEventStoreTelemetry wraps next in a [TelemetryStore], instrumenting
+// WithEventStoreTelemetry wraps next in an [EventStore], instrumenting
 // every save and load with OpenTelemetry tracing and metrics as described on
-// [TelemetryStore]. Options such as [WithAttributes] and [WithOperation]
+// [EventStore]. Options such as [WithAttributes] and [WithOperation]
 // customize the spans produced.
 //
 // If next also implements [eventsourcing.GlobalReader], so does the returned
@@ -322,9 +322,9 @@ func WithEventStoreTelemetry(next eventsourcing.EventStore, options ...Option) e
 	for _, o := range options {
 		o.apply(cfg)
 	}
-	store := TelemetryStore{next: next, cfg: cfg}
+	store := EventStore{next: next, cfg: cfg}
 	if reader, ok := next.(eventsourcing.GlobalReader); ok {
-		return telemetryGlobalStore{TelemetryStore: store, reader: reader}
+		return telemetryGlobalStore{EventStore: store, reader: reader}
 	}
 	return store
 }
