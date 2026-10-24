@@ -167,13 +167,36 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *busSubscriber) {
 	}
 }
 
+// busStatementGrace is how long the bus's own statements may still run
+// once a subscriber's ctx is done; see detach.
+const busStatementGrace = 5 * time.Second
+
+// detach returns the context the bus runs its own statements under for a
+// subscriber whose context is ctx. Close cancels ctx, but a statement the
+// bus has started must still finish: the position write for an event the
+// handler already handled, or the event is delivered again; and a
+// cancelled statement makes database/sql drop its connection, which with
+// the single connection Open keeps throws a ":memory:" database away. The
+// returned context ends busStatementGrace after ctx does, so a hung
+// database cannot hold Close forever. Call cancel when done.
+func detach(ctx context.Context) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(busStatementGrace, cancel) })
+	return dctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 // ensureSubscription inserts a position for s if it has none.
 func (b *EventBus) ensureSubscription(ctx context.Context, s *busSubscriber) error {
 	start := int64(0)
 	if s.opts.startFrom != nil {
 		start = *s.opts.startFrom
 	}
-	_, err := b.db.ExecContext(ctx,
+	dctx, cancel := detach(ctx)
+	defer cancel()
+	_, err := b.db.ExecContext(dctx,
 		"INSERT INTO event_subscriptions (name, position) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
 		s.name, start,
 	)
@@ -182,11 +205,19 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *busSubscriber) err
 
 // poll delivers the events after s's position, in id order, and moves the
 // position past each event its handler accepted. It stops at the first
-// handler failure, leaving the position before the failing event.
+// handler failure, leaving the position before the failing event, and
+// before the next event once ctx is done. The handlers get ctx; the bus's
+// own statements run under detach(ctx), so once a handler has handled an
+// event its position is stored even when Close lands meanwhile.
 func (b *EventBus) poll(ctx context.Context, s *busSubscriber) error {
+	dctx, cancel := detach(ctx)
+	defer cancel()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var pos int64
-		if err := b.db.QueryRowContext(ctx,
+		if err := b.db.QueryRowContext(dctx,
 			"SELECT position FROM event_subscriptions WHERE name = ?", s.name,
 		).Scan(&pos); err != nil {
 			return err
@@ -205,19 +236,22 @@ func (b *EventBus) poll(ctx context.Context, s *busSubscriber) error {
 
 		// Read the whole batch first, so the connection is free while the
 		// handlers run.
-		envs, err := queryEnvelopes(ctx, b.db, query, args...)
+		envs, err := queryEnvelopes(dctx, b.db, query, args...)
 		if err != nil {
 			return err
 		}
 
 		for _, env := range envs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, env), env.Event); err != nil {
 				var skipped *cqrs.SkippedEventError
 				if !errors.As(err, &skipped) {
 					return fmt.Errorf("handle %s: %w", env.Event.EventType(), err)
 				}
 			}
-			if _, err := b.db.ExecContext(ctx,
+			if _, err := b.db.ExecContext(dctx,
 				"UPDATE event_subscriptions SET position = ? WHERE name = ? AND position < ?",
 				int64(env.GlobalPosition), s.name, int64(env.GlobalPosition),
 			); err != nil {

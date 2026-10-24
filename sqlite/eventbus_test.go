@@ -229,3 +229,58 @@ func TestEventBus_CloseIsIdempotent(t *testing.T) {
 		t.Fatal("Subscribe after Close succeeded, want an error")
 	}
 }
+
+// closingHandler records events and, on the event numbered at, signals
+// reached and then blocks until its ctx is done, as a handler still busy
+// with an event when Close lands would, before it returns nil.
+type closingHandler struct {
+	recorder
+	at      int
+	reached chan struct{}
+	seen    int
+}
+
+func (h *closingHandler) Handle(ctx context.Context, e cqrs.Event) error {
+	if err := h.recorder.Handle(ctx, e); err != nil {
+		return err
+	}
+	h.seen++
+	if h.seen == h.at {
+		close(h.reached)
+		<-ctx.Done()
+	}
+	return nil
+}
+
+// TestEventBus_CloseDuringHandlerStoresPosition covers Close landing while
+// a handler is busy with an event (#181): the handler finishes, its
+// position is still stored, the bus delivers nothing after it, and the
+// ":memory:" database the bus shares survives the cancellation.
+func TestEventBus_CloseDuringHandlerStoresPosition(t *testing.T) {
+	db := openDB(t, ":memory:")
+	store := sqlite.NewEventStore(db)
+	appendEvents(t, store, "task-1", &taskCreated{ID: "1"}, &taskDone{ID: "1"}, &taskCreated{ID: "1"})
+
+	bus := sqlite.NewEventBus(db, 10*time.Millisecond)
+	h := &closingHandler{at: 2, reached: make(chan struct{})}
+	if err := bus.Subscribe(t.Context(), "sub", h); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	select {
+	case <-h.reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never reached the second event")
+	}
+	bus.Close()
+
+	var pos int64
+	if err := db.QueryRowContext(t.Context(), "SELECT position FROM event_subscriptions WHERE name = 'sub'").Scan(&pos); err != nil {
+		t.Fatalf("read position after Close: %v", err)
+	}
+	if pos != 2 {
+		t.Fatalf("stored position after Close = %d, want 2: the event the handler finished", pos)
+	}
+	if n := h.count(); n != 2 {
+		t.Fatalf("handler received %d events, want 2: none after Close", n)
+	}
+}

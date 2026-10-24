@@ -251,13 +251,34 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 	}
 }
 
+// busStatementGrace is how long the bus's own statements may still run
+// once a subscriber's ctx is done; see detach.
+const busStatementGrace = 5 * time.Second
+
+// detach returns the context the bus runs its own statements under for a
+// subscriber whose context is ctx. Close cancels ctx, but a poll already
+// under way must still commit the position of the events its handler
+// handled, or they are all delivered again. The returned context ends
+// busStatementGrace after ctx does, so a hung database cannot hold Close
+// forever. Call cancel when done.
+func detach(ctx context.Context) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(busStatementGrace, cancel) })
+	return dctx, func() {
+		stop()
+		cancel()
+	}
+}
+
 // ensureSubscription inserts a subscription record if one does not already exist.
 func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error {
 	defaultPos := int64(0)
 	if s.opts.startFrom != nil {
 		defaultPos = *s.opts.startFrom
 	}
-	_, err := b.pool.Exec(ctx,
+	dctx, cancel := detach(ctx)
+	defer cancel()
+	_, err := b.pool.Exec(dctx,
 		"INSERT INTO event_subscriptions (name, position) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
 		s.name, defaultPos,
 	)
@@ -280,19 +301,28 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error 
 // batch (including any events already handled successfully earlier in this
 // call) is retried on the next poll.
 //
+// Once ctx is done, poll handles no further event but still commits the
+// position of those already handled: the handlers get ctx, while the
+// transaction runs under detach(ctx), so Close does not roll it back.
+//
 // The locking transaction runs on b.lockPool, not b.pool: it is held open for the
 // entire call, including every s.handler.Handle() invocation, and Handle() typically
 // needs its own connection from b.pool. Keeping the two pools separate avoids a
 // deadlock between poll()'s held connections and handlers' connections.
 func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
-	tx, err := b.lockPool.Begin(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dctx, cancel := detach(ctx)
+	defer cancel()
+	tx, err := b.lockPool.Begin(dctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(dctx)
 
 	var pos int64
-	err = tx.QueryRow(ctx,
+	err = tx.QueryRow(dctx,
 		"SELECT position FROM event_subscriptions WHERE name = $1 FOR UPDATE SKIP LOCKED",
 		s.name,
 	).Scan(&pos)
@@ -316,13 +346,16 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 	}
 	query += " ORDER BY id ASC LIMIT 100"
 
-	rows, err := tx.Query(ctx, query, args...)
+	rows, err := tx.Query(dctx, query, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
+		if ctx.Err() != nil {
+			break // commit what was handled; the rest waits for the next poll
+		}
 		env, err := scanEnvelope(rows)
 		if err != nil {
 			return err
@@ -338,18 +371,19 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 		pos = int64(env.GlobalPosition)
 	}
 
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	if _, err := tx.Exec(ctx,
+	if _, err := tx.Exec(dctx,
 		"UPDATE event_subscriptions SET position = $1 WHERE name = $2",
 		pos, s.name,
 	); err != nil {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit(dctx)
 }
 
 // listenReconnectDelay is how long listen waits before retrying after the

@@ -74,6 +74,15 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- Closing a Postgres or SQLite `EventBus` while a handler was busy with
+  an event lost that event's position, so the next bus delivered it
+  again: the bus wrote positions with the subscriber's context, which
+  `Close` cancels. On Postgres a whole batch of up to 100 events was
+  rolled back. On SQLite the cancelled statement also made
+  `database/sql` drop the one connection `Open` keeps, which threw a
+  `:memory:` database away. The bus now runs its own statements under a
+  context `Close` does not cancel, for up to five seconds, and handles
+  no further event once closed (#181).
 - `Runner.ReplayStream` only replayed the segments the instance it was
   called on held, and returned nil when the stream's segment was on
   another instance, leaving the stream parked. With segments spread

@@ -129,6 +129,64 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 	}
 }
 
+// TestSubscribe_CloseDuringHandlerCommitsPosition covers Close landing
+// while a handler is busy with the second of three events in one batch
+// (#181): the handler finishes, the position of the two events handled is
+// committed rather than rolled back, and the third is left for later.
+func TestSubscribe_CloseDuringHandlerCommitsPosition(t *testing.T) {
+	pool := newPool(t)
+	store := postgres.NewEventStore(pool)
+	ctx := context.Background()
+	if _, err := store.Save(ctx, []cqrs.Envelope{
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
+	}, cqrs.Any{}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var (
+		mu      sync.Mutex
+		seen    int
+		reached = make(chan struct{})
+	)
+	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+		mu.Lock()
+		seen++
+		n := seen
+		mu.Unlock()
+		if n == 2 {
+			// Still busy with this event when Close lands.
+			close(reached)
+			<-ctx.Done()
+		}
+		return nil
+	})
+	bus := postgres.NewEventBus(pool, 20*time.Millisecond)
+	if err := bus.Subscribe(ctx, "closing-sub", handler); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never reached the second event")
+	}
+	bus.Close() //nolint:errcheck
+
+	var pos int64
+	if err := pool.QueryRow(ctx, "SELECT position FROM event_subscriptions WHERE name = 'closing-sub'").Scan(&pos); err != nil {
+		t.Fatalf("read position: %v", err)
+	}
+	if pos != 2 {
+		t.Fatalf("stored position after Close = %d, want 2: the events the handler finished", pos)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != 2 {
+		t.Fatalf("handler received %d events, want 2: none after Close", seen)
+	}
+}
+
 // TestSubscribe_IgnoresInFlightTransactions verifies that the eventbus poller
 // never delivers an event that would skip a gap left by an uncommitted
 // transaction.
