@@ -39,6 +39,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -421,7 +422,10 @@ func busiest(ctx context.Context, store projection.Store, name string, pool []*w
 	held := map[string]int{}
 	if statuses, err := store.LoadStatuses(ctx, name); err == nil {
 		for _, st := range statuses {
-			held[st.Owner]++
+			// A runner appends a random part to the worker's name.
+			if i := strings.LastIndexByte(st.Owner, '/'); i >= 0 {
+				held[st.Owner[:i]]++
+			}
 		}
 	}
 	w := pool[rand.IntN(len(pool))]
@@ -434,8 +438,9 @@ func busiest(ctx context.Context, store projection.Store, name string, pool []*w
 }
 
 // crashableStore is a worker's view of the projection store. Once the
-// worker has crashed, its runners' Release calls are lost, as a process
-// that died would never send them.
+// worker has crashed, its runners' Release calls and the heartbeat they
+// leave the instances with are lost, as a process that died would never
+// send them: its claims and its instance rows stay until they expire.
 type crashableStore struct {
 	projection.Store
 	crashed atomic.Bool
@@ -446,4 +451,11 @@ func (s *crashableStore) Release(ctx context.Context, l projection.Lease) error 
 		return nil
 	}
 	return s.Store.Release(ctx, l)
+}
+
+func (s *crashableStore) Heartbeat(ctx context.Context, name, owner string, version int, ttl time.Duration) ([]projection.Instance, error) {
+	if ttl == 0 && s.crashed.Load() {
+		return nil, nil
+	}
+	return s.Store.Heartbeat(ctx, name, owner, version, ttl)
 }
