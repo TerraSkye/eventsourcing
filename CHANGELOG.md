@@ -7,6 +7,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Runner.ReplayStream` returns an error a segment on its own instance
+  failed with as it was, so `errors.Is` and `errors.As` work on it, as
+  they did before 0.4.0. Only an error from a segment on another
+  instance comes back as its text.
+
 ## [0.4.0] - 2026-10-24
 
 ### Breaking

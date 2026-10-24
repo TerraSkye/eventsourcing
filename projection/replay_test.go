@@ -2,6 +2,7 @@ package projection_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -121,6 +122,28 @@ func TestRunner_ReplayStreamReportsRemoteError(t *testing.T) {
 	}
 	if letters, err := ps.LoadDeadLetters(t.Context(), "replay", seg); err != nil || len(letters) == 0 {
 		t.Fatalf("dead letters of s1 after a failed replay = %+v, %v; want s1 still parked", letters, err)
+	}
+}
+
+// TestRunner_ReplayStreamKeepsLocalError covers a replay served on the
+// instance that called ReplayStream, while the handler still fails: the
+// call returns the handler's error itself, not only its text.
+func TestRunner_ReplayStreamKeepsLocalError(t *testing.T) {
+	es, ps, h := &testStore{}, memory.NewProjectionStore(), &streamLog{}
+	a, b, seg := parkOnTwoInstances(t, h, es, ps)
+	sts, err := ps.LoadStatuses(t.Context(), "replay")
+	if err != nil {
+		t.Fatalf("LoadStatuses: %v", err)
+	}
+	caller := a
+	if sts[seg].Owner == b.Owner() {
+		caller = b
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := caller.ReplayStream(ctx, "s1"); !errors.Is(err, errBoom) {
+		t.Fatalf("ReplayStream on the instance with s1's segment = %v, want errBoom", err)
 	}
 }
 

@@ -848,6 +848,9 @@ func TestRunner_EventTypesChangeWithoutResetStalls(t *testing.T) {
 
 // streamLog records the events it applies as "stream:type", and fails
 // TaskCreated on stream "s1" while failing is set.
+// errBoom is the error streamLog fails with.
+var errBoom = errors.New("boom")
+
 type streamLog struct {
 	mu      sync.Mutex
 	applied []string
@@ -857,7 +860,7 @@ type streamLog struct {
 func (l *streamLog) Handle(ctx context.Context, e eventsourcing.Event) error {
 	stream := eventsourcing.StreamIDFromContext(ctx)
 	if _, ok := e.(*taskCreated); ok && stream == "s1" && l.failing.Load() {
-		return errors.New("boom")
+		return errBoom
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
