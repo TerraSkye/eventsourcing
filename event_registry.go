@@ -16,49 +16,72 @@ var (
 
 	// registryMu protects access to the registry for concurrent operations.
 	registryMu sync.RWMutex
-
-	// RegisterEventByType registers fn under the type name of the [Event] it
-	// returns, i.e. fn().EventType(). Use this instead of [RegisterEvent]
-	// when you need explicit control over the factory, for example to
-	// inject constructor arguments. It panics if fn is nil, if fn() returns
-	// nil, or if an event is already registered under that name.
-	//
-	// Example Usage:
-	//   RegisterEventByType(func() Event { return &InventoryChanged{} })
-	RegisterEventByType func(fn func() Event) = func(fn func() Event) {
-		registerEventNameDefault(fn().EventType(), fn)
-	}
-
-	// RegisterEventByName registers fn under name, independently of the
-	// event's own EventType() — useful when the name a store has events
-	// persisted under no longer matches the current type name, for example
-	// after a rename. As with [RegisterEventByType], it panics if fn is nil,
-	// if fn() returns nil, or if name is already registered.
-	//
-	// Example Usage:
-	//   RegisterEventByName("CustomEventName", func() Event { return &InventoryChanged{} })
-	RegisterEventByName func(name string, fn func() Event) = func(name string, fn func() Event) {
-		registerEventNameDefault(name, fn)
-	}
-
-	// NewEventByName returns a new instance of the [Event] registered under
-	// name, or a non-nil [ErrEventNotRegistered] if no event is registered
-	// under that name.
-	//
-	// Example Usage:
-	//   ev, err := NewEventByName("InventoryChanged")
-	NewEventByName func(name string) (Event, error) = newEventByNameDefault
-
-	// EventNamesFor returns every name event's concrete type is registered
-	// under, regardless of which [RegisterEvent]/[RegisterEventByType]/
-	// [RegisterEventByName] call added each one.
-	EventNamesFor func(event Event) []string = func(event Event) []string {
-		registryMu.RLock()
-		defer registryMu.RUnlock()
-
-		return typeToNames[eventTypeKey(event)]
-	}
 )
+
+// RegisterEventByType registers fn under the type name of the [Event] it
+// returns, i.e. fn().EventType(). Use this instead of [RegisterEvent]
+// when you need explicit control over the factory, for example to
+// inject constructor arguments. It panics if fn is nil, if fn() returns
+// nil, or if an event is already registered under that name.
+//
+// Example Usage:
+//
+//	RegisterEventByType(func() Event { return &InventoryChanged{} })
+func RegisterEventByType(fn func() Event) {
+	if fn == nil {
+		panic("cannot register nil factory")
+	}
+	ev := fn()
+	if ev == nil {
+		panic("factory returned nil")
+	}
+	registerEventName(ev.EventType(), fn)
+}
+
+// RegisterEventByName registers fn under name, independently of the
+// event's own EventType() — useful when the name a store has events
+// persisted under no longer matches the current type name, for example
+// after a rename. As with [RegisterEventByType], it panics if fn is nil,
+// if fn() returns nil, or if name is already registered.
+//
+// Example Usage:
+//
+//	RegisterEventByName("CustomEventName", func() Event { return &InventoryChanged{} })
+func RegisterEventByName(name string, fn func() Event) {
+	registerEventName(name, fn)
+}
+
+// NewEventByName returns a new instance of the [Event] registered under
+// name, or a non-nil [ErrEventNotRegistered] if no event is registered
+// under that name.
+//
+// Example Usage:
+//
+//	ev, err := NewEventByName("InventoryChanged")
+func NewEventByName(name string) (Event, error) {
+	registryMu.RLock()
+	factory, ok := registry[name]
+	registryMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrEventNotRegistered, name)
+	}
+	ev := factory()
+	if ev == nil {
+		return nil, fmt.Errorf("factory returned nil for event: %s", name)
+	}
+	return ev, nil
+}
+
+// EventNamesFor returns every name event's concrete type is registered
+// under, regardless of which [RegisterEvent]/[RegisterEventByType]/
+// [RegisterEventByName] call added each one.
+func EventNamesFor(event Event) []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	return typeToNames[eventTypeKey(event)]
+}
 
 // eventPtr constrains PT to a pointer to T that implements [Event], letting
 // [RegisterEvent] recover T from PT and mint new(T) itself, rather than
@@ -84,10 +107,9 @@ func RegisterEvent[T any, PT eventPtr[T]](_ PT) {
 	})
 }
 
-// registerEventNameDefault is the internal implementation for registering an event under a name.
-//
-// It validates the factory function, ensures uniqueness, and stores the factory.
-func registerEventNameDefault(name string, fn func() Event) {
+// registerEventName validates fn, ensures name is not yet taken, and stores
+// fn under it.
+func registerEventName(name string, fn func() Event) {
 	if fn == nil {
 		panic("cannot register nil factory")
 	}
@@ -112,25 +134,6 @@ func registerEventNameDefault(name string, fn func() Event) {
 
 	key := eventTypeKey(ev)
 	typeToNames[key] = append(typeToNames[key], name)
-}
-
-// newEventByNameDefault is the internal implementation of NewEventByName.
-//
-// It retrieves the factory for the given name and returns a new instance.
-// Returns an error if the event is not registered or the factory returns nil.
-func newEventByNameDefault(name string) (Event, error) {
-	registryMu.RLock()
-	factory, ok := registry[name]
-	registryMu.RUnlock()
-
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrEventNotRegistered, name)
-	}
-	ev := factory()
-	if ev == nil {
-		return nil, fmt.Errorf("factory returned nil for event: %s", name)
-	}
-	return ev, nil
 }
 
 // eventTypeKey returns the key typeToNames uses for event's concrete type,

@@ -7,6 +7,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Breaking
+
+- `RegisterEventByType`, `RegisterEventByName`, `NewEventByName` and
+  `EventNamesFor` are functions instead of package-level `var`s, so
+  they can no longer be reassigned. Calls to them are unchanged.
+
 ## [0.4.1] - 2026-10-24
 
 ### Changed

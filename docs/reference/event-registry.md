@@ -23,7 +23,7 @@ eventsourcing.RegisterEvent(&events.TaskCreated{})
 ### RegisterEventByType
 
 ```go
-var RegisterEventByType func(fn func() Event)
+func RegisterEventByType(fn func() Event)
 ```
 
 Registers using a factory function. Equivalent to `RegisterEvent` but with explicit factory control:
@@ -37,7 +37,7 @@ eventsourcing.RegisterEventByType(func() eventsourcing.Event {
 ### RegisterEventByName
 
 ```go
-var RegisterEventByName func(name string, fn func() Event)
+func RegisterEventByName(name string, fn func() Event)
 ```
 
 Registers under a custom name, independent of `EventType()`. Useful for migration when stored event names differ from current type names.
@@ -54,7 +54,7 @@ A single Go type can be registered under multiple names.
 ### NewEventByName
 
 ```go
-var NewEventByName func(name string) (Event, error)
+func NewEventByName(name string) (Event, error)
 ```
 
 Creates a new instance of a registered event by name. Returns `ErrEventNotRegistered` if not found.
@@ -70,7 +70,7 @@ created := ev.(*events.TaskCreated)
 ### EventNamesFor
 
 ```go
-var EventNamesFor func(event Event) []string
+func EventNamesFor(event Event) []string
 ```
 
 Returns all names under which the given event type is registered.
@@ -86,7 +86,6 @@ Used internally by `EventGroupProcessor.StreamFilter()`.
 
 ## Behaviour notes
 
-- `RegisterEventByType`, `RegisterEventByName`, `NewEventByName`, and `EventNamesFor` are **package-level variables** and can be replaced in tests to inject alternative implementations. `RegisterEvent` is a generic function and cannot be replaced this way — swap `RegisterEventByType` instead if you need to intercept registration.
 - Registration **panics** on nil factory, nil result, empty name, or duplicate name.
 - The registry is protected by a `sync.RWMutex` and is safe for concurrent reads.
 - Register all events at startup (typically in `init()` functions or `main()`).
