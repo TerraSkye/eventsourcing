@@ -422,6 +422,41 @@ func (s *ProjectionStore) Rebuilds(ctx context.Context, name string) (requested,
 	return uint64(r), uint64(d), nil
 }
 
+// FailRebuild implements [projection.Store], fenced on l in the same
+// transaction.
+func (s *ProjectionStore) FailRebuild(ctx context.Context, l projection.Lease, requested uint64, errMsg string) error {
+	return s.runTx(ctx, "fail rebuild", l.Name, func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := ownedPosition(ctx, tx, l); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE projection_rebuilds SET failed = ?2, error = ?3 WHERE name = ?1 AND failed <= ?2`,
+			l.Name, int64(requested), errMsg,
+		); err != nil {
+			return fmt.Errorf("sqlite: fail rebuild %d of %q: %w", requested, l.Name, err)
+		}
+		return nil
+	})
+}
+
+// RebuildFailure implements [projection.Store].
+func (s *ProjectionStore) RebuildFailure(ctx context.Context, name string) (failed uint64, errMsg string, err error) {
+	var (
+		f   int64
+		msg sql.NullString
+	)
+	err = s.db.QueryRowContext(ctx,
+		`SELECT failed, error FROM projection_rebuilds WHERE name = ?`, name,
+	).Scan(&f, &msg)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", nil
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("sqlite: read rebuild failure of %q: %w", name, err)
+	}
+	return uint64(f), msg.String, nil
+}
+
 // SaveDeadLetter implements [projection.DeadLetterStore]. It is called
 // inside the Commit that moves the checkpoint past the event.
 func (s *ProjectionStore) SaveDeadLetter(ctx context.Context, l projection.Lease, d projection.DeadLetter) error {

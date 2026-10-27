@@ -396,9 +396,10 @@ func (r *Runner) startOnce(ctx context.Context) error {
 // with [Store.RequestRebuild], without running the projection.
 //
 // When the reset fails, the request stays pending and segment 0 stalls and
-// tries again after its backoff, as [Status] shows with its LastError. If
-// the reset failed on this instance, Rebuild returns that error; if it
-// failed on another, Rebuild keeps waiting until ctx ends.
+// tries again after its backoff, as [Status] shows with its LastError.
+// Rebuild returns that error: as it was when the reset failed on this
+// instance, and as its text, recorded with [Store.FailRebuild], when it
+// failed on another.
 //
 // Rebuild returns [ErrNoReset] when the projection has no Reset, and an
 // error wrapping [ErrUnknownProjection] before any runner declared it.
@@ -418,15 +419,22 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 	tick := time.NewTicker(r.p.PollInterval)
 	defer tick.Stop()
 	for {
+		// A failure is recorded, in the store and here, after the Reset of
+		// the rebuild that failed, so reading it before done means a done
+		// read afterwards covers any Reset that served request n even so.
 		r.mu.Lock()
-		rebuilt := r.rebuilt
+		rebuilt, localFailed, localErr := r.rebuilt, r.rebuildFailed, r.rebuildErr
 		r.mu.Unlock()
+		failed, failMsg, err := r.store.RebuildFailure(ctx, r.p.Name)
+		if err != nil {
+			return fmt.Errorf("projection %q: read rebuild failure: %w", r.p.Name, err)
+		}
 		_, done, err := r.store.Rebuilds(ctx, r.p.Name)
 		if err != nil {
 			return fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
 		}
 		r.mu.Lock()
-		resetting, failed, failErr := r.resetting, r.rebuildFailed, r.rebuildErr
+		resetting := r.resetting
 		r.mu.Unlock()
 		switch {
 		case done >= n && !resetting:
@@ -436,18 +444,10 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 			// committed: wait until the runner has caught up with it, so
 			// a WaitUntil after Rebuild does not see positions from
 			// before the wipe.
+		case localFailed >= n:
+			return localErr
 		case failed >= n:
-			// The failure was recorded after the rebuild's Reset, which
-			// may have served request n even so, and done was read
-			// before it: ask the store again.
-			_, done, err := r.store.Rebuilds(ctx, r.p.Name)
-			if err != nil {
-				return fmt.Errorf("projection %q: read rebuild requests: %w", r.p.Name, err)
-			}
-			if done < n {
-				return failErr
-			}
-			continue // served: the next pass returns
+			return errors.New(failMsg)
 		}
 		select {
 		case <-ctx.Done():
@@ -463,11 +463,23 @@ func (r *Runner) Rebuild(ctx context.Context) error {
 // started), failing with err, and wakes the Rebuild calls waiting on this
 // instance. A rebuild cut short by the claim moving or Run stopping has not
 // failed: whichever runner holds segment 0 next serves the request.
+//
+// A failure is also recorded with [Store.FailRebuild], for Rebuild calls
+// on other instances; when that fails too, they keep waiting, and the
+// failure is logged.
 func (r *Runner) rebuildTried(ctx context.Context, requested uint64, err error) {
+	failed := requested > 0 && err != nil && ctx.Err() == nil && !errors.Is(err, ErrClaimLost)
+	if failed {
+		if ferr := r.store.FailRebuild(ctx, r.lease(0), requested, err.Error()); ferr != nil {
+			r.log(ctx, slog.LevelWarn, 0, r.position(0),
+				"projection rebuild failure not recorded; Rebuild calls on other instances keep waiting",
+				slog.Uint64("request", requested), slog.String("error", ferr.Error()))
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resetting = false
-	if requested > 0 && err != nil && ctx.Err() == nil && !errors.Is(err, ErrClaimLost) {
+	if failed {
 		r.rebuildFailed, r.rebuildErr = requested, err
 	}
 	close(r.rebuilt)
