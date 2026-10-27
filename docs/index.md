@@ -36,7 +36,6 @@ Practical recipes for specific tasks.
 
 **Events**
 - [Register events for serialization](./how-to/register-events.md)
-- [Subscribe to events with the event bus](./how-to/subscribe-to-events.md)
 - [Version events when the schema changes](./how-to/version-events.md)
 
 **Queries**
@@ -55,7 +54,7 @@ Practical recipes for specific tasks.
 
 Complete API documentation.
 
-- [Core interfaces](./reference/interfaces.md) — `Event`, `Command`, `Query`, `EventStore`, `EventBus`
+- [Core interfaces](./reference/interfaces.md) — `Event`, `Command`, `Query`, `EventStore`, `GlobalReader`
 - [CommandHandler](./reference/command-handler.md) — `NewCommandHandler`, options
 - [EventHandler & EventGroupProcessor](./reference/event-handler.md) — `OnEvent`, `NewEventGroupProcessor`
 - [QueryBus & QueryGateway](./reference/query-bus.md) — `NewQueryBus`, `RegisterQueryHandler`, `NewQueryGateway`
@@ -67,11 +66,8 @@ Complete API documentation.
 - [Errors](./reference/errors.md) — error types and sentinel values
 - **Implementations**
   - [memory.EventStore](./reference/implementations/memory-store.md)
-  - [memory.EventBus](./reference/implementations/memory-eventbus.md)
   - [postgres.EventStore](./reference/implementations/postgres-store.md)
-  - [postgres.EventBus](./reference/implementations/postgres-eventbus.md)
   - [kurrentdb.EventStore](./reference/implementations/kurrentdb-store.md)
-  - [kurrentdb.EventBus](./reference/implementations/kurrentdb-eventbus.md)
 
 ---
 

@@ -1150,8 +1150,8 @@ func TestNewCommandHandler_StartsAChain(t *testing.T) {
 }
 
 // TestNewCommandHandler_JoinsTheChainOfTheHandledEvent covers a command sent
-// while handling an event, as an event bus or the projection runner
-// delivers it: the resulting events share that event's correlation and are
+// while handling an event, as the projection runner delivers it: the
+// resulting events share that event's correlation and are
 // caused by it.
 func TestNewCommandHandler_JoinsTheChainOfTheHandledEvent(t *testing.T) {
 	h, saved := chainHandler(t)

@@ -58,7 +58,7 @@ Routes the event to the matching handler. Returns `*SkippedEventError` if no han
 func (p *EventGroupProcessor) StreamFilter() []string
 ```
 
-Returns a sorted slice of all event type names handled by this group. Used by the KurrentDB event bus to subscribe only to relevant streams.
+Returns a sorted slice of all event type names handled by this group. Pass it as a projection's `EventTypes`, so the runner reads only the events the group handles.
 
 ---
 
@@ -76,7 +76,7 @@ Implement this interface directly when you need custom dispatch logic. For most 
 
 ## Context values in event handlers
 
-When an event is dispatched via the event bus, the context is enriched with envelope fields:
+When the projection runner calls a handler, the context is enriched with envelope fields:
 
 ```go
 func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) error {

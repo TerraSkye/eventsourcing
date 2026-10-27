@@ -45,7 +45,7 @@ Commands are isolated to their aggregate's stream. They never query read models 
 
 ### Queries
 
-A query reads from a projection — a pre-built view optimised for reading. Projections are built by consuming events from the event store (live read model) or kept up-to-date via the event bus (cached projection).
+A query reads from a projection — a pre-built view optimised for reading. Projections are built by consuming events from the event store (live read model) or kept up-to-date by the projection runner (cached projection).
 
 Queries are read-only. They never produce events.
 
@@ -55,7 +55,7 @@ The `QueryHandler[T, R]` interface and `QueryBus` handle the query side. The `Co
 
 ## Eventual consistency
 
-Because projections are updated asynchronously (via the event bus), there is a brief lag between a command completing and its effects being visible in queries. This is called **eventual consistency**.
+Because projections are updated asynchronously (by the projection runner), there is a brief lag between a command completing and its effects being visible in queries. This is called **eventual consistency**.
 
 For most UIs this is acceptable — the write response confirms success, and the UI updates on the next poll. For cases where you need to read what you just wrote, use a live read model that replays events on demand.
 
@@ -64,7 +64,7 @@ For most UIs this is acceptable — the write response confirms success, and the
 | Strategy | How built | Latency | Freshness |
 |---|---|---|---|
 | Live read model | Replay events on each query | Higher | Always current |
-| Cached projection | Built once, updated via event bus | Lower | Eventually consistent |
+| Cached projection | Built once, updated by the projection runner | Lower | Eventually consistent |
 | Query gateway | Routes to registered handler | Depends on handler | Depends on handler |
 
 See [Tutorial Part 2](../tutorials/02-first-query.md) for live read models and [Tutorial Part 4](../tutorials/04-projections.md) for cached projections.

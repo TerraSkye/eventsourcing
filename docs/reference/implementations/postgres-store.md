@@ -10,7 +10,7 @@ github.com/terraskye/eventsourcing/postgres
 
 ## Schema
 
-Apply `postgres.Schema` before use. It creates the tables of the event store, the event bus and the projection store; the same SQL ships as `postgres/schema.sql`. It has the tables as this release uses them and adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between. The events table:
+Apply `postgres.Schema` before use. It creates the tables of the event store and the projection store; the same SQL ships as `postgres/schema.sql`. It has the tables as this release uses them and adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between. The events table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS events (
@@ -65,4 +65,4 @@ defer store.Close()
 
 - Events are inserted one `INSERT` at a time inside the transaction — fine for typical command batches, not tuned for bulk imports.
 - Appends to different streams do not commit in parallel: the shared append lock is held from the first insert to commit. Keep append transactions short.
-- There is no `Events()` channel; pair the store with [postgres.EventBus](./postgres-eventbus.md), which reads the same table directly.
+- There is no push delivery: a [projection runner](../../how-to/cached-projection.md) polls the store through `GlobalReader`.

@@ -91,7 +91,7 @@ A view derived by replaying events. Can be rebuilt at any time. A projection onl
 
 **Complexity**: More moving parts than CRUD. The decide/evolve pattern takes time to learn.
 
-**Eventual consistency**: Projections are updated asynchronously via the event bus. There is a brief window where a query may not reflect the most recent command.
+**Eventual consistency**: Projections are updated asynchronously by the projection runner. There is a brief window where a query may not reflect the most recent command.
 
 **No in-place updates**: Fixing bad data requires appending a corrective event, not updating existing ones.
 

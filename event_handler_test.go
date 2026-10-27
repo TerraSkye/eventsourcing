@@ -113,7 +113,7 @@ func TestTypedEventHandler_Handle_WrongType(t *testing.T) {
 }
 
 // TestSkippedEventError_CarriesTheEnvelope covers a skip under a ctx built
-// by WithEnvelope, as every event bus builds it: the error carries the
+// by WithEnvelope, as the projection runner builds it: the error carries the
 // envelope the event arrived in, from a typed handler and from a group.
 func TestSkippedEventError_CarriesTheEnvelope(t *testing.T) {
 	env := &Envelope{StreamID: "cart-1", Version: 3, Event: &ItemAdded{ID: "xyz"}}
@@ -288,7 +288,7 @@ func TestEventGroupProcessor_StreamFilter_UnregisteredIsOmitted(t *testing.T) {
 // genuinely cannot report the one event name EventGroupProcessor routes by.
 // This test documents that this panic is expected, and that
 // NewEventHandlerFunc's handler works fine on its own (e.g. via a direct
-// Handle call, as the corrected godoc example shows via EventBus.Subscribe).
+// Handle call).
 func TestNewEventHandlerFunc_NotUsableInGroupProcessor(t *testing.T) {
 	handler := NewEventHandlerFunc(func(ctx context.Context, ev Event) error {
 		return nil
@@ -322,7 +322,7 @@ func TestNewEventHandlerFunc_UsableDirectly(t *testing.T) {
 // the same name as the events a store will actually deliver to it.
 //
 // RegisterEvent mints new(T), so NewEventByName -- and therefore every
-// EventStore and EventBus that rehydrates an event by name -- hands out *T.
+// EventStore that rehydrates an event by name -- hands out *T.
 // OnEvent used to accept the value form too, which registered the handler
 // under "eventsourcing.CartCreated" while those events arrived as
 // "*eventsourcing.CartCreated": it compiled, registered, appeared in

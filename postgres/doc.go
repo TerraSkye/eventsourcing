@@ -1,11 +1,9 @@
-// Package postgres keeps events, subscriptions and projections in
-// PostgreSQL: an event store, an event bus and a projection store that
-// share one database.
+// Package postgres keeps events and projections in PostgreSQL: an event
+// store and a projection store that share one database.
 //
 // Apply [Schema] before use. [EventStore] appends and reads the events
-// table, [EventBus] delivers new events to subscribers and records their
-// positions, and [ProjectionStore] keeps projection checkpoints next to
-// the read models. Each projection Commit runs in a single Postgres
+// table, and [ProjectionStore] keeps projection checkpoints next to the
+// read models. Each projection Commit runs in a single Postgres
 // transaction, so the read model's writes and the checkpoint move land
 // together. Handlers reach the batch's transaction with [Tx]:
 //

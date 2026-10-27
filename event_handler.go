@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// EventHandler processes events delivered by an [EventBus] or
+// EventHandler processes events delivered by a projection runner or an
 // [EventGroupProcessor].
 type EventHandler interface {
 	// Handle processes event within ctx.
@@ -38,7 +38,6 @@ type EventHandler interface {
 //	    fmt.Println("Received event:", TypeName(ev))
 //	    return nil
 //	})
-//	err := bus.Subscribe(ctx, "logger", handler)
 func NewEventHandlerFunc(fn func(ctx context.Context, event Event) error) EventHandler {
 	return eventHandlerFunc(fn)
 }
@@ -96,7 +95,7 @@ func (h typedEventHandler[T, PT]) Handle(ctx context.Context, event Event) error
 //
 // fn must take a pointer, which is the form events arrive in: [RegisterEvent]
 // registers a type by minting new(T), so [NewEventByName] — and therefore
-// every [EventStore] and [EventBus] that rehydrates an event by name — hands
+// every [EventStore] that rehydrates an event by name — hands
 // out *T. A handler written over the value type would be routed under a
 // different name than the events it is meant to receive, so it would compile,
 // register, appear in [EventGroupProcessor.StreamFilter], and silently never
@@ -174,12 +173,11 @@ func (p *EventGroupProcessor) Handle(ctx context.Context, ev Event) error {
 }
 
 // StreamFilter returns the sorted names of every registered event type this group has
-// a handler for — useful, for example, as the filter passed to
-// [EventBus.Subscribe] via a filtering [SubscriberOption]. For a handled
+// a handler for — useful, for example, as a projection's EventTypes. For a handled
 // type registered in the global event registry (see [EventNamesFor]) it
 // includes every name that type is registered under, since one concrete
 // event struct can be registered under several names (for example after a
-// rename, via [RegisterEventByName]) and a subscriber needs to match all of
+// rename, via [RegisterEventByName]) and a reader needs to match all of
 // them. A handled type that isn't registered contributes no name and is
 // silently omitted from the result, rather than falling back to that type's
 // own [Event.EventType].

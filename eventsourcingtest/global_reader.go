@@ -358,7 +358,7 @@ func (g *globalAcceptance) appendResult(t *testing.T) {
 }
 
 // chainRoundTrip covers that ReadAll returns the CorrelationID and
-// CausationID each event was saved with, which an event bus or projection
+// CausationID each event was saved with, which a projection
 // passes on to the commands its handlers send.
 func (g *globalAcceptance) chainRoundTrip(t *testing.T) {
 	start := g.headNow(t)

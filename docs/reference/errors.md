@@ -93,7 +93,7 @@ type SkippedEventError struct {
 
 Returned by a typed event handler (created with `OnEvent`) when the event type does not match, and by `EventGroupProcessor.Handle` when no handler is registered for the event type.
 
-This is **not an error condition** — the event bus ignores `SkippedEventError`. It is returned to enable detection when calling `Handle` directly.
+This is **not an error condition** — the projection runner treats `SkippedEventError` as success and moves the checkpoint past the event. It is returned to enable detection when calling `Handle` directly.
 
 ```go
 err := handler.Handle(ctx, someEvent)

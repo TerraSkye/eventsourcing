@@ -25,9 +25,9 @@ var (
 	// [CommandHandler] is registered for a command's type.
 	ErrHandlerNotRegistered = errors.New("no handler registered")
 	// ErrDuplicateHandler is returned or panicked with when registering a
-	// second handler for a command or event type that already has one, by
-	// [CommandBus.Register], [EventBus.Subscribe] implementations, and
-	// [QueryBus] registration.
+	// second handler for a command, event or query type that already has
+	// one, by [CommandBus.Register], [NewEventGroupProcessor], and [QueryBus]
+	// registration.
 	ErrDuplicateHandler = errors.New("duplicate handler registered")
 	// ErrHandlerPanicked is joined into the error a [CommandBus] returns
 	// when a [CommandHandler] panics instead of returning an error.
