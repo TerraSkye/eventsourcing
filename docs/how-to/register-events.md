@@ -1,10 +1,12 @@
 # How to register events for serialization
 
-Register event types so the event store can deserialize them by name when reading from a persistent backend (SQLite, Postgres, KurrentDB).
+Register event types so a persistent backend (SQLite, Postgres, KurrentDB) can save them and deserialize them by name when reading.
 
 ## Why registration is needed
 
 Persistent event stores serialize events to JSON and store them alongside their type name (`EventType()`). When loading events back, the store needs to know which Go struct to unmarshal into. The event registry provides this mapping.
+
+The store checks the registry when saving too: `Save` rejects an event whose type is not registered under its `EventType()` with an error wrapping `ErrEventNotRegistered`, and saves none of the batch. An unregistered type fails on its first save, not on every read after it.
 
 The in-memory store does not need registration because events are never serialized.
 
