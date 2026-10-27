@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -81,19 +80,15 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	}
 	rows := make([]row, len(events))
 	for i, e := range events {
-		payload, err := json.Marshal(e.Event)
+		payload, err := cqrs.EncodeEvent(e.Event)
 		if err != nil {
 			return cqrs.AppendResult{StreamID: streamID},
-				fmt.Errorf("save events to stream %q: marshal event %d: %w", streamID, i, err)
+				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
-		meta := e.Metadata
-		if meta == nil {
-			meta = map[string]any{}
-		}
-		metadataJSON, err := json.Marshal(meta)
+		metadataJSON, err := cqrs.EncodeMetadata(e.Metadata)
 		if err != nil {
 			return cqrs.AppendResult{StreamID: streamID},
-				fmt.Errorf("save events to stream %q: marshal metadata %d: %w", streamID, i, err)
+				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 		occurredAt := e.OccurredAt
 		if occurredAt.IsZero() {
@@ -365,7 +360,7 @@ func queryEnvelopes(ctx context.Context, q queryer, query string, args ...any) (
 }
 
 // scanEnvelope decodes a single events row into a [cqrs.Envelope],
-// reconstructing the concrete [cqrs.Event] via [cqrs.NewEventByName].
+// reconstructing the concrete [cqrs.Event] via [cqrs.DecodeEvent].
 func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
 	var (
 		globalID       int64
@@ -387,18 +382,13 @@ func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan envelope: event id %q: %w", eventID, err)
 	}
-	ev, err := cqrs.NewEventByName(eventType)
+	ev, err := cqrs.DecodeEvent(eventType, payload)
 	if err != nil {
-		return nil, fmt.Errorf("cannot create event %q: %w", eventType, err)
+		return nil, fmt.Errorf("scan envelope: %w", err)
 	}
-	if err := json.Unmarshal(payload, ev); err != nil {
-		return nil, fmt.Errorf("cannot unmarshal event %q: %w", eventType, err)
-	}
-	meta := map[string]any{}
-	if len(metadata) > 0 {
-		if err := json.Unmarshal(metadata, &meta); err != nil {
-			meta = map[string]any{}
-		}
+	meta, err := cqrs.DecodeMetadata(metadata)
+	if err != nil {
+		meta = map[string]any{}
 	}
 
 	return &cqrs.Envelope{

@@ -32,6 +32,7 @@ var testDSN string
 
 func TestMain(m *testing.M) {
 	cqrs.RegisterEventByType(func() cqrs.Event { return &OrderCreated{} })
+	cqrs.RegisterEventByType(func() cqrs.Event { return &slowEvent{} })
 
 	ctx := context.Background()
 	pgc, err := tcpostgres.Run(ctx, "postgres:16-alpine",

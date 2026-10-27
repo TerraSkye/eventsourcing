@@ -82,6 +82,32 @@ names := eventsourcing.EventNamesFor(&events.TaskCreated{})
 
 Used internally by `EventGroupProcessor.StreamFilter()`.
 
+### EncodeEvent / DecodeEvent
+
+```go
+func EncodeEvent(event Event) ([]byte, error)
+func DecodeEvent(name string, data []byte) (Event, error)
+```
+
+The encoding every store in this module persists events in: JSON, through `encoding/json`. A store saves the bytes `EncodeEvent` returns under `event.EventType()`, and reads them back with `DecodeEvent`. A store outside this module that does the same is byte-compatible with these.
+
+`EncodeEvent` returns an error wrapping `ErrEventNotRegistered` unless the event's type is registered under its `EventType()` name, so an event a store could not read back fails at `Save`. `DecodeEvent` returns `ErrEventNotRegistered` for an unknown name.
+
+```go
+data, err := eventsourcing.EncodeEvent(&events.TaskCreated{ID: "t1"})
+// ...
+ev, err := eventsourcing.DecodeEvent("TaskCreated", data)
+```
+
+### EncodeMetadata / DecodeMetadata
+
+```go
+func EncodeMetadata(metadata map[string]any) ([]byte, error)
+func DecodeMetadata(data []byte) (map[string]any, error)
+```
+
+The same pair for an `Envelope`'s `Metadata`. A nil map encodes as `{}`; empty data and `null` decode as an empty, non-nil map.
+
 ---
 
 ## Behaviour notes

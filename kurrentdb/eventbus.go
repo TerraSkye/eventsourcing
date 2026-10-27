@@ -2,7 +2,6 @@ package kurrentdb
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -264,36 +263,22 @@ func (b *EventBus) runSubscription(ctx context.Context, s *subscriber) error {
 			stream.Ack(kEvent.Event)
 			continue
 		}
-		// Convert KurrentDB event to cqrs.Event
-		ev, err := cqrs.NewEventByName(kEvent.Event.Event.EventType)
+		ev, err := cqrs.DecodeEvent(kEvent.Event.Event.EventType, kEvent.Event.Event.Data)
 		if err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot create event %q: %w", s.name, kEvent.Event.Event.EventType, err):
+			case b.errs <- fmt.Errorf("subscriber %q: %w", s.name, err):
 			default:
 			}
 			continue
 		}
 
-		// Unmarshal KurrentDB event data into cqrs.EventData
-		if err := json.Unmarshal(kEvent.Event.Event.Data, ev); err != nil {
+		metaData, err := cqrs.DecodeMetadata(kEvent.Event.Event.UserMetadata)
+		if err != nil {
 			select {
-			case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal event %q: %w", s.name, kEvent.Event.Event.EventType, err):
+			case b.errs <- fmt.Errorf("subscriber %q: event %q: %w", s.name, kEvent.Event.Event.EventType, err):
 			default:
 			}
 			continue
-		}
-
-		var metaData map[string]any
-
-		// Unmarshal KurrentDB event data into cqrs.EventData
-		if kEvent.Event.Event.UserMetadata != nil {
-			if err := json.Unmarshal(kEvent.Event.Event.UserMetadata, &metaData); err != nil {
-				select {
-				case b.errs <- fmt.Errorf("subscriber %q: cannot unmarshal metadata %q: %w", s.name, kEvent.Event.Event.EventType, err):
-				default:
-				}
-				continue
-			}
 		}
 
 		correlationID, _ := metaData[correlationIDKey].(string)
