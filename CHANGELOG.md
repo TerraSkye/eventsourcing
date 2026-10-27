@@ -9,6 +9,21 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `projection.Store` has two new methods, `FailRebuild` and
+  `RebuildFailure`, so `Runner.Rebuild` called on one instance returns
+  the error of a reset that failed on another, as its text, instead of
+  waiting until its context ends. Stores outside this module must
+  implement both, and `StoreAcceptanceTest` checks them. The
+  `projection_rebuilds` table gains a `failed` and an `error` column. For
+  an existing database, run this once before deploying:
+
+  ```sql
+  -- Postgres
+  ALTER TABLE projection_rebuilds ADD COLUMN failed BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE projection_rebuilds ADD COLUMN error  TEXT;
+  -- SQLite
+  ALTER TABLE projection_rebuilds ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE projection_rebuilds ADD COLUMN error  TEXT;
 - `RegisterEventByType`, `RegisterEventByName`, `NewEventByName` and
   `EventNamesFor` are functions instead of package-level `var`s, so
   they can no longer be reassigned. Calls to them are unchanged.
