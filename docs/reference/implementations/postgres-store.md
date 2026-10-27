@@ -55,7 +55,7 @@ defer store.Close()
 
 - `Save` runs in a transaction and takes a `pg_advisory_xact_lock` on the stream ID to serialize concurrent writes to the same stream. Before inserting, it also takes one advisory lock shared by every append and holds it until commit, so global ids are assigned and committed in order (see below).
 - All `StreamState` variants are supported: `Any`, `NoStream`, `StreamExists`, and `Revision`. Version mismatches return a `StreamRevisionConflictError`; a unique-constraint violation on `(stream_id, stream_position)` is mapped to the same error.
-- Events are serialized as JSON, so event types must be registered with `RegisterEvent` (see [Event registry](../event-registry.md)) — loading fails for unregistered types.
+- Events are serialized as JSON, so event types must be registered with `RegisterEvent` (see [Event registry](../event-registry.md)); `Save` rejects an unregistered type with `ErrEventNotRegistered`.
 - Zero-valued `EventID` and `OccurredAt` fields are filled in on save (`uuid.New()` and `time.Now()`).
 - `LoadStream` requires the stream to exist (`StreamExists` semantics).
 - `ReadAll` and `Head` (`GlobalReader`) use the global `id` column (`GlobalPosition` on the envelope). Because appends commit one at a time in id order, no id becomes visible before a lower one, so a reader that checkpoints a position never skips an event from a slower concurrent writer. Filters run in SQL; stream prefixes match literally.

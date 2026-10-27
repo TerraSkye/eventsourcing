@@ -2,7 +2,6 @@ package kurrentdb
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -128,13 +127,10 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	var kEvents = make([]kurrentdb.EventData, len(events))
 
 	for i, ev := range events {
-		eventData, err := json.Marshal(ev.Event)
-
+		eventData, err := eventsourcing.EncodeEvent(ev.Event)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
-				"save events to stream %q: %w: event %d failed to marshal event data %s",
-				streamID, err, i, ev.Event.EventType(),
-			)
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
 		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
@@ -150,12 +146,10 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		if ev.CausationID != "" {
 			metadata[causationIDKey] = ev.CausationID
 		}
-		metadataJSON, err := json.Marshal(metadata)
+		metadataJSON, err := eventsourcing.EncodeMetadata(metadata)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, fmt.Errorf(
-				"save events to stream %q: %w: event %d failed to marshal meta data %s",
-				streamID, err, i, ev.Event.EventType(),
-			)
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
 		kEvents[i] = kurrentdb.EventData{
@@ -494,17 +488,13 @@ func isSystemRecord(rec *kurrentdb.RecordedEvent) bool {
 // KurrentDB's 0-based EventNumber into the 1-based Version the package
 // uses.
 func toEnvelope(rec *kurrentdb.RecordedEvent) (*eventsourcing.Envelope, error) {
-	ev, err := eventsourcing.NewEventByName(rec.EventType)
+	ev, err := eventsourcing.DecodeEvent(rec.EventType, rec.Data)
 	if err != nil {
-		return nil, fmt.Errorf("cannot create event %q: %w", rec.EventType, err)
+		return nil, err
 	}
 
-	if err := json.Unmarshal(rec.Data, ev); err != nil {
-		return nil, fmt.Errorf("cannot unmarshal event %q: %w", rec.EventType, err)
-	}
-
-	var metadata map[string]any
-	if err := json.Unmarshal(rec.UserMetadata, &metadata); err != nil || metadata == nil {
+	metadata, err := eventsourcing.DecodeMetadata(rec.UserMetadata)
+	if err != nil {
 		metadata = make(map[string]any) // fallback to empty map
 	}
 	correlationID, _ := metadata[correlationIDKey].(string)

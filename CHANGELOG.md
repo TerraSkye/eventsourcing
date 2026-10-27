@@ -9,6 +9,22 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- The Postgres, SQLite and KurrentDB stores reject an event at `Save`
+  unless its type is registered under its `EventType()` name, with an
+  error wrapping `ErrEventNotRegistered`. Such an event used to save
+  and then fail on every read. Register every event type a store saves.
+
+### Added
+
+- `EncodeEvent` and `DecodeEvent`, and `EncodeMetadata` and
+  `DecodeMetadata` for an envelope's metadata, are the JSON encoding
+  every store in this module persists in. A store outside the module
+  that calls them writes the same bytes.
+
+### Changed
+
+- The KurrentDB event bus hands a handler an empty `Metadata` map, not
+  nil, for an event stored without metadata, as the stores already do.
 - `projection.Store` has two new methods, `FailRebuild` and
   `RebuildFailure`, so `Runner.Rebuild` called on one instance returns
   the error of a reset that failed on another, as its text, instead of

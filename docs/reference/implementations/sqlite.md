@@ -39,7 +39,7 @@ All three share `db`, which belongs to the caller: their `Close` methods do not 
 
 ## Event store
 
-`EventStore` implements `EventStore` and `GlobalReader`. The `events` table's `id` is the global position; SQLite commits one writer at a time, so ids become visible in order and `ReadAll` never skips an event. Streams are read in full before `LoadStream` returns.
+`EventStore` implements `EventStore` and `GlobalReader`. The `events` table's `id` is the global position; SQLite commits one writer at a time, so ids become visible in order and `ReadAll` never skips an event. Streams are read in full before `LoadStream` returns. Events are serialized as JSON, so event types must be registered (see [Event registry](../event-registry.md)); `Save` rejects an unregistered type with `ErrEventNotRegistered`.
 
 ## Event bus
 
