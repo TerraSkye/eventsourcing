@@ -67,8 +67,7 @@ The `EventGroupProcessor` implements `StreamFilter()` which returns the list of 
 |---|---|---|
 | Persistence | No | Yes |
 | Event bus delivery | In-process channel | Persistent subscription |
-| `Events()` channel | Yes | No (use bus) |
-| Registration required | No | Yes |
+| Registration required | Yes | Yes |
 | At-least-once delivery | N/A | Yes |
 
 ## Running KurrentDB locally

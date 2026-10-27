@@ -34,23 +34,9 @@ EventStore ──appends──► global log: 1 2 3 4 5 6 ...
 
 The runner reads the global log through `ReadAll`, the same call the live read model used in Part 2. When it reaches the end of the log, it checks again every second.
 
-## Step 1: Register the events
+## Step 1: Check the events are registered
 
-The runner only reads the event types you list, and checks at startup that each name is registered. Register the events once, in the `events` package:
-
-```go
-// events/register.go
-package events
-
-import "github.com/terraskye/eventsourcing"
-
-func init() {
-    eventsourcing.RegisterEvent(&TaskCreated{})
-    eventsourcing.RegisterEvent(&TaskCompleted{})
-}
-```
-
-Each event is registered under its `EventType()`: `"TaskCreated"` and `"TaskCompleted"`.
+The runner only reads the event types you list, and checks at startup that each name is registered. Parts 1 and 3 already registered `TaskCreated` and `TaskCompleted` in the `init` beside each event, under their `EventType()` names, so there is nothing to add. Registering a name twice panics.
 
 ## Step 2: Define the read model
 
@@ -188,7 +174,7 @@ import (
 func main() {
     ctx := context.Background()
 
-    store := memory.NewEventStore(100)
+    store := memory.NewEventStore()
     defer store.Close()
 
     // The read model, and the runner that keeps it up to date.

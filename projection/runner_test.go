@@ -1135,7 +1135,7 @@ func TestRunner_RebuildResetFailsElsewhere(t *testing.T) {
 func TestRunner_NudgeWakesEverySegment(t *testing.T) {
 	for _, segments := range []int{1, 2, 4} {
 		t.Run(fmt.Sprintf("segments=%d", segments), func(t *testing.T) {
-			es := memory.NewEventStore(16)
+			es := memory.NewEventStore()
 			def := projection.Definition{
 				Name:         "nudge",
 				Handler:      eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error { return nil }),

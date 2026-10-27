@@ -77,7 +77,7 @@ var catchUpSegments = []int{1, 4, 16}
 //
 //	func BenchmarkProjection(b *testing.B) {
 //		projectiontest.Benchmark(b, func(*testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler) {
-//			return memory.NewEventStore(0), memory.NewProjectionStore(), newRowsHandler()
+//			return memory.NewEventStore(), memory.NewProjectionStore(), newRowsHandler()
 //		})
 //	}
 func Benchmark(b *testing.B, newStores func(b *testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler)) {

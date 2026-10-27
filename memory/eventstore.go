@@ -20,12 +20,42 @@ var (
 // and local development. It keeps every stream and the global event log in a
 // single process's memory, so its contents do not survive a restart and it
 // cannot be shared across processes. It is safe for concurrent use.
+//
+// Like the persistent stores, it keeps each event encoded by
+// [eventsourcing.EncodeEvent] and decodes it on every read, so every event
+// type it saves must be registered, and each read returns its own copy of
+// the event.
 type EventStore struct {
 	mu     sync.RWMutex
 	closed bool
-	bus    chan *eventsourcing.Envelope
-	global []*eventsourcing.Envelope
-	events map[string][]*eventsourcing.Envelope
+	global []*record
+	events map[string][]*record
+}
+
+// record is a saved event as the store keeps it: the envelope with its Event
+// and Metadata left nil, beside their encodings and the name the event was
+// saved under.
+type record struct {
+	env      eventsourcing.Envelope
+	name     string
+	payload  []byte
+	metadata []byte
+}
+
+// envelope decodes r into a new [eventsourcing.Envelope].
+func (r *record) envelope() (*eventsourcing.Envelope, error) {
+	ev, err := eventsourcing.DecodeEvent(r.name, r.payload)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := eventsourcing.DecodeMetadata(r.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("event %q: %w", r.name, err)
+	}
+	env := r.env
+	env.Event = ev
+	env.Metadata = meta
+	return &env, nil
 }
 
 // ReadAll implements [eventsourcing.GlobalReader]. Events are kept in a
@@ -49,11 +79,14 @@ func (m *EventStore) ReadAll(ctx context.Context, after uint64, opts eventsourci
 
 	res := eventsourcing.ReadResult{Next: after}
 	for i := after; i < uint64(len(m.global)); i++ {
-		env := m.global[i]
-		res.Next = env.GlobalPosition
-		if matches(env, types, opts.StreamPrefixes) {
-			cp := *env
-			res.Events = append(res.Events, &cp)
+		rec := m.global[i]
+		res.Next = rec.env.GlobalPosition
+		if matches(rec, types, opts.StreamPrefixes) {
+			env, err := rec.envelope()
+			if err != nil {
+				return eventsourcing.ReadResult{}, fmt.Errorf("read all after %d: %w", after, err)
+			}
+			res.Events = append(res.Events, env)
 			if len(res.Events) == limit {
 				break
 			}
@@ -63,18 +96,17 @@ func (m *EventStore) ReadAll(ctx context.Context, after uint64, opts eventsourci
 	return res, nil
 }
 
-func matches(env *eventsourcing.Envelope, types map[string]bool, prefixes []string) bool {
-	// The memory store keeps events as Go values; the name an event is
-	// stored under is its EventType, and aliases do not match, as on the
-	// other stores.
-	if len(types) > 0 && !types[env.Event.EventType()] {
+func matches(rec *record, types map[string]bool, prefixes []string) bool {
+	// An event matches on the name it was saved under, its EventType at the
+	// time; aliases do not match, as on the other stores.
+	if len(types) > 0 && !types[rec.name] {
 		return false
 	}
 	if len(prefixes) == 0 {
 		return true
 	}
 	for _, p := range prefixes {
-		if strings.HasPrefix(env.StreamID, p) {
+		if strings.HasPrefix(rec.env.StreamID, p) {
 			return true
 		}
 	}
@@ -101,13 +133,6 @@ func (m *EventStore) Head(ctx context.Context) (uint64, error) {
 // mismatch. On success it returns an [eventsourcing.AppendResult] whose
 // NextExpectedVersion is the stream's new length.
 func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return eventsourcing.AppendResult{Successful: false}, errors.New("save events: event store is closed")
-	}
-
 	if len(events) == 0 {
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
 	}
@@ -124,6 +149,35 @@ func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 					streamId, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
 				)
 		}
+	}
+
+	// Encode before taking the lock, so it covers only the append, and
+	// before appending anything, so an event that cannot be encoded fails
+	// the whole batch. events belongs to the caller, who may reuse it
+	// once Save returns, so each record holds its own copy of the envelope.
+	records := make([]*record, len(events))
+	for i, env := range events {
+		payload, err := eventsourcing.EncodeEvent(env.Event)
+		if err != nil {
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamId},
+				fmt.Errorf("save events to stream %q: event %d: %w", streamId, i, err)
+		}
+		metadata, err := eventsourcing.EncodeMetadata(env.Metadata)
+		if err != nil {
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamId},
+				fmt.Errorf("save events to stream %q: event %d: %w", streamId, i, err)
+		}
+		name := env.Event.EventType()
+		env.Event = nil
+		env.Metadata = nil
+		records[i] = &record{env: env, name: name, payload: payload, metadata: metadata}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.closed {
+		return eventsourcing.AppendResult{Successful: false}, errors.New("save events: event store is closed")
 	}
 
 	currentVersion := uint64(len(m.events[streamId]))
@@ -156,22 +210,11 @@ func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 		return eventsourcing.AppendResult{Successful: false, StreamID: streamId}, err
 	}
 
-	// Append events. events belongs to the caller, who may reuse its
-	// backing array once Save returns, so the store keeps its own copy of
-	// each envelope and publishes another on Events().
-	for i := range events {
-		ev := events[i]
-		ev.GlobalPosition = uint64(len(m.global)) + 1
-		m.events[streamId] = append(m.events[streamId], &ev)
-		m.global = append(m.global, &ev)
+	for _, rec := range records {
+		rec.env.GlobalPosition = uint64(len(m.global)) + 1
+		m.events[streamId] = append(m.events[streamId], rec)
+		m.global = append(m.global, rec)
 		currentVersion++
-
-		published := ev
-		select {
-		case m.bus <- &published:
-		default:
-			// Drop error if channel full
-		}
 	}
 
 	return eventsourcing.AppendResult{
@@ -240,27 +283,20 @@ func (m *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 		if offset >= uint64(len(events)) {
 			return nil, io.EOF
 		}
-		ev := events[offset]
+		rec := events[offset]
 		offset++
-		return ev, nil
+		env, err := rec.envelope()
+		if err != nil {
+			return nil, fmt.Errorf("load stream %q: %w", id, err)
+		}
+		return env, nil
 	}, nil)
 
 	return iter, nil
 }
 
-// Events returns a channel that receives every [eventsourcing.Envelope] as it
-// is saved. It is not part of the [eventsourcing.EventStore] interface; it
-// exists so tests and local tooling can observe writes as they happen. The
-// channel has the buffer size passed to [NewEventStore] and sends are
-// non-blocking, so a slow consumer misses events rather than blocking Save.
-// The channel is closed by Close.
-func (m *EventStore) Events() <-chan *eventsourcing.Envelope {
-	return m.bus
-}
-
-// Close discards all stored events and closes the channel returned by
-// Events. After Close, Save returns an error instead of appending. Calling
-// Close more than once is a no-op.
+// Close discards all stored events. After Close, Save returns an error
+// instead of appending. Calling Close more than once is a no-op.
 func (m *EventStore) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -270,18 +306,15 @@ func (m *EventStore) Close() error {
 	}
 	m.closed = true
 
-	m.events = make(map[string][]*eventsourcing.Envelope)
-	m.global = make([]*eventsourcing.Envelope, 0)
-	close(m.bus)
+	m.events = make(map[string][]*record)
+	m.global = make([]*record, 0)
 	return nil
 }
 
-// NewEventStore constructs an empty [EventStore]. buffer sets the capacity
-// of the channel returned by [EventStore.Events].
-func NewEventStore(buffer int64) *EventStore {
+// NewEventStore constructs an empty [EventStore].
+func NewEventStore() *EventStore {
 	return &EventStore{
-		events: make(map[string][]*eventsourcing.Envelope),
-		global: make([]*eventsourcing.Envelope, 0),
-		bus:    make(chan *eventsourcing.Envelope, buffer),
+		events: make(map[string][]*record),
+		global: make([]*record, 0),
 	}
 }

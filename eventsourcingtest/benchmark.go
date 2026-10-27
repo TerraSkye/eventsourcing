@@ -80,7 +80,7 @@ var readAllLimits = []int{100, 500, 2_000}
 //
 //	func BenchmarkEventStore(b *testing.B) {
 //		eventsourcingtest.Benchmark(b, func(*testing.B) eventsourcing.EventStore {
-//			return memory.NewEventStore(0)
+//			return memory.NewEventStore()
 //		})
 //	}
 func Benchmark(b *testing.B, newStore func(b *testing.B) eventsourcing.EventStore) {

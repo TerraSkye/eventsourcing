@@ -12,7 +12,7 @@ import (
 )
 
 func TestImport_CopiesTheLogInOrder(t *testing.T) {
-	src := memory.NewEventStore(0)
+	src := memory.NewEventStore()
 	t.Cleanup(func() { src.Close() })
 	save := func(id string, revision cqrs.StreamState, events ...cqrs.Event) {
 		t.Helper()
@@ -71,7 +71,7 @@ func TestImport_CopiesTheLogInOrder(t *testing.T) {
 }
 
 func TestImport_RefusesAnOccupiedStream(t *testing.T) {
-	src := memory.NewEventStore(0)
+	src := memory.NewEventStore()
 	t.Cleanup(func() { src.Close() })
 	if _, err := src.Save(t.Context(), []cqrs.Envelope{{StreamID: "task-1", Event: &taskCreated{ID: "1"}}}, cqrs.NoStream{}); err != nil {
 		t.Fatalf("Save to source: %v", err)

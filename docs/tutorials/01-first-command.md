@@ -38,7 +38,9 @@ package events
 
 import (
     "time"
+
     "github.com/google/uuid"
+    "github.com/terraskye/eventsourcing"
 )
 
 type TaskCreated struct {
@@ -51,9 +53,13 @@ type TaskCreated struct {
 
 func (e *TaskCreated) AggregateID() string { return e.TaskID.String() }
 func (e *TaskCreated) EventType() string   { return "TaskCreated" }
+
+func init() {
+    eventsourcing.RegisterEvent(&TaskCreated{})
+}
 ```
 
-`AggregateID()` tells the event store which stream this event belongs to. `EventType()` is used for serialization.
+`AggregateID()` tells the event store which stream this event belongs to. `EventType()` is the name the store saves it under, and `RegisterEvent` lets the store turn what it saved back into a `TaskCreated`. Every store, the in-memory one included, rejects an event type that is not registered.
 
 ## Step 2: Write the command handler
 
@@ -204,7 +210,7 @@ import (
 )
 
 func main() {
-    store := memory.NewEventStore(100)
+    store := memory.NewEventStore()
     defer store.Close()
 
     createTaskHandler := createtask.NewHandler(store)

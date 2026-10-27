@@ -32,7 +32,9 @@ package events
 
 import (
     "time"
+
     "github.com/google/uuid"
+    "github.com/terraskye/eventsourcing"
 )
 
 type TaskArchived struct {
@@ -42,6 +44,10 @@ type TaskArchived struct {
 
 func (e *TaskArchived) AggregateID() string { return e.TaskID.String() }
 func (e *TaskArchived) EventType() string   { return "TaskArchived" }
+
+func init() {
+    eventsourcing.RegisterEvent(&TaskArchived{})
+}
 ```
 
 ```go
