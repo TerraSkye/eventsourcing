@@ -14,14 +14,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	"github.com/terraskye/eventsourcing/postgres"
 )
 
-func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
+func collectAll(t *testing.T, iter *eventsourcing.Iterator[*eventsourcing.Envelope]) []*eventsourcing.Envelope {
 	t.Helper()
-	var results []*cqrs.Envelope
+	var results []*eventsourcing.Envelope
 	for iter.Next() {
 		results = append(results, iter.Value())
 	}
@@ -38,12 +38,12 @@ func TestSave_AndLoadStream(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 
 	ctx := context.Background()
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 	}
 
-	result, err := store.Save(ctx, events, cqrs.NoStream{})
+	result, err := store.Save(ctx, events, eventsourcing.NoStream{})
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -69,20 +69,20 @@ func TestSave_RevisionConflict(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
-	_, err := store.Save(ctx, []cqrs.Envelope{
+	_, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 	if err != nil {
 		t.Fatalf("first save: %v", err)
 	}
 
-	_, err = store.Save(ctx, []cqrs.Envelope{
+	_, err = store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Revision(0)) // wrong revision
+	}, eventsourcing.Revision(0)) // wrong revision
 	if err == nil {
 		t.Fatal("expected revision conflict error")
 	}
-	var conflictErr *cqrs.StreamRevisionConflictError
+	var conflictErr *eventsourcing.StreamRevisionConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Errorf("expected StreamRevisionConflictError, got %T: %v", err, err)
 	}
@@ -93,10 +93,10 @@ func TestSave_NoStream_FailsWhenStreamExists(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
-	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, cqrs.Any{})
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, eventsourcing.Any{})
 
-	_, err := store.Save(ctx, []cqrs.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, cqrs.NoStream{})
-	if !errors.Is(err, cqrs.ErrStreamExists) {
+	_, err := store.Save(ctx, []eventsourcing.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, eventsourcing.NoStream{})
+	if !errors.Is(err, eventsourcing.ErrStreamExists) {
 		t.Errorf("expected ErrStreamExists, got %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestSave_MarshalsOutsideAppendLock(t *testing.T) {
 	slow := &slowEvent{ID: "slow-1", entered: make(chan struct{}), release: make(chan struct{})}
 	slowDone := make(chan error, 1)
 	go func() {
-		_, err := store.Save(ctx, []cqrs.Envelope{newEnvelope("slow-1", slow)}, cqrs.Any{})
+		_, err := store.Save(ctx, []eventsourcing.Envelope{newEnvelope("slow-1", slow)}, eventsourcing.Any{})
 		slowDone <- err
 	}()
 	defer func() {
@@ -147,7 +147,7 @@ func TestSave_MarshalsOutsideAppendLock(t *testing.T) {
 
 	fastCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if _, err := store.Save(fastCtx, []cqrs.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, cqrs.Any{}); err != nil {
+	if _, err := store.Save(fastCtx, []eventsourcing.Envelope{newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})}, eventsourcing.Any{}); err != nil {
 		t.Fatalf("save to another stream while one is marshalling: %v", err)
 	}
 }
@@ -157,16 +157,16 @@ func TestLoadStream_NotFound(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 
 	_, err := store.LoadStream(context.Background(), "no-such-stream")
-	if !errors.Is(err, cqrs.ErrStreamNotFound) {
+	if !errors.Is(err, eventsourcing.ErrStreamNotFound) {
 		t.Errorf("expected ErrStreamNotFound, got %v", err)
 	}
 }
 
-func readAll(t *testing.T, reader cqrs.GlobalReader, after uint64) []*cqrs.Envelope {
+func readAll(t *testing.T, reader eventsourcing.GlobalReader, after uint64) []*eventsourcing.Envelope {
 	t.Helper()
-	var out []*cqrs.Envelope
+	var out []*eventsourcing.Envelope
 	for {
-		res, err := reader.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		res, err := reader.ReadAll(context.Background(), after, eventsourcing.ReadOptions{})
 		if err != nil {
 			t.Fatalf("ReadAll(after %d): %v", after, err)
 		}
@@ -183,9 +183,9 @@ func TestReadAll_BasicOrdering(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
-	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-A", &OrderCreated{OrderID: "A"})}, cqrs.Any{})
-	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
-	_, _ = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-A", &OrderCreated{OrderID: "A"})}, cqrs.Any{})
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{newEnvelope("stream-A", &OrderCreated{OrderID: "A"})}, eventsourcing.Any{})
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, eventsourcing.Any{})
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{newEnvelope("stream-A", &OrderCreated{OrderID: "A"})}, eventsourcing.Any{})
 
 	events := readAll(t, store, 0)
 	if len(events) != 3 {
@@ -247,7 +247,7 @@ func TestReadAll_AppendsBecomeVisibleInIDOrder(t *testing.T) {
 
 	saved := make(chan error, 1)
 	go func() {
-		_, err := store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
+		_, err := store.Save(ctx, []eventsourcing.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, eventsourcing.Any{})
 		saved <- err
 	}()
 
@@ -286,14 +286,14 @@ func TestReadAll_HugePositionIsRefusedNotReplayed(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.NoStream{}); err != nil {
+	}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	res, err := store.ReadAll(ctx, math.MaxUint64, cqrs.ReadOptions{})
-	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+	res, err := store.ReadAll(ctx, math.MaxUint64, eventsourcing.ReadOptions{})
+	if !errors.Is(err, eventsourcing.ErrInvalidRevision) {
 		t.Fatalf("ReadAll(after MaxUint64) = %d events, err %v; want ErrInvalidRevision", len(res.Events), err)
 	}
 }
@@ -311,11 +311,11 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
 
-	_, err := store.Save(ctx, []cqrs.Envelope{
+	_, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.NoStream{})
+	}, eventsourcing.NoStream{})
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -325,14 +325,14 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 	// The call should panic. If it doesn't, close the iterator so its open
 	// rows don't hold the pool connection that pool.Close in cleanup waits
 	// on, which would hang the run instead of failing it.
-	iter, _ := store.LoadStreamFrom(ctx, "order-1", cqrs.Revision(math.MaxUint64))
+	iter, _ := store.LoadStreamFrom(ctx, "order-1", eventsourcing.Revision(math.MaxUint64))
 	if iter != nil {
 		iter.Close() //nolint:errcheck
 	}
 }
 
 // assertRevisionOverflowPanic fails t unless the deferred call it guards
-// panicked with cqrs.Revision's int64 overflow panic. call names the guarded
+// panicked with eventsourcing.Revision's int64 overflow panic. call names the guarded
 // call for the failure message.
 func assertRevisionOverflowPanic(t *testing.T, call string) {
 	t.Helper()

@@ -42,7 +42,7 @@ There is no `Dispatch` — events become visible to subscribers as soon as they 
 ## WithFilterEvents
 
 ```go
-func WithFilterEvents(types []string) cqrs.SubscriberOption
+func WithFilterEvents(types []string) eventsourcing.SubscriberOption
 ```
 
 Limits a subscriber to specific event types (matched against the `event_type` column):
@@ -56,7 +56,7 @@ bus.Subscribe(ctx, "my-handler", handler,
 ## WithStartFrom
 
 ```go
-func WithStartFrom(pos int64) cqrs.SubscriberOption
+func WithStartFrom(pos int64) eventsourcing.SubscriberOption
 ```
 
 Sets the global position a **new** subscription starts from. Only applies when no record exists in `event_subscriptions` yet; existing subscriptions resume from their stored position.

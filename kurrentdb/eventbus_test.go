@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	kdb "github.com/terraskye/eventsourcing/kurrentdb"
 
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
@@ -25,7 +25,7 @@ func (leakEvent) AggregateID() string { return "leak" }
 func (leakEvent) EventType() string   { return "leakEvent" }
 
 func init() {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &leakEvent{} })
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &leakEvent{} })
 }
 
 func countGoroutinesCreatedBy(substr string) int {
@@ -46,7 +46,7 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 
 	bus := kdb.NewEventBus(testDB, 50)
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -86,7 +86,7 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 func TestSubscribe_WithFilterStreamEmptyAlwaysFails(t *testing.T) {
 	bus := kdb.NewEventBus(testDB, 50)
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -112,7 +112,7 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -122,7 +122,7 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			bus.Use(func(next cqrs.EventHandler) cqrs.EventHandler {
+			bus.Use(func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 				return next
 			})
 		}
@@ -182,7 +182,7 @@ func TestClose_SendsSpuriousErrorOnNormalShutdown(t *testing.T) {
 
 	bus := kdb.NewEventBus(testDB, 10)
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -242,7 +242,7 @@ func TestClose_SendsSpuriousErrorOnNormalShutdown(t *testing.T) {
 // This test reproduces that race against a real KurrentDB server.
 func TestSubscribe_EnsureSubscriptionErrorDeadlocksBus(t *testing.T) {
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
