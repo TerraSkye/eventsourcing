@@ -4,13 +4,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
-var _ cqrs.Event = (*TaskCompleted)(nil)
+var _ eventsourcing.Event = (*TaskCompleted)(nil)
 
 func init() {
-	cqrs.RegisterEvent(&TaskCompleted{})
+	eventsourcing.RegisterEvent(&TaskCompleted{})
 }
 
 // TaskCompleted is emitted when a task is marked as done.

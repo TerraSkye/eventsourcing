@@ -4,13 +4,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
-var _ cqrs.Event = (*TaskArchived)(nil)
+var _ eventsourcing.Event = (*TaskArchived)(nil)
 
 func init() {
-	cqrs.RegisterEvent(&TaskArchived{})
+	eventsourcing.RegisterEvent(&TaskArchived{})
 }
 
 // TaskArchived is emitted when a completed task is auto-archived.

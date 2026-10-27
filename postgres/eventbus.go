@@ -10,10 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
-var _ cqrs.EventBus = (*EventBus)(nil)
+var _ eventsourcing.EventBus = (*EventBus)(nil)
 
 // lockPoolMaxConns bounds the size of the dedicated pool used for poll()'s
 // subscription-locking transaction.
@@ -23,12 +23,12 @@ const lockPoolMaxConns = 4
 // schema.sql sends on after every insert into events.
 const notifyChannel = "eventsourcing_events_inserted"
 
-// EventBus is a PostgreSQL-backed [cqrs.EventBus] that delivers events by
+// EventBus is a PostgreSQL-backed [eventsourcing.EventBus] that delivers events by
 // polling, woken promptly by LISTEN/NOTIFY (see NewEventBus). Each
 // subscriber's position is persisted in the event_subscriptions table, so
 // subscriptions resume where they left off after a restart. Delivery is
 // at-least-once and in strict id order: if a handler returns an error other
-// than [cqrs.SkippedEventError], that event and the rest of its batch are
+// than [eventsourcing.SkippedEventError], that event and the rest of its batch are
 // retried on the next poll without advancing the subscriber's position (see
 // poll), so a handler that keeps failing blocks that subscriber
 // indefinitely.
@@ -41,7 +41,7 @@ type EventBus struct {
 	errs         chan error
 	wg           sync.WaitGroup
 	pollInterval time.Duration
-	middlewares  []cqrs.EventHandlerMiddleware
+	middlewares  []eventsourcing.EventHandlerMiddleware
 	listenCancel context.CancelFunc
 	listenReady  chan struct{}
 	listenOnce   sync.Once
@@ -52,12 +52,12 @@ type EventBus struct {
 type subscriber struct {
 	name    string
 	opts    subscriberOptions
-	handler cqrs.EventHandler
+	handler eventsourcing.EventHandler
 	cancel  context.CancelFunc
 	wake    chan struct{}
 }
 
-// subscriberOptions accumulates the [cqrs.SubscriberOption] values passed
+// subscriberOptions accumulates the [eventsourcing.SubscriberOption] values passed
 // to Subscribe.
 type subscriberOptions struct {
 	filterEvents []string
@@ -107,11 +107,11 @@ func newLockPool(pool *pgxpool.Pool) *pgxpool.Pool {
 }
 
 // Use adds middlewares that wrap every handler registered afterward via
-// Subscribe. As required by [cqrs.EventBus], it must be called before
+// Subscribe. As required by [eventsourcing.EventBus], it must be called before
 // Subscribe: middlewares added after a given subscriber is registered do
 // not apply to that subscriber. Use and Subscribe are both safe to call
 // concurrently.
-func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+func (b *EventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.middlewares = append(b.middlewares, middlewares...)
@@ -127,7 +127,7 @@ func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 // removed automatically when ctx is canceled, or when the bus is closed —
 // neither leaves a goroutine behind, even if ctx is long-lived (e.g.
 // context.Background()).
-func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.EventHandler, opts ...cqrs.SubscriberOption) error {
+func (b *EventBus) Subscribe(ctx context.Context, name string, handler eventsourcing.EventHandler, opts ...eventsourcing.SubscriberOption) error {
 	if handler == nil {
 		return errors.New("handler cannot be nil")
 	}
@@ -183,7 +183,7 @@ func (b *EventBus) Subscribe(ctx context.Context, name string, handler cqrs.Even
 }
 
 // Errors returns the channel on which asynchronous handler and polling
-// errors are delivered, as required by [cqrs.EventBus].
+// errors are delivered, as required by [eventsourcing.EventBus].
 func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
@@ -296,7 +296,7 @@ func (b *EventBus) ensureSubscription(ctx context.Context, s *subscriber) error 
 // or rolls back, which keeps poll from ever advancing past that id and
 // permanently skipping it once it does commit.
 //
-// If s.handler returns an error other than [cqrs.SkippedEventError], poll
+// If s.handler returns an error other than [eventsourcing.SkippedEventError], poll
 // returns without committing, so the position is not advanced and the same
 // batch (including any events already handled successfully earlier in this
 // call) is retried on the next poll.
@@ -361,8 +361,8 @@ func (b *EventBus) poll(ctx context.Context, s *subscriber) error {
 			return err
 		}
 
-		if err := s.handler.Handle(cqrs.WithEnvelope(ctx, env), env.Event); err != nil {
-			var skipped *cqrs.SkippedEventError
+		if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, env), env.Event); err != nil {
+			var skipped *eventsourcing.SkippedEventError
 			if !errors.As(err, &skipped) {
 				return fmt.Errorf("handle %s: %w", env.Event.EventType(), err)
 			}
@@ -488,12 +488,12 @@ func (b *EventBus) sendErr(err error) {
 	}
 }
 
-// WithStartFrom returns a [cqrs.SubscriberOption] that sets the global event
+// WithStartFrom returns a [eventsourcing.SubscriberOption] that sets the global event
 // position from which a new subscription begins consuming. It only applies
 // when name has no existing record in event_subscriptions; an already
 // established subscription resumes from its stored position regardless. It
 // panics if applied to a bus other than this package's [EventBus].
-func WithStartFrom(pos int64) cqrs.SubscriberOption {
+func WithStartFrom(pos int64) eventsourcing.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*subscriberOptions)
 		if !ok {
@@ -503,11 +503,11 @@ func WithStartFrom(pos int64) cqrs.SubscriberOption {
 	}
 }
 
-// WithFilterEvents returns a [cqrs.SubscriberOption] that restricts the
+// WithFilterEvents returns a [eventsourcing.SubscriberOption] that restricts the
 // subscriber to events whose event_type matches one of types. Without this
 // option, a subscriber receives every event. It panics if applied to a bus
 // other than this package's [EventBus].
-func WithFilterEvents(types []string) cqrs.SubscriberOption {
+func WithFilterEvents(types []string) eventsourcing.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*subscriberOptions)
 		if !ok {

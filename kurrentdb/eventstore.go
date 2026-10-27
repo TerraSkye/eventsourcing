@@ -90,20 +90,20 @@ func defaultSaveBackoff() backoff.BackOff {
 //	NextExpectedVersion     = last EventNumber written + 1
 
 // Save appends events to the stream they share, translating revision into
-// the equivalent KurrentDB stream-state expectation: [cqrs.Any] skips the
-// check, [cqrs.NoStream] requires the stream not to exist yet,
-// [cqrs.StreamExists] requires that it already does, and a [cqrs.Revision]
+// the equivalent KurrentDB stream-state expectation: [eventsourcing.Any] skips the
+// check, [eventsourcing.NoStream] requires the stream not to exist yet,
+// [eventsourcing.StreamExists] requires that it already does, and a [eventsourcing.Revision]
 // of N requires the stream to hold exactly N events. All events must
 // have the same StreamID, or Save returns a non-nil error without contacting
 // the server. The append is retried with backoff on transient gRPC errors
 // (such as those from an in-progress leader election), for up to 30 seconds
-// by default — see [WithBackoff] to override. On success it returns a [cqrs.AppendResult] whose
+// by default — see [WithBackoff] to override. On success it returns a [eventsourcing.AppendResult] whose
 // NextExpectedVersion is the number of events the stream now holds.
 //
 // Failures are reported in this package's error vocabulary: a violated
-// [cqrs.NoStream] expectation matches [cqrs.ErrStreamExists], a violated
-// [cqrs.StreamExists] expectation matches [cqrs.ErrStreamNotFound], a
-// violated [cqrs.Revision] is a [cqrs.StreamRevisionConflictError], and
+// [eventsourcing.NoStream] expectation matches [eventsourcing.ErrStreamExists], a violated
+// [eventsourcing.StreamExists] expectation matches [eventsourcing.ErrStreamNotFound], a
+// violated [eventsourcing.Revision] is a [eventsourcing.StreamRevisionConflictError], and
 // anything else is mapped by [mapError].
 func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
@@ -267,7 +267,7 @@ func (e EventStore) currentRevision(ctx context.Context, streamID string) events
 // identified by id, in the order they were appended.
 //
 // A stream that does not exist is a failure, not an empty read: iteration
-// ends with an error matching [cqrs.ErrStreamNotFound], as it does in the
+// ends with an error matching [eventsourcing.ErrStreamNotFound], as it does in the
 // memory and file implementations. Because the read is lazy, that error
 // arrives through the iterator's Err rather than from LoadStream itself —
 // the server only reports the missing stream once the first event is
@@ -279,16 +279,16 @@ func (e EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 
 // LoadStreamFrom returns a lazy iterator over the events in the stream
 // identified by id, starting after the position identified by version. A
-// [cqrs.Revision] of N skips the stream's first N events, so a caller that
+// [eventsourcing.Revision] of N skips the stream's first N events, so a caller that
 // has already consumed N events resumes exactly where it left off;
-// [cqrs.Any] reads from the beginning. [cqrs.StreamExists] also reads from
-// the beginning but requires the stream to exist, and [cqrs.NoStream]
+// [eventsourcing.Any] reads from the beginning. [eventsourcing.StreamExists] also reads from
+// the beginning but requires the stream to exist, and [eventsourcing.NoStream]
 // requires that it does not.
 //
 // Because the read is lazy, a violated precondition is reported through the
 // iterator's Err rather than by LoadStreamFrom itself: a missing stream
-// under StreamExists matches [cqrs.ErrStreamNotFound], and an existing one
-// under NoStream matches [cqrs.ErrStreamExists]. Under Any or a Revision a
+// under StreamExists matches [eventsourcing.ErrStreamNotFound], and an existing one
+// under NoStream matches [eventsourcing.ErrStreamExists]. Under Any or a Revision a
 // missing stream is an empty read, which is what lets a command handler
 // load a brand-new aggregate. Every other failure ends iteration with an
 // error, mapped through [mapError].

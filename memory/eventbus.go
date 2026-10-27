@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
 // subscriber is a single registered handler and its per-handler delivery
@@ -18,9 +18,9 @@ import (
 // b.mu (see Dispatch).
 type subscriber struct {
 	name    string
-	handler cqrs.EventHandler
+	handler eventsourcing.EventHandler
 	filter  *filter
-	events  chan *cqrs.Envelope
+	events  chan *eventsourcing.Envelope
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -30,7 +30,7 @@ type filter struct {
 	events []string
 }
 
-// EventBus is an in-memory [cqrs.EventBus]. It delivers events to
+// EventBus is an in-memory [eventsourcing.EventBus]. It delivers events to
 // subscribers within the process, using one buffered channel and worker
 // goroutine per subscriber; it does not persist events, so nothing is
 // replayed across process restarts.
@@ -41,7 +41,7 @@ type EventBus struct {
 	errs        chan error
 	wg          sync.WaitGroup
 	bufferSize  int
-	middlewares []cqrs.EventHandlerMiddleware
+	middlewares []eventsourcing.EventHandlerMiddleware
 }
 
 // NewEventBus constructs an [EventBus] whose subscribers each buffer up to
@@ -56,11 +56,11 @@ func NewEventBus(bufferSize int) *EventBus {
 }
 
 // Use adds middlewares that wrap every handler registered afterward via
-// Subscribe. As required by [cqrs.EventBus], it must be called before
+// Subscribe. As required by [eventsourcing.EventBus], it must be called before
 // Subscribe: middlewares added after a given subscriber is registered do
 // not apply to that subscriber. Use and Subscribe are both safe to call
 // concurrently.
-func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
+func (b *EventBus) Use(middlewares ...eventsourcing.EventHandlerMiddleware) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.middlewares = append(b.middlewares, middlewares...)
@@ -76,8 +76,8 @@ func (b *EventBus) Use(middlewares ...cqrs.EventHandlerMiddleware) {
 func (b *EventBus) Subscribe(
 	ctx context.Context,
 	name string,
-	handler cqrs.EventHandler,
-	opts ...cqrs.SubscriberOption,
+	handler eventsourcing.EventHandler,
+	opts ...eventsourcing.SubscriberOption,
 ) error {
 	if handler == nil {
 		return errors.New("filter and handler cannot be nil")
@@ -107,7 +107,7 @@ func (b *EventBus) Subscribe(
 		filter: &filter{
 			events: make([]string, 0),
 		},
-		events: make(chan *cqrs.Envelope, b.bufferSize),
+		events: make(chan *eventsourcing.Envelope, b.bufferSize),
 		ctx:    workerCtx,
 		cancel: cancel,
 	}
@@ -139,7 +139,7 @@ func (b *EventBus) Subscribe(
 }
 
 // Errors returns the channel on which asynchronous handler errors are
-// delivered, as required by [cqrs.EventBus].
+// delivered, as required by [eventsourcing.EventBus].
 func (b *EventBus) Errors() <-chan error {
 	return b.errs
 }
@@ -184,7 +184,7 @@ func (b *EventBus) runSubscriber(ctx context.Context, s *subscriber) {
 
 		case ev := <-s.events:
 			// Handle event
-			if err := s.handler.Handle(cqrs.WithEnvelope(ctx, ev), ev.Event); err != nil {
+			if err := s.handler.Handle(eventsourcing.WithEnvelope(ctx, ev), ev.Event); err != nil {
 				select {
 				case b.errs <- fmt.Errorf("handler %q: %w", s.name, err):
 				default:
@@ -218,7 +218,7 @@ func (b *EventBus) removeSubscriber(name string) {
 // whose buffer is full therefore delays the caller until its handler
 // catches up, though never past that subscriber's own removal or the bus
 // being closed. Dispatch is a no-op once the bus has been closed.
-func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
+func (b *EventBus) Dispatch(ev *eventsourcing.Envelope) {
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -246,11 +246,11 @@ func (b *EventBus) Dispatch(ev *cqrs.Envelope) {
 	}
 }
 
-// WithFilterEvents returns a [cqrs.SubscriberOption] that restricts delivery
-// to events whose [cqrs.Event.EventType] matches one of filteredEvents.
+// WithFilterEvents returns a [eventsourcing.SubscriberOption] that restricts delivery
+// to events whose [eventsourcing.Event.EventType] matches one of filteredEvents.
 // Without this option, a subscriber receives every dispatched event. It
 // panics if applied to a bus other than this package's [EventBus].
-func WithFilterEvents(filteredEvents []string) cqrs.SubscriberOption {
+func WithFilterEvents(filteredEvents []string) eventsourcing.SubscriberOption {
 	return func(cfg any) {
 		opts, ok := cfg.(*filter)
 		if !ok {

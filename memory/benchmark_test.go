@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	"github.com/terraskye/eventsourcing/memory"
 	"github.com/terraskye/eventsourcing/projection"
@@ -15,13 +15,13 @@ import (
 )
 
 func BenchmarkEventStore(b *testing.B) {
-	eventsourcingtest.Benchmark(b, func(*testing.B) cqrs.EventStore {
+	eventsourcingtest.Benchmark(b, func(*testing.B) eventsourcing.EventStore {
 		return memory.NewEventStore()
 	})
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(*testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
+	projectiontest.Benchmark(b, func(*testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler) {
 		return memory.NewEventStore(), memory.NewProjectionStore(), newRowsHandler()
 	})
 }
@@ -29,13 +29,13 @@ func BenchmarkProjection(b *testing.B) {
 // newRowsHandler returns a handler that keeps the benchmark's read model in
 // a map, the memory backend's database: one row per stream, holding the
 // version last applied.
-func newRowsHandler() cqrs.EventHandler {
+func newRowsHandler() eventsourcing.EventHandler {
 	var mu sync.Mutex
 	rows := map[string]uint64{}
-	return cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+	return eventsourcing.NewEventHandlerFunc(func(ctx context.Context, _ eventsourcing.Event) error {
 		mu.Lock()
 		defer mu.Unlock()
-		rows[cqrs.StreamIDFromContext(ctx)] = cqrs.VersionFromContext(ctx)
+		rows[eventsourcing.StreamIDFromContext(ctx)] = eventsourcing.VersionFromContext(ctx)
 		return nil
 	})
 }

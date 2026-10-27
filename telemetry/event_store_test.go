@@ -15,7 +15,7 @@ import (
 // trace-propagation headers into it, rather than mutating the
 // caller-supplied map in place (events[i].Metadata["traceparent"] = ...). Callers
 // commonly build one "base" metadata map once (e.g. a tenant or request ID)
-// and attach it, unmodified, to several Envelopes — cqrs.NewCommandHandler's
+// and attach it, unmodified, to several Envelopes — eventsourcing.NewCommandHandler's
 // own WithMetadataExtractor relies on exactly this being safe, calling
 // maps.Clone(baseMetadata) per Envelope before Save. Without cloning here
 // too, any caller of the EventStore interface directly (bypassing
@@ -225,7 +225,7 @@ func (s *closeTrackingStore) Close() error { return nil }
 //
 // An early stop is the case that matters. The underlying iterator may hold a
 // database cursor or an open read stream, and a caller that breaks out of
-// the loop (as cqrs.NewCommandHandler's retry loop can, via its deferred
+// the loop (as eventsourcing.NewCommandHandler's retry loop can, via its deferred
 // Close) would otherwise leak it.
 func TestEventStore_ClosesUnderlyingIterator(t *testing.T) {
 	load := map[string]func(eventsourcing.EventStore, context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error){
