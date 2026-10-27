@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	kdb "github.com/terraskye/eventsourcing/kurrentdb"
 
@@ -24,12 +24,12 @@ func (CheckEvent) AggregateID() string { return "check" }
 func (CheckEvent) EventType() string   { return "CheckEvent" }
 
 func init() {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &CheckEvent{} })
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &CheckEvent{} })
 }
 
-func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
+func collectAll(t *testing.T, iter *eventsourcing.Iterator[*eventsourcing.Envelope]) []*eventsourcing.Envelope {
 	t.Helper()
-	var out []*cqrs.Envelope
+	var out []*eventsourcing.Envelope
 	for iter.Next() {
 		out = append(out, iter.Value())
 	}
@@ -40,7 +40,7 @@ func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envel
 }
 
 // TestLoadStreamFrom_RevisionIsInclusiveNotExclusive is a regression test
-// for GitHub issue #45: LoadStreamFrom(ctx, id, cqrs.Revision(N)) read
+// for GitHub issue #45: LoadStreamFrom(ctx, id, eventsourcing.Revision(N)) read
 // starting at revision N inclusive, because it forwarded N directly into
 // kurrentdb.StreamRevision{Value: N} — KurrentDB's own native,
 // inclusive-of-N read position. Every other EventStore implementation in
@@ -56,12 +56,12 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 
 	// Save 3 events (Versions 1, 2, 3; native KurrentDB revisions 0, 1, 2).
 	for i := 0; i < 3; i++ {
-		_, err := store.Save(ctx, []cqrs.Envelope{{
+		_, err := store.Save(ctx, []eventsourcing.Envelope{{
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
 			OccurredAt: time.Now(),
-		}}, cqrs.Any{})
+		}}, eventsourcing.Any{})
 		if err != nil {
 			t.Fatalf("save %d: %v", i, err)
 		}
@@ -70,7 +70,7 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	// Simulate NewCommandHandler's evolve loop: consume everything once and
 	// remember the last event's Version, exactly as command_handler.go does
 	// via `revision = Revision(event.Version)`.
-	iter, err := store.LoadStreamFrom(ctx, streamID, cqrs.Any{})
+	iter, err := store.LoadStreamFrom(ctx, streamID, eventsourcing.Any{})
 	if err != nil {
 		t.Fatalf("initial load: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 
 	// Retry: resume from the last consumed revision. Since all 3 events
 	// were already evolved, this MUST yield zero events.
-	iter, err = store.LoadStreamFrom(ctx, streamID, cqrs.Revision(lastVersion))
+	iter, err = store.LoadStreamFrom(ctx, streamID, eventsourcing.Revision(lastVersion))
 	if err != nil {
 		t.Fatalf("resume load: %v", err)
 	}
@@ -105,12 +105,12 @@ func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 	streamID := "check-readall-end"
 
 	for i := 0; i < 3; i++ {
-		if _, err := store.Save(ctx, []cqrs.Envelope{{
+		if _, err := store.Save(ctx, []eventsourcing.Envelope{{
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
 			OccurredAt: time.Now(),
-		}}, cqrs.Any{}); err != nil {
+		}}, eventsourcing.Any{}); err != nil {
 			t.Fatalf("save %d: %v", i, err)
 		}
 	}
@@ -119,7 +119,7 @@ func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 	go func() {
 		var after uint64
 		for {
-			res, err := store.ReadAll(ctx, after, cqrs.ReadOptions{Limit: 100})
+			res, err := store.ReadAll(ctx, after, eventsourcing.ReadOptions{Limit: 100})
 			if err != nil {
 				done <- err
 				return
@@ -174,11 +174,11 @@ func TestSave_UsesConfiguredBackoffNotDefault(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 
 	start := time.Now()
-	_, err := store.Save(ctx, []cqrs.Envelope{{
+	_, err := store.Save(ctx, []eventsourcing.Envelope{{
 		StreamID: "backoff-probe-stream",
 		Event:    BackoffProbeEvent{N: 1},
 		Metadata: map[string]any{},
-	}}, cqrs.Any{})
+	}}, eventsourcing.Any{})
 	elapsed := time.Since(start)
 
 	t.Logf("Save gave up after %s, err=%v", elapsed, err)
@@ -201,7 +201,7 @@ func (CountProbeEvent) AggregateID() string { return "count-probe" }
 func (CountProbeEvent) EventType() string   { return "CountProbeEvent" }
 
 func init() {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &CountProbeEvent{} })
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &CountProbeEvent{} })
 }
 
 // TestLoadStream_ReturnsEveryEventInLargeStreams is a regression test for the
@@ -238,16 +238,16 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 		if end > total {
 			end = total
 		}
-		batch := make([]cqrs.Envelope, 0, end-start)
+		batch := make([]eventsourcing.Envelope, 0, end-start)
 		for i := start; i < end; i++ {
-			batch = append(batch, cqrs.Envelope{
+			batch = append(batch, eventsourcing.Envelope{
 				StreamID:   streamID,
 				Event:      &CountProbeEvent{N: i},
 				Metadata:   map[string]any{},
 				OccurredAt: time.Now(),
 			})
 		}
-		if _, err := store.Save(ctx, batch, cqrs.Any{}); err != nil {
+		if _, err := store.Save(ctx, batch, eventsourcing.Any{}); err != nil {
 			t.Fatalf("save batch [%d,%d): %v", start, end, err)
 		}
 	}
@@ -294,18 +294,18 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 
 	// Save 3 events (native KurrentDB revisions 0, 1, 2).
 	for i := 0; i < 3; i++ {
-		_, err := store.Save(ctx, []cqrs.Envelope{{
+		_, err := store.Save(ctx, []eventsourcing.Envelope{{
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
 			OccurredAt: time.Now(),
-		}}, cqrs.Any{})
+		}}, eventsourcing.Any{})
 		if err != nil {
 			t.Fatalf("save %d: %v", i, err)
 		}
 	}
 
-	hugeRevision := cqrs.Revision(uint64(1) << 63)
+	hugeRevision := eventsourcing.Revision(uint64(1) << 63)
 
 	defer func() {
 		r := recover()
@@ -327,11 +327,11 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 // .bug/eventstore-kurrentdb-loadstream-missing-stream-masked-as-empty.md.
 //
 // LoadStream and LoadStreamFrom used to discard every error from
-// streamer.Recv and return io.EOF instead, which cqrs.Iterator translates
+// streamer.Recv and return io.EOF instead, which eventsourcing.Iterator translates
 // into a clean end of iteration (Next() == false, Err() == nil). A stream
 // that did not exist -- and equally a connection that dropped halfway
 // through a read -- was indistinguishable from a complete, empty read.
-// LoadStream now reports a missing stream as cqrs.ErrStreamNotFound, the
+// LoadStream now reports a missing stream as eventsourcing.ErrStreamNotFound, the
 // same sentinel packages memory and file use.
 func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 	store := kdb.NewEventStore(testDB)
@@ -339,8 +339,8 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 
 	iter, err := store.LoadStream(ctx, "stream-that-does-not-exist")
 	if err != nil {
-		if !errors.Is(err, cqrs.ErrStreamNotFound) {
-			t.Fatalf("LoadStream error = %v, want cqrs.ErrStreamNotFound", err)
+		if !errors.Is(err, eventsourcing.ErrStreamNotFound) {
+			t.Fatalf("LoadStream error = %v, want eventsourcing.ErrStreamNotFound", err)
 		}
 		return // reported at open time: acceptable
 	}
@@ -352,8 +352,8 @@ func TestLoadStream_MissingStreamIsReportedNotFound(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("got %d events from a non-existent stream", got)
 	}
-	if err := iter.Err(); !errors.Is(err, cqrs.ErrStreamNotFound) {
-		t.Fatalf("iter.Err() = %v, want cqrs.ErrStreamNotFound: a missing stream is "+
+	if err := iter.Err(); !errors.Is(err, eventsourcing.ErrStreamNotFound) {
+		t.Fatalf("iter.Err() = %v, want eventsourcing.ErrStreamNotFound: a missing stream is "+
 			"being reported as a clean, complete, empty read again, so callers cannot "+
 			"tell it apart from an existing empty stream -- nor from a read that failed "+
 			"partway through", err)
@@ -369,7 +369,7 @@ func TestSave_ChainKeysInMetadataDoNotBecomeTheChain(t *testing.T) {
 	ctx := context.Background()
 	streamID := "check-chain-keys"
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{{
 		StreamID: streamID,
 		Event:    &CheckEvent{N: 1},
 		Metadata: map[string]any{
@@ -378,7 +378,7 @@ func TestSave_ChainKeysInMetadataDoNotBecomeTheChain(t *testing.T) {
 			"tenant":         "t1",
 		},
 		OccurredAt: time.Now(),
-	}}, cqrs.NoStream{}); err != nil {
+	}}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 

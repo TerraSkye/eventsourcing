@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/automation/automationtest"
 	"github.com/terraskye/eventsourcing/projection"
@@ -93,7 +93,7 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 
 	todoList := projection.NewRunner(projection.Definition{
 		Name: "tasks-to-finish",
-		Handler: cqrs.NewEventHandlerFunc(func(ctx context.Context, e cqrs.Event) error {
+		Handler: eventsourcing.NewEventHandlerFunc(func(ctx context.Context, e eventsourcing.Event) error {
 			var err error
 			switch e := e.(type) {
 			case *taskCreated:
@@ -116,7 +116,7 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 		Claim:    list.Claim,
 		Work: func(ctx context.Context, id string) error {
 			// The command's outcome: the event that removes the item.
-			_, err := store.Save(ctx, []cqrs.Envelope{{StreamID: "task-" + id, Event: &taskDone{ID: id}}}, cqrs.StreamExists{})
+			_, err := store.Save(ctx, []eventsourcing.Envelope{{StreamID: "task-" + id, Event: &taskDone{ID: id}}}, eventsourcing.StreamExists{})
 			return err
 		},
 		Interval: time.Hour, // nudges from the runner do the waking
@@ -141,7 +141,7 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 		}
 		return n == 0
 	})
-	res, err := store.ReadAll(t.Context(), 0, cqrs.ReadOptions{EventTypes: []string{"sqlite_test.TaskDone"}})
+	res, err := store.ReadAll(t.Context(), 0, eventsourcing.ReadOptions{EventTypes: []string{"sqlite_test.TaskDone"}})
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
 	}

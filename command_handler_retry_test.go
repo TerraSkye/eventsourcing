@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	es "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
 // TestNewCommandHandler_RetryBudgetPerCommand covers a handler run by a
@@ -19,17 +19,17 @@ import (
 // each one is saved exactly 1+3 times, and -race sees no shared BackOff.
 func TestNewCommandHandler_RetryBudgetPerCommand(t *testing.T) {
 	store := &alwaysConflictStore{saves: map[string]int{}}
-	handler := es.NewCommandHandler(store,
+	handler := eventsourcing.NewCommandHandler(store,
 		func() int { return 0 },
-		func(s int, _ *es.Envelope) int { return s },
-		func(s int, c bumpCmd) ([]es.Event, error) { return []es.Event{bumped{c.ID}}, nil },
-		es.WithRetryStrategy(func() backoff.BackOff {
+		func(s int, _ *eventsourcing.Envelope) int { return s },
+		func(s int, c bumpCmd) ([]eventsourcing.Event, error) { return []eventsourcing.Event{bumped{c.ID}}, nil },
+		eventsourcing.WithRetryStrategy(func() backoff.BackOff {
 			return backoff.WithMaxRetries(backoff.NewConstantBackOff(2*time.Millisecond), 3)
 		}),
 	)
-	bus := es.NewCommandBus(16, 8)
+	bus := eventsourcing.NewCommandBus(16, 8)
 	defer bus.Stop()
-	es.Register(bus, handler)
+	eventsourcing.Register(bus, handler)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -77,19 +77,19 @@ type alwaysConflictStore struct {
 	saves map[string]int
 }
 
-func (s *alwaysConflictStore) Save(_ context.Context, envs []es.Envelope, rev es.StreamState) (es.AppendResult, error) {
+func (s *alwaysConflictStore) Save(_ context.Context, envs []eventsourcing.Envelope, rev eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	s.mu.Lock()
 	s.saves[envs[0].StreamID]++
 	s.mu.Unlock()
-	return es.AppendResult{}, &es.StreamRevisionConflictError{Stream: envs[0].StreamID, ExpectedRevision: rev, ActualRevision: es.Revision(1)}
+	return eventsourcing.AppendResult{}, &eventsourcing.StreamRevisionConflictError{Stream: envs[0].StreamID, ExpectedRevision: rev, ActualRevision: eventsourcing.Revision(1)}
 }
 
-func (s *alwaysConflictStore) LoadStream(ctx context.Context, id string) (*es.Iterator[*es.Envelope], error) {
-	return s.LoadStreamFrom(ctx, id, es.Any{})
+func (s *alwaysConflictStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return s.LoadStreamFrom(ctx, id, eventsourcing.Any{})
 }
 
-func (s *alwaysConflictStore) LoadStreamFrom(ctx context.Context, _ string, _ es.StreamState) (*es.Iterator[*es.Envelope], error) {
-	return es.NewSliceIterator[*es.Envelope](ctx, nil), nil
+func (s *alwaysConflictStore) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return eventsourcing.NewSliceIterator[*eventsourcing.Envelope](ctx, nil), nil
 }
 
 func (s *alwaysConflictStore) Close() error { return nil }
@@ -99,13 +99,15 @@ func (s *alwaysConflictStore) Close() error { return nil }
 // ends at once, and the CommandBus shard that ran it is free for the next
 // command.
 func TestNewCommandHandler_RetryWaitEndsWithContext(t *testing.T) {
-	newHandler := func(saves *atomic.Int32) es.CommandHandler[retryCtxCmd] {
+	newHandler := func(saves *atomic.Int32) eventsourcing.CommandHandler[retryCtxCmd] {
 		store := &conflictOnceStore{saves: saves}
-		return es.NewCommandHandler(store,
+		return eventsourcing.NewCommandHandler(store,
 			func() int { return 0 },
-			func(s int, _ *es.Envelope) int { return s + 1 },
-			func(int, retryCtxCmd) ([]es.Event, error) { return []es.Event{retryCtxEvent{}}, nil },
-			es.WithRetryStrategy(func() backoff.BackOff { return backoff.NewConstantBackOff(2 * time.Second) }),
+			func(s int, _ *eventsourcing.Envelope) int { return s + 1 },
+			func(int, retryCtxCmd) ([]eventsourcing.Event, error) {
+				return []eventsourcing.Event{retryCtxEvent{}}, nil
+			},
+			eventsourcing.WithRetryStrategy(func() backoff.BackOff { return backoff.NewConstantBackOff(2 * time.Second) }),
 		)
 	}
 
@@ -127,9 +129,9 @@ func TestNewCommandHandler_RetryWaitEndsWithContext(t *testing.T) {
 
 	t.Run("cancelled command does not block its bus shard", func(t *testing.T) {
 		var saves atomic.Int32
-		bus := es.NewCommandBus(4, 1)
+		bus := eventsourcing.NewCommandBus(4, 1)
 		defer bus.Stop()
-		es.Register(bus, newHandler(&saves))
+		eventsourcing.Register(bus, newHandler(&saves))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		time.AfterFunc(50*time.Millisecond, cancel)
@@ -160,17 +162,17 @@ func (retryCtxEvent) AggregateID() string { return "a" }
 // conflictOnceStore reports a revision conflict on its first Save and
 // accepts every later one. Loads return an empty stream bound to ctx.
 type conflictOnceStore struct {
-	es.EventStore
+	eventsourcing.EventStore
 	saves *atomic.Int32
 }
 
-func (s *conflictOnceStore) Save(_ context.Context, envs []es.Envelope, rev es.StreamState) (es.AppendResult, error) {
+func (s *conflictOnceStore) Save(_ context.Context, envs []eventsourcing.Envelope, rev eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if s.saves.Add(1) == 1 {
-		return es.AppendResult{}, &es.StreamRevisionConflictError{Stream: envs[0].StreamID, ExpectedRevision: rev, ActualRevision: es.Revision(1)}
+		return eventsourcing.AppendResult{}, &eventsourcing.StreamRevisionConflictError{Stream: envs[0].StreamID, ExpectedRevision: rev, ActualRevision: eventsourcing.Revision(1)}
 	}
-	return es.AppendResult{Successful: true, StreamID: envs[0].StreamID}, nil
+	return eventsourcing.AppendResult{Successful: true, StreamID: envs[0].StreamID}, nil
 }
 
-func (s *conflictOnceStore) LoadStreamFrom(ctx context.Context, _ string, _ es.StreamState) (*es.Iterator[*es.Envelope], error) {
-	return es.NewSliceIterator[*es.Envelope](ctx, nil), nil
+func (s *conflictOnceStore) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return eventsourcing.NewSliceIterator[*eventsourcing.Envelope](ctx, nil), nil
 }

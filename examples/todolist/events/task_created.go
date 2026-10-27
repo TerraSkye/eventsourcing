@@ -4,13 +4,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 )
 
-var _ cqrs.Event = (*TaskCreated)(nil)
+var _ eventsourcing.Event = (*TaskCreated)(nil)
 
 func init() {
-	cqrs.RegisterEvent(&TaskCreated{})
+	eventsourcing.RegisterEvent(&TaskCreated{})
 }
 
 // TaskCreated is emitted when a new task is added to the list.

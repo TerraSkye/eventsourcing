@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/sqlite"
 )
 
@@ -27,18 +27,18 @@ func (e *taskDone) AggregateID() string { return e.ID }
 func (e *taskDone) EventType() string   { return "sqlite_test.TaskDone" }
 
 func init() {
-	cqrs.RegisterEvent(&taskCreated{})
-	cqrs.RegisterEvent(&taskDone{})
+	eventsourcing.RegisterEvent(&taskCreated{})
+	eventsourcing.RegisterEvent(&taskDone{})
 }
 
 // appendEvents saves events to stream id and returns the last position.
-func appendEvents(t *testing.T, store *sqlite.EventStore, id string, events ...cqrs.Event) uint64 {
+func appendEvents(t *testing.T, store *sqlite.EventStore, id string, events ...eventsourcing.Event) uint64 {
 	t.Helper()
-	envs := make([]cqrs.Envelope, len(events))
+	envs := make([]eventsourcing.Envelope, len(events))
 	for i, e := range events {
-		envs[i] = cqrs.Envelope{EventID: uuid.New(), StreamID: id, Event: e, OccurredAt: time.Now()}
+		envs[i] = eventsourcing.Envelope{EventID: uuid.New(), StreamID: id, Event: e, OccurredAt: time.Now()}
 	}
-	res, err := store.Save(t.Context(), envs, cqrs.Any{})
+	res, err := store.Save(t.Context(), envs, eventsourcing.Any{})
 	if err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -48,11 +48,11 @@ func appendEvents(t *testing.T, store *sqlite.EventStore, id string, events ...c
 // recorder collects the events a handler receives.
 type recorder struct {
 	mu     sync.Mutex
-	events []cqrs.Event
-	fail   func(cqrs.Event) error
+	events []eventsourcing.Event
+	fail   func(eventsourcing.Event) error
 }
 
-func (r *recorder) Handle(ctx context.Context, e cqrs.Event) error {
+func (r *recorder) Handle(ctx context.Context, e eventsourcing.Event) error {
 	if r.fail != nil {
 		if err := r.fail(e); err != nil {
 			return err
@@ -161,7 +161,7 @@ func TestEventBus_FailingHandlerIsRetried(t *testing.T) {
 
 	var mu sync.Mutex
 	failures := 0
-	rec := &recorder{fail: func(e cqrs.Event) error {
+	rec := &recorder{fail: func(e eventsourcing.Event) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if _, ok := e.(*taskDone); ok && failures < 2 {
@@ -193,7 +193,7 @@ func TestEventBus_HandlerMayUseTheDatabase(t *testing.T) {
 	t.Cleanup(func() { bus.Close() })
 
 	done := make(chan struct{})
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, e cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, e eventsourcing.Event) error {
 		if _, ok := e.(*taskCreated); !ok {
 			return nil
 		}
@@ -240,7 +240,7 @@ type closingHandler struct {
 	seen    int
 }
 
-func (h *closingHandler) Handle(ctx context.Context, e cqrs.Event) error {
+func (h *closingHandler) Handle(ctx context.Context, e eventsourcing.Event) error {
 	if err := h.recorder.Handle(ctx, e); err != nil {
 		return err
 	}

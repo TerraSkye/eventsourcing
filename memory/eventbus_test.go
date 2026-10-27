@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/memory"
 )
 
@@ -27,7 +27,7 @@ type blockingHandler struct {
 	release      chan struct{}
 }
 
-func (h *blockingHandler) Handle(ctx context.Context, ev cqrs.Event) error {
+func (h *blockingHandler) Handle(ctx context.Context, ev eventsourcing.Event) error {
 	h.handlingOnce.Do(func() { close(h.handling) })
 	<-h.release
 	return nil
@@ -54,7 +54,7 @@ func TestDispatch_BlockingSendDoesNotHoldLock(t *testing.T) {
 	// First event: runSubscriber's select receives it immediately (synchronous
 	// handoff on the unbuffered channel) and calls Handle, which blocks on
 	// h.release. This first Dispatch call itself returns fine.
-	bus.Dispatch(&cqrs.Envelope{Event: blockingEvent{}})
+	bus.Dispatch(&eventsourcing.Envelope{Event: blockingEvent{}})
 
 	select {
 	case <-h.handling:
@@ -65,15 +65,15 @@ func TestDispatch_BlockingSendDoesNotHoldLock(t *testing.T) {
 	// Second event: runSubscriber is busy inside Handle and not receiving
 	// from s.events, and the channel is unbuffered, so this send blocks. It
 	// must not do so while holding b.mu.
-	go bus.Dispatch(&cqrs.Envelope{Event: blockingEvent{}})
+	go bus.Dispatch(&eventsourcing.Envelope{Event: blockingEvent{}})
 	time.Sleep(200 * time.Millisecond)
 
 	// A completely unrelated call that needs b.mu.Lock() must not be blocked
 	// by the pending send above.
 	subscribeDone := make(chan error, 1)
 	go func() {
-		subscribeDone <- bus.Subscribe(context.Background(), "sub2", cqrs.NewEventHandlerFunc(
-			func(ctx context.Context, ev cqrs.Event) error { return nil },
+		subscribeDone <- bus.Subscribe(context.Background(), "sub2", eventsourcing.NewEventHandlerFunc(
+			func(ctx context.Context, ev eventsourcing.Event) error { return nil },
 		))
 	}()
 
@@ -131,16 +131,16 @@ func (c *calls) snapshot() []string {
 	return slices.Clone(c.seen)
 }
 
-func newGroup(t *testing.T) (*cqrs.EventGroupProcessor, *calls) {
+func newGroup(t *testing.T) (*eventsourcing.EventGroupProcessor, *calls) {
 	t.Helper()
 
 	got := &calls{}
-	group := cqrs.NewEventGroupProcessor(
-		cqrs.OnEvent(func(ctx context.Context, ev *WidgetCreated) error {
+	group := eventsourcing.NewEventGroupProcessor(
+		eventsourcing.OnEvent(func(ctx context.Context, ev *WidgetCreated) error {
 			got.add("WidgetCreated")
 			return nil
 		}),
-		cqrs.OnEvent(func(ctx context.Context, ev *WidgetRenamed) error {
+		eventsourcing.OnEvent(func(ctx context.Context, ev *WidgetRenamed) error {
 			got.add("WidgetRenamed")
 			return nil
 		}),
@@ -154,7 +154,7 @@ func newGroup(t *testing.T) (*cqrs.EventGroupProcessor, *calls) {
 // RegisterEvent/RegisterEventByType/RegisterEventByName is silently omitted
 // rather than included under its own EventType().
 func TestStreamFilterOmitsUnregisteredEventTypes(t *testing.T) {
-	cqrs.RegisterEvent(&WidgetCreated{})
+	eventsourcing.RegisterEvent(&WidgetCreated{})
 	// WidgetRenamed intentionally not registered.
 
 	group, _ := newGroup(t)
@@ -177,8 +177,8 @@ func (e *UnrelatedEvent) EventType() string   { return "UnrelatedEvent" }
 // reads as "no filter" — the subscriber ends up firehosed with every event
 // on the bus instead of just the ones it has handlers for.
 func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {
-	group := cqrs.NewEventGroupProcessor(
-		cqrs.OnEvent(func(ctx context.Context, ev *WidgetRenamed) error { return nil }),
+	group := eventsourcing.NewEventGroupProcessor(
+		eventsourcing.OnEvent(func(ctx context.Context, ev *WidgetRenamed) error { return nil }),
 	)
 
 	if f := group.StreamFilter(); len(f) != 0 {
@@ -191,8 +191,8 @@ func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	delivered := make(chan cqrs.Event, 4)
-	probe := cqrs.NewEventHandlerFunc(func(ctx context.Context, ev cqrs.Event) error {
+	delivered := make(chan eventsourcing.Event, 4)
+	probe := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error {
 		delivered <- ev
 		return group.Handle(ctx, ev)
 	})
@@ -201,7 +201,7 @@ func TestStreamFilterAllUnregisteredInvertsToCatchAll(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	bus.Dispatch(&cqrs.Envelope{StreamID: "x1", Event: &UnrelatedEvent{ID: "x1"}, OccurredAt: time.Now()})
+	bus.Dispatch(&eventsourcing.Envelope{StreamID: "x1", Event: &UnrelatedEvent{ID: "x1"}, OccurredAt: time.Now()})
 
 	select {
 	case ev := <-delivered:
@@ -235,13 +235,13 @@ func TestStreamFilterSubscriptionDropsUnregisteredHandledEvent(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	bus.Dispatch(&cqrs.Envelope{StreamID: "w1", Event: &WidgetCreated{ID: "w1"}, OccurredAt: time.Now()})
-	bus.Dispatch(&cqrs.Envelope{StreamID: "w1", Event: &WidgetRenamed{ID: "w1"}, OccurredAt: time.Now()})
+	bus.Dispatch(&eventsourcing.Envelope{StreamID: "w1", Event: &WidgetCreated{ID: "w1"}, OccurredAt: time.Now()})
+	bus.Dispatch(&eventsourcing.Envelope{StreamID: "w1", Event: &WidgetRenamed{ID: "w1"}, OccurredAt: time.Now()})
 
 	// Drain any handler errors so a skipped event surfaces instead of hiding.
 	go func() {
 		for err := range bus.Errors() {
-			var skipped *cqrs.SkippedEventError
+			var skipped *eventsourcing.SkippedEventError
 			if !errors.As(err, &skipped) {
 				t.Errorf("unexpected handler error: %v", err)
 			}
@@ -274,10 +274,10 @@ func TestStreamFilterSubscriptionDropsUnregisteredHandledEvent(t *testing.T) {
 func TestUse_RacesWithSubscribe(t *testing.T) {
 	bus := memory.NewEventBus(1)
 
-	noopMiddleware := func(next cqrs.EventHandler) cqrs.EventHandler {
+	noopMiddleware := func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 		return next
 	}
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -317,7 +317,7 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 
 	before := countGoroutinesCreatedBy(createdBy)
 
-	noop := cqrs.NewEventHandlerFunc(func(ctx context.Context, ev cqrs.Event) error { return nil })
+	noop := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, ev eventsourcing.Event) error { return nil })
 
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("sub-%d", i)

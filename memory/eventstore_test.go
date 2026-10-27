@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	"github.com/terraskye/eventsourcing/memory"
 )
@@ -41,17 +41,17 @@ func (e *OrderShipped) AggregateID() string { return e.OrderID }
 func (e *OrderShipped) EventType() string   { return "OrderShipped" }
 
 func init() {
-	cqrs.RegisterEvent(&OrderCreated{})
-	cqrs.RegisterEvent(&ItemAdded{})
-	cqrs.RegisterEvent(&OrderShipped{})
-	cqrs.RegisterEvent(&closeTestEvent{})
-	cqrs.RegisterEvent(&aliasTestEvent{})
+	eventsourcing.RegisterEvent(&OrderCreated{})
+	eventsourcing.RegisterEvent(&ItemAdded{})
+	eventsourcing.RegisterEvent(&OrderShipped{})
+	eventsourcing.RegisterEvent(&closeTestEvent{})
+	eventsourcing.RegisterEvent(&aliasTestEvent{})
 }
 
 // Helper functions
 
-func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
-	return cqrs.Envelope{
+func newEnvelope(streamID string, event eventsourcing.Event) eventsourcing.Envelope {
+	return eventsourcing.Envelope{
 		EventID:    uuid.New(),
 		StreamID:   streamID,
 		Event:      event,
@@ -60,9 +60,9 @@ func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
 	}
 }
 
-func collectAll(t *testing.T, iter *cqrs.Iterator[*cqrs.Envelope]) []*cqrs.Envelope {
+func collectAll(t *testing.T, iter *eventsourcing.Iterator[*eventsourcing.Envelope]) []*eventsourcing.Envelope {
 	t.Helper()
-	var results []*cqrs.Envelope
+	var results []*eventsourcing.Envelope
 	for iter.Next() {
 		results = append(results, iter.Value())
 	}
@@ -78,7 +78,7 @@ func TestSave_EmptySlice(t *testing.T) {
 	store := memory.NewEventStore()
 	defer store.Close()
 
-	result, err := store.Save(context.Background(), []cqrs.Envelope{}, cqrs.Any{})
+	result, err := store.Save(context.Background(), []eventsourcing.Envelope{}, eventsourcing.Any{})
 
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
@@ -93,7 +93,7 @@ func TestSave_SingleEvent(t *testing.T) {
 	defer store.Close()
 
 	event := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	result, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Any{})
+	result, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Any{})
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -113,13 +113,13 @@ func TestSave_MultipleEvents(t *testing.T) {
 	store := memory.NewEventStore()
 	defer store.Close()
 
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 2}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-2", Qty: 1}),
 	}
 
-	result, err := store.Save(context.Background(), events, cqrs.Any{})
+	result, err := store.Save(context.Background(), events, eventsourcing.Any{})
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -133,17 +133,17 @@ func TestSave_MixedStreamIDs_Fails(t *testing.T) {
 	store := memory.NewEventStore()
 	defer store.Close()
 
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-2", &OrderCreated{OrderID: "order-2", CustomerID: "cust-2"}),
 	}
 
-	result, err := store.Save(context.Background(), events, cqrs.Any{})
+	result, err := store.Save(context.Background(), events, eventsourcing.Any{})
 
 	if err == nil {
 		t.Fatal("expected error for mixed stream IDs")
 	}
-	if !errors.Is(err, cqrs.ErrInvalidEventBatch) {
+	if !errors.Is(err, eventsourcing.ErrInvalidEventBatch) {
 		t.Errorf("expected ErrInvalidEventBatch, got %v", err)
 	}
 	if result.Successful {
@@ -158,7 +158,7 @@ func TestSave_NoStream_Success(t *testing.T) {
 	defer store.Close()
 
 	event := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	result, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.NoStream{})
+	result, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.NoStream{})
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -174,16 +174,16 @@ func TestSave_NoStream_FailsWhenStreamExists(t *testing.T) {
 
 	// Create stream first
 	event1 := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{event1}, cqrs.Any{})
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{event1}, eventsourcing.Any{})
 
 	// Try to save with NoStream
 	event2 := newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1})
-	_, err := store.Save(context.Background(), []cqrs.Envelope{event2}, cqrs.NoStream{})
+	_, err := store.Save(context.Background(), []eventsourcing.Envelope{event2}, eventsourcing.NoStream{})
 
 	if err == nil {
 		t.Fatal("expected error when stream already exists")
 	}
-	if !errors.Is(err, cqrs.ErrStreamExists) {
+	if !errors.Is(err, eventsourcing.ErrStreamExists) {
 		t.Errorf("expected ErrStreamExists, got %v", err)
 	}
 }
@@ -194,11 +194,11 @@ func TestSave_StreamExists_Success(t *testing.T) {
 
 	// Create stream first
 	event1 := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{event1}, cqrs.Any{})
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{event1}, eventsourcing.Any{})
 
 	// Append with StreamExists
 	event2 := newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1})
-	result, err := store.Save(context.Background(), []cqrs.Envelope{event2}, cqrs.StreamExists{})
+	result, err := store.Save(context.Background(), []eventsourcing.Envelope{event2}, eventsourcing.StreamExists{})
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -213,12 +213,12 @@ func TestSave_StreamExists_FailsWhenNoStream(t *testing.T) {
 	defer store.Close()
 
 	event := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	_, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.StreamExists{})
+	_, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.StreamExists{})
 
 	if err == nil {
 		t.Fatal("expected error when stream doesn't exist")
 	}
-	if !errors.Is(err, cqrs.ErrStreamNotFound) {
+	if !errors.Is(err, eventsourcing.ErrStreamNotFound) {
 		t.Errorf("expected ErrStreamNotFound, got %v", err)
 	}
 }
@@ -228,15 +228,15 @@ func TestSave_Revision_Success(t *testing.T) {
 	defer store.Close()
 
 	// Create stream with 2 events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Append at correct revision
 	event := newEnvelope("order-1", &OrderShipped{OrderID: "order-1"})
-	result, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Revision(2))
+	result, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Revision(2))
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -251,21 +251,21 @@ func TestSave_Revision_Conflict(t *testing.T) {
 	defer store.Close()
 
 	// Create stream with 2 events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Try to append at wrong revision
 	event := newEnvelope("order-1", &OrderShipped{OrderID: "order-1"})
-	_, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Revision(1))
+	_, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Revision(1))
 
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
 
-	var conflictErr *cqrs.StreamRevisionConflictError
+	var conflictErr *eventsourcing.StreamRevisionConflictError
 	if !errors.As(err, &conflictErr) {
 		t.Errorf("expected StreamRevisionConflictError, got %T: %v", err, err)
 	}
@@ -278,11 +278,11 @@ func TestLoadStream_ExistingStream(t *testing.T) {
 	defer store.Close()
 
 	// Save events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 2}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Load stream
 	iter, err := store.LoadStream(context.Background(), "order-1")
@@ -312,7 +312,7 @@ func TestLoadStream_NonExistingStream(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-existing stream")
 	}
-	if !errors.Is(err, cqrs.ErrStreamNotFound) {
+	if !errors.Is(err, eventsourcing.ErrStreamNotFound) {
 		t.Errorf("expected ErrStreamNotFound, got %v", err)
 	}
 }
@@ -322,11 +322,11 @@ func TestLoadStream_ContextCancellation(t *testing.T) {
 	defer store.Close()
 
 	// Save many events
-	events := make([]cqrs.Envelope, 100)
+	events := make([]eventsourcing.Envelope, 100)
 	for i := range events {
 		events[i] = newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i})
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Load with cancelled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -356,17 +356,17 @@ func TestLoadStreamFrom_AtVersion(t *testing.T) {
 	defer store.Close()
 
 	// Save 5 events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-2", Qty: 2}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-3", Qty: 3}),
 		newEnvelope("order-1", &OrderShipped{OrderID: "order-1"}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Load from version 2 (0-indexed, so skip first 2)
-	iter, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.Revision(2))
+	iter, err := store.LoadStreamFrom(context.Background(), "order-1", eventsourcing.Revision(2))
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -387,19 +387,19 @@ func TestLoadStreamFrom_InvalidVersion(t *testing.T) {
 	defer store.Close()
 
 	// Save 2 events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Try to load from version beyond stream length
-	_, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.Revision(10))
+	_, err := store.LoadStreamFrom(context.Background(), "order-1", eventsourcing.Revision(10))
 
 	if err == nil {
 		t.Fatal("expected error for invalid version")
 	}
-	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+	if !errors.Is(err, eventsourcing.ErrInvalidRevision) {
 		t.Errorf("expected ErrInvalidRevision, got %v", err)
 	}
 }
@@ -407,7 +407,7 @@ func TestLoadStreamFrom_InvalidVersion(t *testing.T) {
 // TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring verifies that a
 // Revision whose uint64 value is >= 2^63 (which becomes negative once
 // ToRawInt64 converts it to int64) is rejected eagerly with
-// cqrs.ErrInvalidRevision, the same way LoadStreamFrom already rejects
+// eventsourcing.ErrInvalidRevision, the same way LoadStreamFrom already rejects
 // smaller out-of-range revisions, rather than deferring an error to the
 // iterator or panicking.
 func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
@@ -418,16 +418,16 @@ func TestLoadStreamFrom_HugeRevisionPanicsInsteadOfErroring(t *testing.T) {
 	// ToRawInt64 converts it to int64 -- here, exactly -1, the same sentinel
 	// LoadStreamFrom's bounds check (and, separately, Any{}.ToRawInt64())
 	// uses. The out-of-range check is expected to catch this and return
-	// cqrs.ErrInvalidRevision eagerly, the same way it already does for
+	// eventsourcing.ErrInvalidRevision eagerly, the same way it already does for
 	// small out-of-range revisions above -- the store never defers this
 	// error to the iterator.
-	rev := cqrs.Revision(math.MaxUint64)
+	rev := eventsourcing.Revision(math.MaxUint64)
 
 	iter, err := store.LoadStreamFrom(context.Background(), "nonexistent-stream", rev)
 	if iter != nil {
 		t.Fatalf("expected a nil iterator when LoadStreamFrom rejects the revision")
 	}
-	if !errors.Is(err, cqrs.ErrInvalidRevision) {
+	if !errors.Is(err, eventsourcing.ErrInvalidRevision) {
 		t.Fatalf("expected ErrInvalidRevision, got %v", err)
 	}
 }
@@ -437,13 +437,13 @@ func TestLoadStreamFrom_StreamExists(t *testing.T) {
 	defer store.Close()
 
 	// Save events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Load with StreamExists
-	iter, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.StreamExists{})
+	iter, err := store.LoadStreamFrom(context.Background(), "order-1", eventsourcing.StreamExists{})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -459,18 +459,18 @@ func TestLoadStreamFrom_NoStream(t *testing.T) {
 	defer store.Close()
 
 	// Save events
-	events := []cqrs.Envelope{
+	events := []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 	}
-	_, _ = store.Save(context.Background(), events, cqrs.Any{})
+	_, _ = store.Save(context.Background(), events, eventsourcing.Any{})
 
 	// Load with NoStream should fail
-	_, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.NoStream{})
+	_, err := store.LoadStreamFrom(context.Background(), "order-1", eventsourcing.NoStream{})
 
 	if err == nil {
 		t.Fatal("expected error for NoStream on existing stream")
 	}
-	if !errors.Is(err, cqrs.ErrStreamExists) {
+	if !errors.Is(err, eventsourcing.ErrStreamExists) {
 		t.Errorf("expected ErrStreamExists, got %v", err)
 	}
 }
@@ -482,17 +482,17 @@ func TestReadAll_AllEvents(t *testing.T) {
 	defer store.Close()
 
 	// Save events to multiple streams
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{
 		newEnvelope("order-2", &OrderCreated{OrderID: "order-2", CustomerID: "cust-2"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
 	// Read all from the beginning
 	loaded := readAll(t, store, 0)
@@ -518,9 +518,9 @@ func TestReadAll_AfterPosition(t *testing.T) {
 
 	// Save 5 events
 	for i := 0; i < 5; i++ {
-		_, _ = store.Save(context.Background(), []cqrs.Envelope{
+		_, _ = store.Save(context.Background(), []eventsourcing.Envelope{
 			newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i}),
-		}, cqrs.Any{})
+		}, eventsourcing.Any{})
 	}
 
 	// Read after position 2
@@ -537,13 +537,13 @@ func TestReadAll_AfterHead(t *testing.T) {
 	store := memory.NewEventStore()
 	defer store.Close()
 
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item-1", Qty: 1}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
 	for _, after := range []uint64{2, 10} {
-		res, err := store.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		res, err := store.ReadAll(context.Background(), after, eventsourcing.ReadOptions{})
 		if err != nil {
 			t.Fatalf("ReadAll(after %d): %v", after, err)
 		}
@@ -565,7 +565,7 @@ func TestClose(t *testing.T) {
 	}
 
 	event := newEnvelope("order-1", &OrderCreated{OrderID: "order-1"})
-	if _, err := store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Any{}); err == nil {
+	if _, err := store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Any{}); err == nil {
 		t.Error("Save after Close succeeded, want an error")
 	}
 }
@@ -585,7 +585,7 @@ func TestConcurrent_Saves(t *testing.T) {
 			streamID := "order-" + string(rune('A'+streamNum))
 			for j := 0; j < eventsPerGoroutine; j++ {
 				event := newEnvelope(streamID, &ItemAdded{OrderID: streamID, ItemID: "item", Qty: j})
-				_, _ = store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Any{})
+				_, _ = store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Any{})
 			}
 			done <- true
 		}(i)
@@ -610,7 +610,7 @@ func TestConcurrent_SaveAndLoad(t *testing.T) {
 
 	// First create the stream
 	event := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
-	_, _ = store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Any{})
+	_, _ = store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Any{})
 
 	done := make(chan bool)
 
@@ -618,7 +618,7 @@ func TestConcurrent_SaveAndLoad(t *testing.T) {
 	go func() {
 		for i := 0; i < 50; i++ {
 			event := newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i})
-			_, _ = store.Save(context.Background(), []cqrs.Envelope{event}, cqrs.Any{})
+			_, _ = store.Save(context.Background(), []eventsourcing.Envelope{event}, eventsourcing.Any{})
 		}
 		done <- true
 	}()
@@ -679,9 +679,9 @@ func TestSave_AfterClose_Panics(t *testing.T) {
 		}
 	}()
 
-	_, err := store.Save(context.Background(), []cqrs.Envelope{
+	_, err := store.Save(context.Background(), []eventsourcing.Envelope{
 		{StreamID: "order-1", Event: nil},
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 	if err == nil {
 		t.Error("expected an error saving to a closed store, got nil")
 	}
@@ -710,18 +710,18 @@ func TestLoadStreamFrom_RevisionAtStreamHead(t *testing.T) {
 			defer store.Close()
 
 			if tt.eventCount > 0 {
-				events := make([]cqrs.Envelope, tt.eventCount)
+				events := make([]eventsourcing.Envelope, tt.eventCount)
 				for i := range events {
 					events[i] = newEnvelope("order-1", &ItemAdded{OrderID: "order-1", ItemID: "item", Qty: i})
 				}
-				if _, err := store.Save(context.Background(), events, cqrs.Any{}); err != nil {
+				if _, err := store.Save(context.Background(), events, eventsourcing.Any{}); err != nil {
 					t.Fatalf("setup save: %v", err)
 				}
 			}
 
 			// The stream is at revision tt.eventCount. Saving against it is legal,
 			// so loading from it must be too.
-			iter, err := store.LoadStreamFrom(context.Background(), "order-1", cqrs.Revision(tt.eventCount))
+			iter, err := store.LoadStreamFrom(context.Background(), "order-1", eventsourcing.Revision(tt.eventCount))
 			if err != nil {
 				t.Fatalf("LoadStreamFrom(Revision(%d)) on a stream with %d events: "+
 					"expected an empty iterator, got error: %v", tt.eventCount, tt.eventCount, err)
@@ -746,14 +746,14 @@ func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
 	store := memory.NewEventStore()
 	defer store.Close()
 
-	handler := cqrs.NewCommandHandler(
-		cqrs.EventStore(store),
+	handler := eventsourcing.NewCommandHandler(
+		eventsourcing.EventStore(store),
 		func() int { return 0 },
-		func(state int, _ *cqrs.Envelope) int { return state + 1 },
-		func(state int, cmd createOrder) ([]cqrs.Event, error) {
-			return []cqrs.Event{&OrderCreated{OrderID: cmd.ID, CustomerID: "cust-1"}}, nil
+		func(state int, _ *eventsourcing.Envelope) int { return state + 1 },
+		func(state int, cmd createOrder) ([]eventsourcing.Event, error) {
+			return []eventsourcing.Event{&OrderCreated{OrderID: cmd.ID, CustomerID: "cust-1"}}, nil
 		},
-		cqrs.WithStreamState(cqrs.Revision(0)),
+		eventsourcing.WithStreamState(eventsourcing.Revision(0)),
 	)
 
 	result, err := handler(context.Background(), createOrder{ID: "order-1"})
@@ -763,7 +763,7 @@ func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
 	if !result.Successful {
 		t.Errorf("expected successful result, got %+v", result)
 	}
-	if errors.Is(err, cqrs.ErrInvalidRevision) {
+	if errors.Is(err, eventsourcing.ErrInvalidRevision) {
 		t.Errorf("load of the empty stream rejected the initial revision")
 	}
 }
@@ -783,9 +783,9 @@ func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 	store := memory.NewEventStore()
 	ctx := context.Background()
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		{StreamID: "s1", Event: &closeTestEvent{ID: "s1"}, Version: 1},
-	}, cqrs.NoStream{}); err != nil {
+	}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("save failed: %v", err)
 	}
 
@@ -821,15 +821,15 @@ func TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes(t *testing.T)
 
 	// A single-element buffer reused across independent Save calls, as a
 	// caller might do to avoid allocating a new slice per aggregate.
-	buf := make([]cqrs.Envelope, 1)
+	buf := make([]eventsourcing.Envelope, 1)
 
 	for i, id := range []string{"agg-1", "agg-2", "agg-3"} {
-		buf[0] = cqrs.Envelope{
+		buf[0] = eventsourcing.Envelope{
 			StreamID: id,
 			Event:    &aliasTestEvent{ID: id, Value: id},
 			Version:  uint64(i + 1),
 		}
-		if _, err := store.Save(ctx, buf, cqrs.NoStream{}); err != nil {
+		if _, err := store.Save(ctx, buf, eventsourcing.NoStream{}); err != nil {
 			t.Fatalf("save %q failed: %v", id, err)
 		}
 	}
@@ -873,15 +873,15 @@ func TestSave_StoresGlobalPosition(t *testing.T) {
 	defer store.Close()
 	ctx := context.Background()
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &ItemAdded{OrderID: "order-1"}),
-	}, cqrs.NoStream{}); err != nil {
+	}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("save order-1: %v", err)
 	}
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-2", &OrderCreated{OrderID: "order-2"}),
-	}, cqrs.NoStream{}); err != nil {
+	}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("save order-2: %v", err)
 	}
 
@@ -915,11 +915,11 @@ func TestLoadStream_ReturnsCopiesOfStoredEvents(t *testing.T) {
 
 	env := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
 	env.Metadata = map[string]any{"tenant": "t1"}
-	if _, err := store.Save(ctx, []cqrs.Envelope{env}, cqrs.NoStream{}); err != nil {
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{env}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	load := func() *cqrs.Envelope {
+	load := func() *eventsourcing.Envelope {
 		t.Helper()
 		iter, err := store.LoadStream(ctx, "order-1")
 		if err != nil {
@@ -958,7 +958,7 @@ func TestReadAll_ReturnsCopiesOfStoredEvents(t *testing.T) {
 
 	env := newEnvelope("order-1", &OrderCreated{OrderID: "order-1", CustomerID: "cust-1"})
 	env.Metadata = map[string]any{"tenant": "t1"}
-	if _, err := store.Save(ctx, []cqrs.Envelope{env}, cqrs.NoStream{}); err != nil {
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{env}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -982,7 +982,7 @@ func TestSave_RejectsUnregisteredEvent(t *testing.T) {
 	defer store.Close()
 
 	env := newEnvelope("order-1", &unregisteredEvent{ID: "order-1"})
-	if _, err := store.Save(context.Background(), []cqrs.Envelope{env}, cqrs.NoStream{}); !errors.Is(err, cqrs.ErrEventNotRegistered) {
+	if _, err := store.Save(context.Background(), []eventsourcing.Envelope{env}, eventsourcing.NoStream{}); !errors.Is(err, eventsourcing.ErrEventNotRegistered) {
 		t.Fatalf("Save error = %v, want ErrEventNotRegistered", err)
 	}
 	if events := readAll(t, store, 0); len(events) != 0 {
@@ -997,11 +997,11 @@ func (e *unregisteredEvent) EventType() string   { return "unregisteredEvent" }
 
 // readAll pages through the store's global log after position after and
 // returns every event.
-func readAll(t *testing.T, store *memory.EventStore, after uint64) []*cqrs.Envelope {
+func readAll(t *testing.T, store *memory.EventStore, after uint64) []*eventsourcing.Envelope {
 	t.Helper()
-	var out []*cqrs.Envelope
+	var out []*eventsourcing.Envelope
 	for {
-		res, err := store.ReadAll(context.Background(), after, cqrs.ReadOptions{})
+		res, err := store.ReadAll(context.Background(), after, eventsourcing.ReadOptions{})
 		if err != nil {
 			t.Fatalf("ReadAll(after %d): %v", after, err)
 		}

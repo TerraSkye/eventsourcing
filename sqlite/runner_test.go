@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/projection"
 	"github.com/terraskye/eventsourcing/sqlite"
 )
@@ -29,11 +29,11 @@ func TestRunner_HandlerWritesAreExactlyOnce(t *testing.T) {
 			last := appendEvents(t, store, "task-3", &taskCreated{ID: "3"})
 
 			var failed atomic.Bool
-			handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, e cqrs.Event) error {
+			handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, e eventsourcing.Event) error {
 				created := e.(*taskCreated)
 				if _, err := sqlite.Tx(ctx).ExecContext(ctx,
 					`INSERT INTO tasks (id, global_position) VALUES (?, ?)`,
-					created.ID, cqrs.GlobalPositionFromContext(ctx),
+					created.ID, eventsourcing.GlobalPositionFromContext(ctx),
 				); err != nil {
 					return err
 				}
