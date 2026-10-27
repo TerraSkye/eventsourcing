@@ -13,6 +13,23 @@ release may break the API; every break is listed under **Breaking**.
   unless its type is registered under its `EventType()` name, with an
   error wrapping `ErrEventNotRegistered`. Such an event used to save
   and then fail on every read. Register every event type a store saves.
+- The memory store now requires `RegisterEvent`, same as Postgres. It
+  keeps each event encoded by `EncodeEvent` and decodes it on every
+  read, so a type that is not registered fails at `Save`. Reads return
+  the event as the registry makes it, a pointer: type assertions and
+  switches must use `*OrderCreated`, not `OrderCreated`, even for an
+  event saved as a value. Metadata comes back as JSON decodes it:
+  numbers as `float64`, and nil as an empty map.
+- `memory.NewEventStore` takes no arguments, and `EventStore.Events()`
+  is removed. Call `memory.EventBus.Dispatch` after `Save` to feed the
+  memory bus, or read what was saved with `ReadAll`.
+
+### Fixed
+
+- The memory store's `LoadStreamFrom` returned the stored envelopes
+  themselves, so a caller changing one changed the store's copy, and
+  `ReadAll` copied only the envelope, sharing the event and its
+  metadata. Every read now decodes a new copy.
 
 ### Added
 

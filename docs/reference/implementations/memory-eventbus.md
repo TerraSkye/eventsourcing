@@ -31,15 +31,7 @@ func (b *EventBus) Dispatch(ev *eventsourcing.Envelope)
 
 Sends the event to all matching subscribers. Events are matched by `ev.Event.EventType()` against each subscriber's filter. If no filter is set, the subscriber receives all events.
 
-This is **not** part of the `EventBus` interface — it is specific to the in-memory implementation. Call it from the event forwarding goroutine:
-
-```go
-go func() {
-    for env := range store.Events() {
-        bus.Dispatch(env)
-    }
-}()
-```
+This is **not** part of the `EventBus` interface — it is specific to the in-memory implementation, and nothing calls it for you: dispatch each event after the `Save` that stored it.
 
 ## WithFilterEvents
 

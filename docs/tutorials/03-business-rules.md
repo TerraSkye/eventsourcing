@@ -23,7 +23,9 @@ package events
 
 import (
     "time"
+
     "github.com/google/uuid"
+    "github.com/terraskye/eventsourcing"
 )
 
 type TaskCompleted struct {
@@ -34,6 +36,10 @@ type TaskCompleted struct {
 
 func (e *TaskCompleted) AggregateID() string { return e.TaskID.String() }
 func (e *TaskCompleted) EventType() string   { return "TaskCompleted" }
+
+func init() {
+    eventsourcing.RegisterEvent(&TaskCompleted{})
+}
 ```
 
 ## Step 2: Write the CompleteTask command handler

@@ -4,7 +4,7 @@
 // suite from its own tests:
 //
 //	func TestAcceptance(t *testing.T) {
-//		eventsourcingtest.AcceptanceTest(t, memory.NewEventStore(100))
+//		eventsourcingtest.AcceptanceTest(t, memory.NewEventStore())
 //	}
 //
 // [Benchmark] measures a store the same way, so that numbers compare across

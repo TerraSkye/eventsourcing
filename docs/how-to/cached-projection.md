@@ -90,7 +90,7 @@ func NewProjection(list *TaskList) projection.Definition {
 `main.go` creates the read model and hands the projection to a runner, together with the event store to read from and a store for the checkpoint:
 
 ```go
-eventStore := memory.NewEventStore(100)
+eventStore := memory.NewEventStore()
 
 list := tasklist.NewTaskList()
 runner := projection.NewRunner(tasklist.NewProjection(list), eventStore, memory.NewProjectionStore())

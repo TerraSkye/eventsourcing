@@ -72,7 +72,7 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 	commandBus := eventsourcing.NewCommandBus(20, 1)
 	commandBus.Use(logging.CommandLogging(logger))
 
-	store := memory.NewEventStore(100)
+	store := memory.NewEventStore()
 
 	eventsourcing.Register(commandBus, completetask.NewHandler(store))
 	eventsourcing.Register(commandBus, createtask.NewHandler(store))

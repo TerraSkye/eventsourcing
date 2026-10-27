@@ -16,13 +16,13 @@ import (
 
 func BenchmarkEventStore(b *testing.B) {
 	eventsourcingtest.Benchmark(b, func(*testing.B) cqrs.EventStore {
-		return memory.NewEventStore(0)
+		return memory.NewEventStore()
 	})
 }
 
 func BenchmarkProjection(b *testing.B) {
 	projectiontest.Benchmark(b, func(*testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
-		return memory.NewEventStore(0), memory.NewProjectionStore(), newRowsHandler()
+		return memory.NewEventStore(), memory.NewProjectionStore(), newRowsHandler()
 	})
 }
 

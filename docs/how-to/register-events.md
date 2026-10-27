@@ -1,6 +1,6 @@
 # How to register events for serialization
 
-Register event types so a persistent backend (SQLite, Postgres, KurrentDB) can save them and deserialize them by name when reading.
+Register event types so an event store can save them and deserialize them by name when reading. Every store needs this, the in-memory one included.
 
 ## Why registration is needed
 
@@ -8,7 +8,7 @@ Persistent event stores serialize events to JSON and store them alongside their 
 
 The store checks the registry when saving too: `Save` rejects an event whose type is not registered under its `EventType()` with an error wrapping `ErrEventNotRegistered`, and saves none of the batch. An unregistered type fails on its first save, not on every read after it.
 
-The in-memory store does not need registration because events are never serialized.
+The in-memory store serializes events the same way, so it needs the same registration and rejects an unregistered type at `Save` too.
 
 ## Register an event type
 

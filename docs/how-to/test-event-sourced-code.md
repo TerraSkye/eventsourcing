@@ -65,7 +65,7 @@ import (
 )
 
 func TestCreateTask_Success(t *testing.T) {
-    store := memory.NewEventStore(10)
+    store := memory.NewEventStore()
     defer store.Close()
 
     handler := createtask.NewHandler(store)
@@ -88,7 +88,7 @@ func TestCreateTask_Success(t *testing.T) {
 }
 
 func TestCreateTask_DuplicateID(t *testing.T) {
-    store := memory.NewEventStore(10)
+    store := memory.NewEventStore()
     defer store.Close()
 
     handler := createtask.NewHandler(store)
@@ -118,7 +118,7 @@ import (
 )
 
 func TestCompleteTask_NotExist(t *testing.T) {
-    store := memory.NewEventStore(10)
+    store := memory.NewEventStore()
     defer store.Close()
 
     handler := completetask.NewHandler(store)
@@ -137,7 +137,7 @@ func TestCompleteTask_NotExist(t *testing.T) {
 
 ```go
 func TestListTasks_Empty(t *testing.T) {
-    store := memory.NewEventStore(10)
+    store := memory.NewEventStore()
     defer store.Close()
 
     qh := listtasks.NewQueryHandler(store)
@@ -152,7 +152,7 @@ func TestListTasks_Empty(t *testing.T) {
 }
 
 func TestListTasks_AfterCreation(t *testing.T) {
-    store := memory.NewEventStore(10)
+    store := memory.NewEventStore()
     defer store.Close()
 
     // Create a task via command handler (exercises real store writes)
@@ -206,4 +206,4 @@ func TestProjector_OnTaskCreated(t *testing.T) {
 - **Use `memory.NewEventStore`** for integration tests that need a real store.
 - **Use `memory.NewEventBus`** for tests that involve event bus subscriptions.
 - **Close stores and buses** with `defer store.Close()` / `defer bus.Close()` to avoid goroutine leaks in tests.
-- **Avoid global state** — the event registry uses package-level globals; register events in `TestMain` if needed.
+- **Register every event type** — `memory.NewEventStore` encodes events and checks the registry as the persistent stores do, so `Save` rejects an unregistered type. Registering in an `init` beside each event, as the tutorials do, covers every test that imports the package. The registry is global, and registering a name twice panics, so do not register again in a test.

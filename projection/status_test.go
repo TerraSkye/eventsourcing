@@ -75,7 +75,7 @@ func TestRunner_WatchCalledWhenPhaseGoesLiveWithoutEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			es := memory.NewEventStore(16)
+			es := memory.NewEventStore()
 			store := memory.NewProjectionStore()
 			tt.setup(t, es, store)
 

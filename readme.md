@@ -99,7 +99,7 @@ func decide(s taskState, cmd CreateTask) ([]eventsourcing.Event, error) {
 func main() {
 	ctx := context.Background()
 
-	store := memory.NewEventStore(100)
+	store := memory.NewEventStore()
 	defer store.Close()
 
 	bus := eventsourcing.NewCommandBus(20, 1)
