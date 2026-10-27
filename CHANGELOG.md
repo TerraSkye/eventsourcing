@@ -13,23 +13,6 @@ release may break the API; every break is listed under **Breaking**.
   unless its type is registered under its `EventType()` name, with an
   error wrapping `ErrEventNotRegistered`. Such an event used to save
   and then fail on every read. Register every event type a store saves.
-- The memory store now requires `RegisterEvent`, same as Postgres. It
-  keeps each event encoded by `EncodeEvent` and decodes it on every
-  read, so a type that is not registered fails at `Save`. Reads return
-  the event as the registry makes it, a pointer: type assertions and
-  switches must use `*OrderCreated`, not `OrderCreated`, even for an
-  event saved as a value. Metadata comes back as JSON decodes it:
-  numbers as `float64`, and nil as an empty map.
-- `memory.NewEventStore` takes no arguments, and `EventStore.Events()`
-  is removed. Call `memory.EventBus.Dispatch` after `Save` to feed the
-  memory bus, or read what was saved with `ReadAll`.
-
-### Fixed
-
-- The memory store's `LoadStreamFrom` returned the stored envelopes
-  themselves, so a caller changing one changed the store's copy, and
-  `ReadAll` copied only the envelope, sharing the event and its
-  metadata. Every read now decodes a new copy.
 
 ### Added
 
@@ -42,6 +25,24 @@ release may break the API; every break is listed under **Breaking**.
 
 - The KurrentDB event bus hands a handler an empty `Metadata` map, not
   nil, for an event stored without metadata, as the stores already do.
+- `projection.Store` has two new methods, `FailRebuild` and
+  `RebuildFailure`, so `Runner.Rebuild` called on one instance returns
+  the error of a reset that failed on another, as its text, instead of
+  waiting until its context ends. Stores outside this module must
+  implement both, and `StoreAcceptanceTest` checks them. The
+  `projection_rebuilds` table gains a `failed` and an `error` column. For
+  an existing database, run this once before deploying:
+
+  ```sql
+  -- Postgres
+  ALTER TABLE projection_rebuilds ADD COLUMN failed BIGINT NOT NULL DEFAULT 0;
+  ALTER TABLE projection_rebuilds ADD COLUMN error  TEXT;
+  -- SQLite
+  ALTER TABLE projection_rebuilds ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE projection_rebuilds ADD COLUMN error  TEXT;
+- `RegisterEventByType`, `RegisterEventByName`, `NewEventByName` and
+  `EventNamesFor` are functions instead of package-level `var`s, so
+  they can no longer be reassigned. Calls to them are unchanged.
 
 ## [0.4.1] - 2026-10-24
 

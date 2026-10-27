@@ -1091,6 +1091,45 @@ func TestRunner_RebuildResetFails(t *testing.T) {
 	}
 }
 
+// TestRunner_RebuildResetFailsElsewhere covers a Reset that fails on
+// another instance than the one Rebuild is called on, here a runner that
+// never runs, as an admin tool: Rebuild returns the error's text, which
+// the failing instance recorded in the store, instead of waiting until ctx
+// ends.
+func TestRunner_RebuildResetFailsElsewhere(t *testing.T) {
+	es, ps := &testStore{}, memory.NewProjectionStore()
+	last := save(t, es, 3)
+
+	c := newCounter()
+	p := projection.Definition{
+		Name:         "test",
+		Handler:      eventsourcing.NewEventHandlerFunc(c.Handle),
+		EventTypes:   counterEvents,
+		Owner:        "a",
+		PollInterval: 10 * time.Millisecond,
+		ClaimTTL:     time.Second,
+		Version:      1,
+		Reset:        func(context.Context) error { return errors.New("wipe failed") },
+	}
+	r := projection.NewRunner(p, es, ps)
+	defer runRunner(t, r)()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	if err := r.WaitUntil(ctx, last); err != nil {
+		t.Fatalf("WaitUntil: %v", err)
+	}
+
+	p.Owner = "admin"
+	admin := projection.NewRunner(p, es, ps) // never Run
+	err := admin.Rebuild(ctx)
+	if err == nil || ctx.Err() != nil || !strings.Contains(err.Error(), "wipe failed") {
+		t.Fatalf("Rebuild on another instance with a failing Reset = %v, want the Reset's error before ctx ends", err)
+	}
+	if requested, done, _ := ps.Rebuilds(ctx, "test"); requested != 1 || done != 0 {
+		t.Fatalf("Rebuilds = %d, %d; want 1, 0: the request stays pending", requested, done)
+	}
+}
+
 // TestRunner_NudgeWakesEverySegment covers that Nudge makes a live runner
 // read now on every segment, so WaitUntil returns well within PollInterval.
 func TestRunner_NudgeWakesEverySegment(t *testing.T) {
