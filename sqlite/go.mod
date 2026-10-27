@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/terraskye/eventsourcing v0.4.0
+	github.com/terraskye/eventsourcing v0.4.1
 	modernc.org/sqlite v1.46.1
 )
 

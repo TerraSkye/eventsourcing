@@ -75,7 +75,8 @@ type memoryProjection struct {
 	rebuildFailed uint64
 	rebuildErr    string
 
-	// replays holds the replay requests by number; Reset deletes them.
+	// replays holds the replay requests by number. Reset deletes them, and
+	// FinishReplay deletes the finished ones of a stream once one succeeds.
 	replays map[uint64]*memoryReplay
 }
 
@@ -452,13 +453,16 @@ func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID stri
 	if !ok {
 		return 0, projection.ErrUnknownProjection
 	}
-	s.replays++
 	req := &memoryReplay{streamID: streamID, segments: map[int]*memoryReplaySegment{}}
 	for seg, row := range p.rows {
 		if slices.ContainsFunc(row.deadLetters, func(d projection.DeadLetter) bool { return d.StreamID == streamID }) {
 			req.segments[seg] = &memoryReplaySegment{}
 		}
 	}
+	if len(req.segments) == 0 {
+		return 0, nil
+	}
+	s.replays++
 	if p.replays == nil {
 		p.replays = map[uint64]*memoryReplay{}
 	}
@@ -495,12 +499,43 @@ func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, 
 	if s.owned(l) == nil {
 		return projection.ErrClaimLost
 	}
-	if req, ok := s.projections[l.Name].replays[number]; ok {
-		if st, ok := req.segments[l.Segment]; ok {
-			st.done, st.err = true, errMsg
+	p := s.projections[l.Name]
+	req, ok := p.replays[number]
+	if !ok {
+		return nil
+	}
+	if st, ok := req.segments[l.Segment]; ok {
+		st.done, st.err = true, errMsg
+	}
+	if !req.succeeded() {
+		return nil
+	}
+	for n, earlier := range p.replays {
+		if n <= number && earlier.streamID == req.streamID && earlier.finished() {
+			delete(p.replays, n)
 		}
 	}
 	return nil
+}
+
+// finished reports whether every segment of r tried it.
+func (r *memoryReplay) finished() bool {
+	for _, st := range r.segments {
+		if !st.done {
+			return false
+		}
+	}
+	return true
+}
+
+// succeeded reports whether every segment of r tried it without an error.
+func (r *memoryReplay) succeeded() bool {
+	for _, st := range r.segments {
+		if !st.done || st.err != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // ReplayResult implements [projection.DeadLetterStore].

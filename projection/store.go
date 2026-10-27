@@ -364,8 +364,9 @@ type DeadLetterStore interface {
 	// see [Runner.ReplayStream]. It records the request for each segment
 	// that holds dead letters of the stream, and returns the request's
 	// number, unique in the store and higher than any before it. A stream
-	// without dead letters gets a number with nothing pending. It returns
-	// [ErrUnknownProjection] when no runner has declared name.
+	// without dead letters needs no request: the store returns 0, or a
+	// number with nothing pending. It returns [ErrUnknownProjection] when
+	// no runner has declared name.
 	RequestReplay(ctx context.Context, name, streamID string) (uint64, error)
 
 	// PendingReplays returns the replay requests of the projection name
@@ -378,12 +379,18 @@ type DeadLetterStore interface {
 	// applied. When l is not the segment's current claim it changes
 	// nothing and returns [ErrClaimLost]. A request Reset deleted is not
 	// an error.
+	//
+	// Once every segment of the request tried it without an error, the
+	// store deletes it, together with the earlier requests of the same
+	// stream that every segment tried. A request a segment failed is kept,
+	// for [Runner.ReplayStream] to read its errors, until a later one of
+	// its stream succeeds or [Store.Reset] deletes it.
 	FinishReplay(ctx context.Context, l Lease, number uint64, errMsg string) error
 
 	// ReplayResult reports request number of the projection name: how many
 	// of its segments have not tried it yet, and the errors of those that
-	// tried and failed, ordered by segment. A request Reset deleted, or
-	// one never made, has nothing pending.
+	// tried and failed, ordered by segment. A request deleted, or one
+	// never made, has nothing pending.
 	ReplayResult(ctx context.Context, name string, number uint64) (pending int, errs []string, err error)
 }
 

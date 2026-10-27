@@ -83,12 +83,15 @@ type Runner struct {
 	// While replayWaiters ReplayStream calls wait here, replayErrs keeps the
 	// errors segments here failed each request with, so those calls return
 	// them as they were rather than as their text.
+	// pollReplays asks the next regular poll to read the store even though
+	// no segment here holds dead letters; see [Runner.replaysWanted].
 	pendingReplays map[int][]Replay
 	queuedReplays  map[Replay]bool
 	checkReplays   chan struct{}
 	replayed       chan struct{}
 	replayWaiters  int
 	replayErrs     map[uint64][]error
+	pollReplays    bool
 
 	// checkRebuild asks segment 0 to look for a rebuild request in the
 	// store at once, rather than at its next regular check.
@@ -138,6 +141,11 @@ type segmentState struct {
 	// parked holds the streams with a dead letter in this segment, whose
 	// later events are skipped. Only the segment's own goroutine uses it.
 	parked map[string]bool
+
+	// hasParked reports that parked is not empty, for the replay poll,
+	// which only reads the store while a segment here holds dead letters;
+	// see [Runner.noteParked].
+	hasParked bool
 
 	// rebuilding reports that the segment was rebuilt and has not reached
 	// the head of the log since. Only the segment's own goroutine uses it.

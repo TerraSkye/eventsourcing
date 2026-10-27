@@ -108,8 +108,8 @@ github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UV
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/terraskye/eventsourcing v0.4.0 h1:fps7Ai19w/AfjdXwyDsxKfOVvDsT74gM10FRslzIBig=
-github.com/terraskye/eventsourcing v0.4.0/go.mod h1:ik1nIoklJiaMAxs7QZ4bVhImfdU0Cd/toC33zq5HLRs=
+github.com/terraskye/eventsourcing v0.4.1 h1:yaBiUdefjbkefAij7tXZCUS3AyfEYdzBNSslFpeUETA=
+github.com/terraskye/eventsourcing v0.4.1/go.mod h1:ik1nIoklJiaMAxs7QZ4bVhImfdU0Cd/toC33zq5HLRs=
 github.com/testcontainers/testcontainers-go v0.42.0 h1:He3IhTzTZOygSXLJPMX7n44XtK+qhjat1nI9cneBbUY=
 github.com/testcontainers/testcontainers-go v0.42.0/go.mod h1:vZjdY1YmUA1qEForxOIOazfsrdyORJAbhi0bp8plN30=
 github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0 h1:GCbb1ndrF7OTDiIvxXyItaDab4qkzTFJ48LKFdM7EIo=

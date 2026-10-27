@@ -24,14 +24,43 @@ release may break the API; every break is listed under **Breaking**.
   -- SQLite
   ALTER TABLE projection_rebuilds ADD COLUMN failed INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE projection_rebuilds ADD COLUMN error  TEXT;
+- `RegisterEventByType`, `RegisterEventByName`, `NewEventByName` and
+  `EventNamesFor` are functions instead of package-level `var`s, so
+  they can no longer be reassigned. Calls to them are unchanged.
+
+## [0.4.1] - 2026-10-24
+
+### Changed
+
+- The Postgres schema no longer adds columns to tables an earlier
+  release created: like the SQLite one, it has the tables as this
+  release uses them, and the changelog lists the statements to upgrade.
+  When upgrading from before v0.4.0, run this once before applying the
+  schema; `IF NOT EXISTS` skips what an earlier upgrade already added:
+
+  ```sql
+  ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT NOT NULL DEFAULT '';   -- v0.3.0
+  ALTER TABLE events ADD COLUMN IF NOT EXISTS causation_id   TEXT NOT NULL DEFAULT '';   -- v0.3.0
+  ALTER TABLE projection_segments ADD COLUMN IF NOT EXISTS ttl_ms BIGINT NOT NULL DEFAULT 15000; -- v0.4.0
   ```
 
 ### Fixed
 
+- The stores no longer keep every `ReplayStream` request forever.
+  `FinishReplay` deletes a request once every segment tried it without
+  an error, together with the earlier finished requests of its stream;
+  a failed request is kept until then, or until `Reset`. A stream
+  without dead letters records no request: `RequestReplay` returns 0.
+  `StoreAcceptanceTest` checks the deleting, so a store outside this
+  module that keeps its requests now fails it.
 - `Runner.ReplayStream` returns an error a segment on its own instance
   failed with as it was, so `errors.Is` and `errors.As` work on it, as
   they did before 0.4.0. Only an error from a segment on another
   instance comes back as its text.
+- A runner only reads replay requests from the store while one of its
+  segments holds dead letters, and once after it claims a segment or
+  serves a replay, instead of every `PollInterval` regardless. A failed
+  read is logged as a warning, once until a read succeeds.
 
 ## [0.4.0] - 2026-10-24
 
@@ -87,7 +116,7 @@ release may break the API; every break is listed under **Breaking**.
   `projectiontest.StoreAcceptanceTest` checks them.
 - The Postgres and SQLite schemas add a `projection_instances` table. Apply
   the new schema before deploying: `Runner.Run` returns an error when its
-  first heartbeat fails.
+  first heartbeat keeps failing for `ClaimTTL`.
 
 ### Added
 

@@ -565,29 +565,37 @@ func (s *ProjectionStore) DeleteDeadLetter(ctx context.Context, l projection.Lea
 
 // RequestReplay implements [projection.DeadLetterStore], in one statement
 // that records the request and a row for each segment holding dead letters
-// of streamID.
+// of streamID. A stream without dead letters records nothing and gets 0.
 func (s *ProjectionStore) RequestReplay(ctx context.Context, name, streamID string) (uint64, error) {
-	var n uint64
+	var (
+		declared bool
+		n        *uint64
+	)
 	err := s.db.QueryRow(ctx, `
-		WITH r AS (
+		WITH d AS (
+			SELECT DISTINCT segment FROM projection_dead_letters WHERE projection = $1 AND stream_id = $2
+		), r AS (
 			INSERT INTO projection_replays (name, stream_id)
-			SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM projection_segments WHERE name = $1)
+			SELECT $1, $2
+			WHERE EXISTS (SELECT 1 FROM projection_segments WHERE name = $1) AND EXISTS (SELECT 1 FROM d)
 			RETURNING id
 		), segs AS (
 			INSERT INTO projection_replay_segments (replay, segment)
-			SELECT r.id, d.segment
-			FROM r, (SELECT DISTINCT segment FROM projection_dead_letters WHERE projection = $1 AND stream_id = $2) d
+			SELECT r.id, d.segment FROM r, d
 		)
-		SELECT id FROM r`,
+		SELECT EXISTS (SELECT 1 FROM projection_segments WHERE name = $1), (SELECT id FROM r)`,
 		name, streamID,
-	).Scan(&n)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, projection.ErrUnknownProjection
-	}
+	).Scan(&declared, &n)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: request replay of %q stream %q: %w", name, streamID, err)
 	}
-	return n, nil
+	if !declared {
+		return 0, projection.ErrUnknownProjection
+	}
+	if n == nil {
+		return 0, nil
+	}
+	return *n, nil
 }
 
 // PendingReplays implements [projection.DeadLetterStore].
@@ -618,24 +626,44 @@ func (s *ProjectionStore) PendingReplays(ctx context.Context, name string) ([]pr
 }
 
 // FinishReplay implements [projection.DeadLetterStore], fenced by locking
-// l's segment row as Commit does.
+// l's segment row as Commit does. It locks the request's row too, so of
+// two segments finishing it at once, the second sees the first one done.
 func (s *ProjectionStore) FinishReplay(ctx context.Context, l projection.Lease, number uint64, errMsg string) error {
 	return s.runTx(ctx, "finish replay", l, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := lockOwned(ctx, tx, l); err != nil {
 			return err
 		}
+		var streamID string
+		err := tx.QueryRow(ctx,
+			`SELECT stream_id FROM projection_replays WHERE id = $1 AND name = $2 FOR UPDATE`,
+			number, l.Name,
+		).Scan(&streamID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // deleted by Reset
+		}
+		if err != nil {
+			return fmt.Errorf("postgres: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
 		var msg any
 		if errMsg != "" {
 			msg = errMsg
 		}
-		_, err := tx.Exec(ctx, `
-			UPDATE projection_replay_segments s SET done = true, error = $4
-			FROM projection_replays r
-			WHERE r.id = s.replay AND r.name = $1 AND s.replay = $2 AND s.segment = $3`,
-			l.Name, number, l.Segment, msg,
-		)
-		if err != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE projection_replay_segments SET done = true, error = $3 WHERE replay = $1 AND segment = $2`,
+			number, l.Segment, msg,
+		); err != nil {
 			return fmt.Errorf("postgres: finish replay %d of %q segment %d: %w", number, l.Name, l.Segment, err)
+		}
+		// Once every segment tried it without an error, delete it and the
+		// earlier requests of its stream that are finished.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM projection_replays r
+			WHERE r.name = $1 AND r.stream_id = $2 AND r.id <= $3
+			  AND NOT EXISTS (SELECT 1 FROM projection_replay_segments s WHERE s.replay = r.id AND NOT s.done)
+			  AND NOT EXISTS (SELECT 1 FROM projection_replay_segments s WHERE s.replay = $3 AND (NOT s.done OR s.error IS NOT NULL))`,
+			l.Name, streamID, number,
+		); err != nil {
+			return fmt.Errorf("postgres: finish replay %d of %q segment %d: delete finished requests: %w", number, l.Name, l.Segment, err)
 		}
 		return nil
 	})

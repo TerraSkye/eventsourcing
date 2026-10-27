@@ -173,6 +173,7 @@ func StoreAcceptanceTest(t *testing.T, store projection.Store) {
 			"PendingPerSegment": s.replayPendingPerSegment,
 			"Finish":            s.replayFinish,
 			"FinishFenced":      s.replayFinishFenced,
+			"SucceededDeleted":  s.replaySucceededDeleted,
 			"NumbersIncrease":   s.replayNumbersIncrease,
 			"ClearedByReset":    s.replayClearedByReset,
 		})
@@ -1085,9 +1086,6 @@ func (s *storeAcceptance) replayUnknownName(t *testing.T) {
 func (s *storeAcceptance) replayNothingToReplay(t *testing.T) {
 	name := s.newProjection(t, 1)
 	n := s.requestReplay(t, name, "order-1")
-	if n == 0 {
-		t.Fatal("RequestReplay returned number 0, want a number above 0")
-	}
 	if got := s.pendingReplays(t, name); len(got) != 0 {
 		t.Errorf("PendingReplays for a stream without dead letters = %+v, want none", got)
 	}
@@ -1129,6 +1127,41 @@ func (s *storeAcceptance) replayFinish(t *testing.T) {
 	}
 	if got := s.pendingReplays(t, name); len(got) != 0 {
 		t.Errorf("PendingReplays after both finished = %+v, want none", got)
+	}
+}
+
+// replaySucceededDeleted covers a request every segment tried without an
+// error: it is deleted, with the earlier finished request of its stream
+// that failed, but not with the earlier one still pending.
+func (s *storeAcceptance) replaySucceededDeleted(t *testing.T) {
+	name := s.replayProjection(t)
+	dls := s.store.(projection.DeadLetterStore)
+	finish := func(n uint64, seg int, errMsg string) {
+		t.Helper()
+		if err := dls.FinishReplay(t.Context(), s.lease(name, seg, owner), n, errMsg); err != nil {
+			t.Fatalf("FinishReplay(%d, segment %d): %v", n, seg, err)
+		}
+	}
+	failed := s.requestReplay(t, name, "order-1")
+	finish(failed, 0, "")
+	finish(failed, 2, "handler failed")
+	if pending, errs := s.replayResult(t, name, failed); pending != 0 || !slices.Equal(errs, []string{"handler failed"}) {
+		t.Fatalf("ReplayResult of the failed request = %d pending, errors %v; want 0 and [handler failed]", pending, errs)
+	}
+	waiting := s.requestReplay(t, name, "order-1")
+	succeeded := s.requestReplay(t, name, "order-1")
+	finish(succeeded, 0, "")
+	finish(succeeded, 2, "")
+
+	if pending, errs := s.replayResult(t, name, failed); pending != 0 || len(errs) != 0 {
+		t.Errorf("ReplayResult of the failed request after a later one succeeded = %d pending, errors %v; want it deleted", pending, errs)
+	}
+	if pending, errs := s.replayResult(t, name, succeeded); pending != 0 || len(errs) != 0 {
+		t.Errorf("ReplayResult of the succeeded request = %d pending, errors %v; want nothing", pending, errs)
+	}
+	want := []projection.Replay{{Number: waiting, StreamID: "order-1", Segment: 0}, {Number: waiting, StreamID: "order-1", Segment: 2}}
+	if got := s.pendingReplays(t, name); !slices.Equal(got, want) {
+		t.Errorf("PendingReplays = %+v, want the request still pending %+v", got, want)
 	}
 }
 
