@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	"github.com/terraskye/eventsourcing/postgres"
 	"github.com/terraskye/eventsourcing/projection"
@@ -21,18 +21,18 @@ import (
 const benchmarkMaxConns = 64
 
 func BenchmarkEventStore(b *testing.B) {
-	eventsourcingtest.Benchmark(b, func(b *testing.B) cqrs.EventStore {
+	eventsourcingtest.Benchmark(b, func(b *testing.B) eventsourcing.EventStore {
 		return postgres.NewEventStore(newBenchmarkPool(b))
 	})
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
+	projectiontest.Benchmark(b, func(b *testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler) {
 		pool := newBenchmarkPool(b)
 		if _, err := pool.Exec(b.Context(), benchmarkRowsSchema); err != nil {
 			b.Fatalf("create benchmark_rows: %v", err)
 		}
-		return postgres.NewEventStore(pool), postgres.NewProjectionStore(pool), cqrs.NewEventHandlerFunc(writeBenchmarkRow)
+		return postgres.NewEventStore(pool), postgres.NewProjectionStore(pool), eventsourcing.NewEventHandlerFunc(writeBenchmarkRow)
 	})
 }
 
@@ -48,11 +48,11 @@ TRUNCATE benchmark_rows`
 
 // writeBenchmarkRow upserts the event's stream row in the projection's
 // transaction, as a real projection writes its read model.
-func writeBenchmarkRow(ctx context.Context, _ cqrs.Event) error {
+func writeBenchmarkRow(ctx context.Context, _ eventsourcing.Event) error {
 	_, err := postgres.Tx(ctx).Exec(ctx,
 		`INSERT INTO benchmark_rows (stream_id, version) VALUES ($1, $2)
 		 ON CONFLICT (stream_id) DO UPDATE SET version = EXCLUDED.version`,
-		cqrs.StreamIDFromContext(ctx), int64(cqrs.VersionFromContext(ctx)))
+		eventsourcing.StreamIDFromContext(ctx), int64(eventsourcing.VersionFromContext(ctx)))
 	return err
 }
 

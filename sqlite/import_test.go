@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/memory"
 	"github.com/terraskye/eventsourcing/sqlite"
 )
@@ -14,11 +14,11 @@ import (
 func TestImport_CopiesTheLogInOrder(t *testing.T) {
 	src := memory.NewEventStore()
 	t.Cleanup(func() { src.Close() })
-	save := func(id string, revision cqrs.StreamState, events ...cqrs.Event) {
+	save := func(id string, revision eventsourcing.StreamState, events ...eventsourcing.Event) {
 		t.Helper()
-		envs := make([]cqrs.Envelope, len(events))
+		envs := make([]eventsourcing.Envelope, len(events))
 		for i, e := range events {
-			envs[i] = cqrs.Envelope{
+			envs[i] = eventsourcing.Envelope{
 				EventID:    uuid.New(),
 				StreamID:   id,
 				Event:      e,
@@ -30,9 +30,9 @@ func TestImport_CopiesTheLogInOrder(t *testing.T) {
 			t.Fatalf("Save to source: %v", err)
 		}
 	}
-	save("task-1", cqrs.NoStream{}, &taskCreated{ID: "1"})
-	save("task-2", cqrs.NoStream{}, &taskCreated{ID: "2"})
-	save("task-1", cqrs.Revision(1), &taskDone{ID: "1"})
+	save("task-1", eventsourcing.NoStream{}, &taskCreated{ID: "1"})
+	save("task-2", eventsourcing.NoStream{}, &taskCreated{ID: "2"})
+	save("task-1", eventsourcing.Revision(1), &taskDone{ID: "1"})
 
 	dst := sqlite.NewEventStore(openDB(t, ":memory:"))
 	n, err := sqlite.Import(t.Context(), src, dst)
@@ -43,11 +43,11 @@ func TestImport_CopiesTheLogInOrder(t *testing.T) {
 		t.Fatalf("Import copied %d events, want 3", n)
 	}
 
-	want, err := src.ReadAll(t.Context(), 0, cqrs.ReadOptions{})
+	want, err := src.ReadAll(t.Context(), 0, eventsourcing.ReadOptions{})
 	if err != nil {
 		t.Fatalf("ReadAll source: %v", err)
 	}
-	got, err := dst.ReadAll(t.Context(), 0, cqrs.ReadOptions{})
+	got, err := dst.ReadAll(t.Context(), 0, eventsourcing.ReadOptions{})
 	if err != nil {
 		t.Fatalf("ReadAll destination: %v", err)
 	}
@@ -73,14 +73,14 @@ func TestImport_CopiesTheLogInOrder(t *testing.T) {
 func TestImport_RefusesAnOccupiedStream(t *testing.T) {
 	src := memory.NewEventStore()
 	t.Cleanup(func() { src.Close() })
-	if _, err := src.Save(t.Context(), []cqrs.Envelope{{StreamID: "task-1", Event: &taskCreated{ID: "1"}}}, cqrs.NoStream{}); err != nil {
+	if _, err := src.Save(t.Context(), []eventsourcing.Envelope{{StreamID: "task-1", Event: &taskCreated{ID: "1"}}}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("Save to source: %v", err)
 	}
 	dst := sqlite.NewEventStore(openDB(t, ":memory:"))
 	appendEvents(t, dst, "task-1", &taskCreated{ID: "other"})
 
 	_, err := sqlite.Import(t.Context(), src, dst)
-	var conflict *cqrs.StreamRevisionConflictError
+	var conflict *eventsourcing.StreamRevisionConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("Import into an occupied stream = %v, want a StreamRevisionConflictError", err)
 	}

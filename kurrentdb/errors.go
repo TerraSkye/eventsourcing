@@ -13,22 +13,22 @@ import (
 // vocabulary and prefixes it with op for context. It returns nil for a nil
 // err.
 //
-// Where the client's failure has a counterpart among the [cqrs] sentinels,
+// Where the client's failure has a counterpart among the [eventsourcing] sentinels,
 // the result matches that sentinel under [errors.Is] — a read of a stream
-// that does not exist becomes [cqrs.ErrStreamNotFound], for example — so
+// that does not exist becomes [eventsourcing.ErrStreamNotFound], for example — so
 // callers can handle failures without importing the KurrentDB client or
 // knowing its error codes. The client's own error stays in the chain either
 // way, so a caller that wants the detail can still reach it with
 // [errors.As] and [kurrentdb.Error.Code].
 //
-// Failures with no cqrs counterpart — authentication, access control, node
+// Failures with no eventsourcing counterpart — authentication, access control, node
 // availability, size limits, parsing, internal client and server errors — are
 // wrapped and returned as they are, rather than forced into an ill-fitting
 // sentinel. A caller that needs to tell those apart must inspect the client
 // error.
 //
 // [io.EOF] is returned unchanged. It is how the client signals a clean end of
-// stream, and [cqrs.Iterator] relies on it to end iteration successfully, so
+// stream, and [eventsourcing.Iterator] relies on it to end iteration successfully, so
 // it must never be decorated or turned into a sentinel.
 func mapError(op string, err error) error {
 	if err == nil {
@@ -45,12 +45,12 @@ func mapError(op string, err error) error {
 	return fmt.Errorf("%s: %w", op, err)
 }
 
-// sentinelFor returns the [cqrs] sentinel corresponding to err's KurrentDB
+// sentinelFor returns the [eventsourcing] sentinel corresponding to err's KurrentDB
 // error code, or nil if there is no faithful counterpart.
 //
-// A deleted or tombstoned stream maps to [cqrs.ErrStreamNotFound] along with
+// A deleted or tombstoned stream maps to [eventsourcing.ErrStreamNotFound] along with
 // a genuinely absent one: from a reader's point of view the events are gone,
-// and cqrs has no sentinel for the stronger "gone for good" case. Callers
+// and eventsourcing has no sentinel for the stronger "gone for good" case. Callers
 // that must tell them apart can match the wrapped [kurrentdb.Error] and
 // compare its Code against [kurrentdb.ErrorCodeStreamDeleted] or
 // [kurrentdb.ErrorCodeStreamTombstoned].
@@ -105,11 +105,11 @@ func isWrongExpectedVersion(err error) bool {
 
 // expectationError translates a failed optimistic-concurrency check on Save
 // into the error the caller's own expectation implies, so that violating a
-// [cqrs.NoStream] or [cqrs.StreamExists] precondition reports the same
+// [eventsourcing.NoStream] or [eventsourcing.StreamExists] precondition reports the same
 // sentinel here as it does in packages memory and file. It
 // returns nil when err is not a concurrency failure, or when the expectation
-// was a [cqrs.Revision], which Save reports as a
-// [cqrs.StreamRevisionConflictError] itself.
+// was a [eventsourcing.Revision], which Save reports as a
+// [eventsourcing.StreamRevisionConflictError] itself.
 func expectationError(streamID string, revision eventsourcing.StreamState, err error) error {
 	if !isWrongExpectedVersion(err) {
 		return nil

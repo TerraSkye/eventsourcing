@@ -10,21 +10,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
-	_ cqrs.EventStore   = (*EventStore)(nil)
-	_ cqrs.GlobalReader = (*EventStore)(nil)
+	_ eventsourcing.EventStore   = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader = (*EventStore)(nil)
 )
 
 // defaultReadLimit is the page size ReadAll uses when ReadOptions.Limit is
 // not set.
 const defaultReadLimit = 500
 
-// EventStore is a SQLite-backed [cqrs.EventStore] that also implements
-// [cqrs.GlobalReader]. The events table's id column is the GlobalPosition
+// EventStore is a SQLite-backed [eventsourcing.EventStore] that also implements
+// [eventsourcing.GlobalReader]. The events table's id column is the GlobalPosition
 // that [EventStore.ReadAll] orders by. Create one with [NewEventStore].
 //
 // SQLite lets one writer at a time commit, and a writer holds its lock from
@@ -42,28 +42,28 @@ func NewEventStore(db *sql.DB) *EventStore {
 }
 
 // Save appends events to the stream they share, enforcing the concurrency
-// check described by revision: [cqrs.Any] skips it, [cqrs.NoStream] requires
-// the stream not to exist yet, [cqrs.StreamExists] requires that it already
-// does, and a [cqrs.Revision] requires the stream's current length to match
+// check described by revision: [eventsourcing.Any] skips it, [eventsourcing.NoStream] requires
+// the stream not to exist yet, [eventsourcing.StreamExists] requires that it already
+// does, and a [eventsourcing.Revision] requires the stream's current length to match
 // exactly. All events must have the same StreamID, or Save returns an error
 // without appending anything. The append runs in one transaction; on a
-// revision mismatch it returns a [cqrs.StreamRevisionConflictError] and
+// revision mismatch it returns a [eventsourcing.StreamRevisionConflictError] and
 // nothing is persisted.
 //
-// On success it returns a [cqrs.AppendResult] whose NextExpectedVersion is
+// On success it returns a [eventsourcing.AppendResult] whose NextExpectedVersion is
 // the stream's new length and whose GlobalPosition is the id of the last
 // event appended.
-func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision cqrs.StreamState) (cqrs.AppendResult, error) {
+func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
-		return cqrs.AppendResult{Successful: true}, nil
+		return eventsourcing.AppendResult{Successful: true}, nil
 	}
 
 	streamID := events[0].StreamID
 	for i, e := range events {
 		if e.StreamID != streamID {
-			return cqrs.AppendResult{StreamID: streamID}, fmt.Errorf(
+			return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf(
 				"save events to stream %q: %w: event %d has different stream ID %q",
-				streamID, cqrs.ErrInvalidEventBatch, i, e.StreamID,
+				streamID, eventsourcing.ErrInvalidEventBatch, i, e.StreamID,
 			)
 		}
 	}
@@ -80,14 +80,14 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	}
 	rows := make([]row, len(events))
 	for i, e := range events {
-		payload, err := cqrs.EncodeEvent(e.Event)
+		payload, err := eventsourcing.EncodeEvent(e.Event)
 		if err != nil {
-			return cqrs.AppendResult{StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
-		metadataJSON, err := cqrs.EncodeMetadata(e.Metadata)
+		metadataJSON, err := eventsourcing.EncodeMetadata(e.Metadata)
 		if err != nil {
-			return cqrs.AppendResult{StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 		occurredAt := e.OccurredAt
@@ -103,7 +103,7 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return cqrs.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: begin tx: %w", streamID, err)
+		return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: begin tx: %w", streamID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -111,34 +111,34 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 	if err := tx.QueryRowContext(ctx,
 		"SELECT coalesce(max(stream_position), 0) FROM events WHERE stream_id = ?", streamID,
 	).Scan(&currentVersion); err != nil {
-		return cqrs.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: get stream version: %w", streamID, err)
+		return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf("save events to stream %q: get stream version: %w", streamID, err)
 	}
 
 	switch rev := revision.(type) {
-	case cqrs.Any:
+	case eventsourcing.Any:
 		// no check
-	case cqrs.NoStream:
+	case eventsourcing.NoStream:
 		if currentVersion != 0 {
-			return cqrs.AppendResult{StreamID: streamID},
-				fmt.Errorf("stream %q: already exists: %w", streamID, cqrs.ErrStreamExists)
+			return eventsourcing.AppendResult{StreamID: streamID},
+				fmt.Errorf("stream %q: already exists: %w", streamID, eventsourcing.ErrStreamExists)
 		}
-	case cqrs.StreamExists:
+	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
-			return cqrs.AppendResult{StreamID: streamID},
-				fmt.Errorf("stream %q: does not exist: %w", streamID, cqrs.ErrStreamNotFound)
+			return eventsourcing.AppendResult{StreamID: streamID},
+				fmt.Errorf("stream %q: does not exist: %w", streamID, eventsourcing.ErrStreamNotFound)
 		}
-	case cqrs.Revision:
+	case eventsourcing.Revision:
 		if currentVersion != uint64(rev) {
-			return cqrs.AppendResult{StreamID: streamID},
-				&cqrs.StreamRevisionConflictError{
+			return eventsourcing.AppendResult{StreamID: streamID},
+				&eventsourcing.StreamRevisionConflictError{
 					Stream:           streamID,
 					ExpectedRevision: rev,
-					ActualRevision:   cqrs.Revision(currentVersion),
+					ActualRevision:   eventsourcing.Revision(currentVersion),
 				}
 		}
 	default:
-		return cqrs.AppendResult{StreamID: streamID},
-			fmt.Errorf("unsupported revision type for stream %s: %w", streamID, cqrs.ErrInvalidRevision)
+		return eventsourcing.AppendResult{StreamID: streamID},
+			fmt.Errorf("unsupported revision type for stream %s: %w", streamID, eventsourcing.ErrInvalidRevision)
 	}
 
 	var lastID int64
@@ -152,23 +152,23 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 		).Scan(&lastID)
 		if err != nil {
 			if isUniqueViolation(err) {
-				return cqrs.AppendResult{StreamID: streamID},
-					&cqrs.StreamRevisionConflictError{
+				return eventsourcing.AppendResult{StreamID: streamID},
+					&eventsourcing.StreamRevisionConflictError{
 						Stream:           streamID,
 						ExpectedRevision: revision,
-						ActualRevision:   cqrs.Revision(currentVersion),
+						ActualRevision:   eventsourcing.Revision(currentVersion),
 					}
 			}
-			return cqrs.AppendResult{StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: insert event %d: %w", streamID, i, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return cqrs.AppendResult{StreamID: streamID},
+		return eventsourcing.AppendResult{StreamID: streamID},
 			fmt.Errorf("save events to stream %q: commit: %w", streamID, err)
 	}
-	return cqrs.AppendResult{
+	return eventsourcing.AppendResult{
 		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: currentVersion + uint64(len(events)),
@@ -178,55 +178,55 @@ func (s *EventStore) Save(ctx context.Context, events []cqrs.Envelope, revision 
 
 // LoadStream returns an iterator over all events in the stream identified
 // by id, in the order they were appended. It returns an error wrapping
-// [cqrs.ErrStreamNotFound] if the stream does not exist.
+// [eventsourcing.ErrStreamNotFound] if the stream does not exist.
 //
 // The events are read in full before LoadStream returns, so the one
 // connection is free again while the caller iterates.
-func (s *EventStore) LoadStream(ctx context.Context, id string) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (s *EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	envs, err := s.query(ctx, selectEvents+" WHERE stream_id = ? ORDER BY stream_position", id)
 	if err != nil {
 		return nil, fmt.Errorf("load stream %q: %w", id, err)
 	}
 	if len(envs) == 0 {
-		return nil, fmt.Errorf("load stream %q: %w", id, cqrs.ErrStreamNotFound)
+		return nil, fmt.Errorf("load stream %q: %w", id, eventsourcing.ErrStreamNotFound)
 	}
-	return cqrs.NewSliceIterator(ctx, envs), nil
+	return eventsourcing.NewSliceIterator(ctx, envs), nil
 }
 
 // LoadStreamFrom returns an iterator over the events in the stream
 // identified by id, starting after the position identified by version.
-// [cqrs.NoStream] requires the stream not to exist; [cqrs.StreamExists]
-// requires that it does; [cqrs.Any] reads from the beginning of the stream.
-// A [cqrs.Revision] of n returns the events after the n-th, so a caller
+// [eventsourcing.NoStream] requires the stream not to exist; [eventsourcing.StreamExists]
+// requires that it does; [eventsourcing.Any] reads from the beginning of the stream.
+// A [eventsourcing.Revision] of n returns the events after the n-th, so a caller
 // that has processed n events resumes where it left off.
-func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version cqrs.StreamState) (*cqrs.Iterator[*cqrs.Envelope], error) {
+func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
 	switch version.(type) {
-	case cqrs.NoStream:
+	case eventsourcing.NoStream:
 		exists, err := s.exists(ctx, id)
 		if err != nil {
 			return nil, fmt.Errorf("load stream %q: %w", id, err)
 		}
 		if exists {
-			return nil, fmt.Errorf("load stream %q: expected empty stream: %w", id, cqrs.ErrStreamExists)
+			return nil, fmt.Errorf("load stream %q: expected empty stream: %w", id, eventsourcing.ErrStreamExists)
 		}
-		return cqrs.NewSliceIterator(ctx, []*cqrs.Envelope{}), nil
+		return eventsourcing.NewSliceIterator(ctx, []*eventsourcing.Envelope{}), nil
 
-	case cqrs.StreamExists:
+	case eventsourcing.StreamExists:
 		envs, err := s.query(ctx, selectEvents+" WHERE stream_id = ? ORDER BY stream_position", id)
 		if err != nil {
 			return nil, fmt.Errorf("load stream %q: %w", id, err)
 		}
 		if len(envs) == 0 {
-			return nil, fmt.Errorf("load stream %q: expected existing stream: %w", id, cqrs.ErrStreamNotFound)
+			return nil, fmt.Errorf("load stream %q: expected existing stream: %w", id, eventsourcing.ErrStreamNotFound)
 		}
-		return cqrs.NewSliceIterator(ctx, envs), nil
+		return eventsourcing.NewSliceIterator(ctx, envs), nil
 
-	case cqrs.Any:
+	case eventsourcing.Any:
 		envs, err := s.query(ctx, selectEvents+" WHERE stream_id = ? ORDER BY stream_position", id)
 		if err != nil {
 			return nil, fmt.Errorf("load stream %q: %w", id, err)
 		}
-		return cqrs.NewSliceIterator(ctx, envs), nil
+		return eventsourcing.NewSliceIterator(ctx, envs), nil
 
 	default:
 		envs, err := s.query(ctx, selectEvents+" WHERE stream_id = ? AND stream_position > ? ORDER BY stream_position",
@@ -234,16 +234,16 @@ func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version cqrs
 		if err != nil {
 			return nil, fmt.Errorf("load stream %q: %w", id, err)
 		}
-		return cqrs.NewSliceIterator(ctx, envs), nil
+		return eventsourcing.NewSliceIterator(ctx, envs), nil
 	}
 }
 
-// ReadAll implements [cqrs.GlobalReader]. Filters run in SQL, on exact
+// ReadAll implements [eventsourcing.GlobalReader]. Filters run in SQL, on exact
 // event type names and on stream ID prefixes (compared with substr, so %
 // and _ in a prefix are not wildcards).
-func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOptions) (cqrs.ReadResult, error) {
+func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	if after > math.MaxInt64 {
-		return cqrs.ReadResult{}, fmt.Errorf("%w: read all after %d", cqrs.ErrInvalidRevision, after)
+		return eventsourcing.ReadResult{}, fmt.Errorf("%w: read all after %d", eventsourcing.ErrInvalidRevision, after)
 	}
 	limit := opts.Limit
 	if limit <= 0 {
@@ -254,9 +254,9 @@ func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 	// describe the same point in the log even if appends land in between.
 	head, err := s.Head(ctx)
 	if err != nil {
-		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+		return eventsourcing.ReadResult{}, fmt.Errorf("read all: %w", err)
 	}
-	res := cqrs.ReadResult{Next: max(after, head), AtEnd: true}
+	res := eventsourcing.ReadResult{Next: max(after, head), AtEnd: true}
 	if head <= after {
 		res.Next = after
 		return res, nil
@@ -288,7 +288,7 @@ func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 
 	res.Events, err = s.query(ctx, selectEvents+where.String()+" ORDER BY id LIMIT ?", args...)
 	if err != nil {
-		return cqrs.ReadResult{}, fmt.Errorf("read all: %w", err)
+		return eventsourcing.ReadResult{}, fmt.Errorf("read all: %w", err)
 	}
 
 	// A full page may stop short of the head; anything less means every
@@ -300,7 +300,7 @@ func (s *EventStore) ReadAll(ctx context.Context, after uint64, opts cqrs.ReadOp
 	return res, nil
 }
 
-// Head implements [cqrs.GlobalReader]: the highest id in the events table,
+// Head implements [eventsourcing.GlobalReader]: the highest id in the events table,
 // or 0 if it is empty.
 func (s *EventStore) Head(ctx context.Context) (uint64, error) {
 	var head int64
@@ -333,7 +333,7 @@ const selectEvents = `
 
 // query runs a SELECT built on selectEvents and returns every row, read in
 // full and closed.
-func (s *EventStore) query(ctx context.Context, query string, args ...any) ([]*cqrs.Envelope, error) {
+func (s *EventStore) query(ctx context.Context, query string, args ...any) ([]*eventsourcing.Envelope, error) {
 	return queryEnvelopes(ctx, s.db, query, args...)
 }
 
@@ -342,13 +342,13 @@ type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
-func queryEnvelopes(ctx context.Context, q queryer, query string, args ...any) ([]*cqrs.Envelope, error) {
+func queryEnvelopes(ctx context.Context, q queryer, query string, args ...any) ([]*eventsourcing.Envelope, error) {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*cqrs.Envelope
+	var out []*eventsourcing.Envelope
 	for rows.Next() {
 		env, err := scanEnvelope(rows)
 		if err != nil {
@@ -359,9 +359,9 @@ func queryEnvelopes(ctx context.Context, q queryer, query string, args ...any) (
 	return out, rows.Err()
 }
 
-// scanEnvelope decodes a single events row into a [cqrs.Envelope],
-// reconstructing the concrete [cqrs.Event] via [cqrs.DecodeEvent].
-func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
+// scanEnvelope decodes a single events row into a [eventsourcing.Envelope],
+// reconstructing the concrete [eventsourcing.Event] via [eventsourcing.DecodeEvent].
+func scanEnvelope(rows *sql.Rows) (*eventsourcing.Envelope, error) {
 	var (
 		globalID       int64
 		eventID        string
@@ -382,16 +382,16 @@ func scanEnvelope(rows *sql.Rows) (*cqrs.Envelope, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan envelope: event id %q: %w", eventID, err)
 	}
-	ev, err := cqrs.DecodeEvent(eventType, payload)
+	ev, err := eventsourcing.DecodeEvent(eventType, payload)
 	if err != nil {
 		return nil, fmt.Errorf("scan envelope: %w", err)
 	}
-	meta, err := cqrs.DecodeMetadata(metadata)
+	meta, err := eventsourcing.DecodeMetadata(metadata)
 	if err != nil {
 		meta = map[string]any{}
 	}
 
-	return &cqrs.Envelope{
+	return &eventsourcing.Envelope{
 		EventID:        id,
 		StreamID:       streamID,
 		Event:          ev,

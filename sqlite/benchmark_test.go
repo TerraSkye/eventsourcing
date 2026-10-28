@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	"github.com/terraskye/eventsourcing/projection"
 	"github.com/terraskye/eventsourcing/projection/projectiontest"
@@ -19,18 +19,18 @@ import (
 // database skips the write-ahead log and the disk.
 
 func BenchmarkEventStore(b *testing.B) {
-	eventsourcingtest.Benchmark(b, func(b *testing.B) cqrs.EventStore {
+	eventsourcingtest.Benchmark(b, func(b *testing.B) eventsourcing.EventStore {
 		return sqlite.NewEventStore(openBenchmarkDB(b))
 	})
 }
 
 func BenchmarkProjection(b *testing.B) {
-	projectiontest.Benchmark(b, func(b *testing.B) (cqrs.EventStore, projection.Store, cqrs.EventHandler) {
+	projectiontest.Benchmark(b, func(b *testing.B) (eventsourcing.EventStore, projection.Store, eventsourcing.EventHandler) {
 		db := openBenchmarkDB(b)
 		if _, err := db.ExecContext(b.Context(), benchmarkRowsSchema); err != nil {
 			b.Fatalf("create benchmark_rows: %v", err)
 		}
-		return sqlite.NewEventStore(db), sqlite.NewProjectionStore(db), cqrs.NewEventHandlerFunc(writeBenchmarkRow)
+		return sqlite.NewEventStore(db), sqlite.NewProjectionStore(db), eventsourcing.NewEventHandlerFunc(writeBenchmarkRow)
 	})
 }
 
@@ -43,11 +43,11 @@ const benchmarkRowsSchema = `CREATE TABLE IF NOT EXISTS benchmark_rows (
 
 // writeBenchmarkRow upserts the event's stream row in the projection's
 // transaction, as a real projection writes its read model.
-func writeBenchmarkRow(ctx context.Context, _ cqrs.Event) error {
+func writeBenchmarkRow(ctx context.Context, _ eventsourcing.Event) error {
 	_, err := sqlite.Tx(ctx).ExecContext(ctx,
 		`INSERT INTO benchmark_rows (stream_id, version) VALUES (?, ?)
 		 ON CONFLICT (stream_id) DO UPDATE SET version = excluded.version`,
-		cqrs.StreamIDFromContext(ctx), int64(cqrs.VersionFromContext(ctx)))
+		eventsourcing.StreamIDFromContext(ctx), int64(eventsourcing.VersionFromContext(ctx)))
 	return err
 }
 

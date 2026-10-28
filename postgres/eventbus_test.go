@@ -17,25 +17,25 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/postgres"
 )
 
 // collectHandler returns a handler that appends received events to a slice,
 // and a function to read the current snapshot of that slice.
-func collectHandler() (cqrs.EventHandler, func() []cqrs.Event) {
+func collectHandler() (eventsourcing.EventHandler, func() []eventsourcing.Event) {
 	var mu sync.Mutex
-	var received []cqrs.Event
-	handler := cqrs.NewEventHandlerFunc(func(_ context.Context, event cqrs.Event) error {
+	var received []eventsourcing.Event
+	handler := eventsourcing.NewEventHandlerFunc(func(_ context.Context, event eventsourcing.Event) error {
 		mu.Lock()
 		received = append(received, event)
 		mu.Unlock()
 		return nil
 	})
-	snapshot := func() []cqrs.Event {
+	snapshot := func() []eventsourcing.Event {
 		mu.Lock()
 		defer mu.Unlock()
-		out := make([]cqrs.Event, len(received))
+		out := make([]eventsourcing.Event, len(received))
 		copy(out, received)
 		return out
 	}
@@ -71,10 +71,10 @@ func TestSubscribe_ReceivesEvents(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	_, err := store.Save(ctx, []cqrs.Envelope{
+	_, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -90,10 +90,10 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 	ctx := context.Background()
 
 	// Save 2 events, then start a subscriber and let it consume them.
-	_, _ = store.Save(ctx, []cqrs.Envelope{
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
 	bus1 := postgres.NewEventBus(pool, 20*time.Millisecond)
 	handler1, snapshot1 := collectHandler()
@@ -111,9 +111,9 @@ func TestSubscribe_PositionPersisted(t *testing.T) {
 	bus1.Close() //nolint:errcheck
 
 	// Save a third event.
-	_, _ = store.Save(ctx, []cqrs.Envelope{
+	_, _ = store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{})
+	}, eventsourcing.Any{})
 
 	// Start a new bus with the same subscriber name. It must resume from the
 	// persisted position and only deliver the third event.
@@ -137,11 +137,11 @@ func TestSubscribe_CloseDuringHandlerCommitsPosition(t *testing.T) {
 	pool := newPool(t)
 	store := postgres.NewEventStore(pool)
 	ctx := context.Background()
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{}); err != nil {
+	}, eventsourcing.Any{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestSubscribe_CloseDuringHandlerCommitsPosition(t *testing.T) {
 		seen    int
 		reached = make(chan struct{})
 	)
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, _ eventsourcing.Event) error {
 		mu.Lock()
 		seen++
 		n := seen
@@ -234,7 +234,7 @@ func TestSubscribe_IgnoresInFlightTransactions(t *testing.T) {
 	}
 
 	// Commit stream-B via the store (id=2).
-	_, err = store.Save(ctx, []cqrs.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, cqrs.Any{})
+	_, err = store.Save(ctx, []eventsourcing.Envelope{newEnvelope("stream-B", &OrderCreated{OrderID: "B"})}, eventsourcing.Any{})
 	if err != nil {
 		tx.Rollback(ctx) //nolint:errcheck
 		t.Fatalf("store.Save: %v", err)
@@ -291,9 +291,9 @@ func TestSubscribe_NotifyWakesImmediately(t *testing.T) {
 		t.Fatal("listen connection was not established in time")
 	}
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{}); err != nil {
+	}, eventsourcing.Any{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
 		idx := i
 		// Simulate a projection write: Handle() acquires its own connection
 		// from the same pool poll() uses.
-		handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, _ cqrs.Event) error {
+		handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, _ eventsourcing.Event) error {
 			if _, err := pool.Exec(ctx, "SELECT pg_sleep(0.01)"); err != nil {
 				return err
 			}
@@ -349,9 +349,9 @@ func TestSubscribe_ManySubscribersSmallPool_NoDeadlock(t *testing.T) {
 		}
 	}
 
-	if _, err := store.Save(ctx, []cqrs.Envelope{
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{
 		newEnvelope("order-1", &OrderCreated{OrderID: "order-1"}),
-	}, cqrs.Any{}); err != nil {
+	}, eventsourcing.Any{}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -376,7 +376,7 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 	bus := postgres.NewEventBus(pool, 50*time.Millisecond)
 	t.Cleanup(func() { _ = bus.Close() })
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 
@@ -386,7 +386,7 @@ func TestUse_RacesWithSubscribe(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 500; i++ {
-			bus.Use(func(next cqrs.EventHandler) cqrs.EventHandler {
+			bus.Use(func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 				return next
 			})
 		}
@@ -424,7 +424,7 @@ func TestSubscribe_CtxWatcherGoroutineLeaksAfterClose(t *testing.T) {
 	pool := newPool(t)
 	bus := postgres.NewEventBus(pool, 50*time.Millisecond)
 
-	handler := cqrs.NewEventHandlerFunc(func(ctx context.Context, event cqrs.Event) error {
+	handler := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
 		return nil
 	})
 

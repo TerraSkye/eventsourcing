@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	cqrs "github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/postgres"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -31,8 +31,8 @@ func (e *OrderCreated) EventType() string   { return "OrderCreated" }
 var testDSN string
 
 func TestMain(m *testing.M) {
-	cqrs.RegisterEventByType(func() cqrs.Event { return &OrderCreated{} })
-	cqrs.RegisterEventByType(func() cqrs.Event { return &slowEvent{} })
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &OrderCreated{} })
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &slowEvent{} })
 
 	ctx := context.Background()
 	pgc, err := tcpostgres.Run(ctx, "postgres:16-alpine",
@@ -93,8 +93,8 @@ func newPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-func newEnvelope(streamID string, event cqrs.Event) cqrs.Envelope {
-	return cqrs.Envelope{
+func newEnvelope(streamID string, event eventsourcing.Event) eventsourcing.Envelope {
+	return eventsourcing.Envelope{
 		EventID:    uuid.New(),
 		StreamID:   streamID,
 		Event:      event,
