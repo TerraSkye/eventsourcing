@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,6 +144,67 @@ func TestCommandBus_ContextCancelWhileWaiting(t *testing.T) {
 	}
 
 	bus.Stop()
+}
+
+// TestCommandBus_ContextCancelWhileQueued asserts that a command whose context
+// ends while it waits behind another command on its shard is never handled.
+// Its Dispatch returns the context's error, so running it anyway would commit
+// a command the caller was told failed.
+func TestCommandBus_ContextCancelWhileQueued(t *testing.T) {
+	bus := NewCommandBus(10, 1)
+	defer bus.Stop()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var handled atomic.Int32
+	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
+		switch cmd.ID {
+		case "blocker":
+			close(started)
+			<-release // occupy the single worker
+		case "queued":
+			handled.Add(1)
+		}
+		return AppendResult{Successful: true}, nil
+	})
+
+	blockerErr := make(chan error, 1)
+	go func() {
+		_, err := bus.Dispatch(context.Background(), testCmd{ID: "blocker"})
+		blockerErr <- err
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queuedErr := make(chan error, 1)
+	go func() {
+		_, err := bus.Dispatch(ctx, testCmd{ID: "queued"})
+		queuedErr <- err
+	}()
+
+	// Cancel only once the command is in the queue, behind the blocker.
+	for len(bus.queues[0]) == 0 {
+		runtime.Gosched()
+	}
+	cancel()
+	if err := <-queuedErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	close(release)
+	if err := <-blockerErr; err != nil {
+		t.Fatalf("blocker dispatch: %v", err)
+	}
+
+	// The shard handles its commands in order, so once this one returns the
+	// worker is past the cancelled one.
+	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "after"}); err != nil {
+		t.Fatalf("dispatch after cancelled command: %v", err)
+	}
+
+	if n := handled.Load(); n != 0 {
+		t.Fatalf("handler ran %d times for a cancelled command, want 0", n)
+	}
 }
 
 func TestRegister_DuplicateHandlerPanics(t *testing.T) {
