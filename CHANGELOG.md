@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-29
+
 ### Breaking
 
 - `telemetry` names its metrics, spans and attributes one way,
