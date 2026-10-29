@@ -130,7 +130,7 @@ func (h *hub) publish(ctx context.Context, b []byte) {
 // rate estimates; a one-off read only uses them.
 func (h *hub) read(ctx context.Context, track bool) snapshot {
 	d := h.d
-	snap := snapshot{Title: d.title, Reset: d.reset, Projections: make([]projectionView, 0, len(d.names))}
+	snap := snapshot{Title: d.title, Reset: d.reset, Events: d.events != nil, Chains: d.chains != nil, Projections: make([]projectionView, 0, len(d.names))}
 	for _, name := range d.names {
 		readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 		statuses, err := d.store.LoadStatuses(readCtx, name)

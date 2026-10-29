@@ -39,6 +39,21 @@
 // keeps a site that rebinds its own name to the dashboard's address from
 // passing for it.
 //
+// # Events
+//
+// [WithEvents] adds an events view, for debugging and auditing: the global
+// log, newest first, filtered by event type and stream prefix, with each
+// event's payload, metadata and chain IDs. When the store also implements
+// [eventsourcing.CorrelationLoader], an event links to its correlation
+// chain, shown as a tree of what caused what across every stream it
+// touched:
+//
+//	d := dashboard.New(projectionStore, dashboard.WithEvents(eventStore))
+//
+// The view shows payloads to anyone who can open the dashboard. A store
+// wrapped by telemetry.WithEventStoreTelemetry still reads the log, but
+// loses LoadCorrelation; pass the unwrapped store.
+//
 // # Updates
 //
 // The page receives updates as server-sent events. While at least one page
