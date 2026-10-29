@@ -54,7 +54,7 @@ func (t EventStore) baseAttrs() []attribute.KeyValue {
 // client span tagged with the stream ID, the requested revision, and the
 // events' correlation and causation IDs. Before saving, it stamps each
 // event's Metadata with injected trace-propagation headers, so a later
-// [EventBus] or event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
+// event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
 // [EventsAppended] for every call, and [EventStoreErrors] if the underlying
 // store returns an error.
 func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {

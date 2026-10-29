@@ -116,20 +116,20 @@ bus.Use(myMiddleware)
 
 ---
 
-## EventBus
+## Event handlers
 
-`EventBus` is an interface, and each implementation carries its own `Use()` method. Call it before subscribing: middleware is applied to a handler when it is passed to `Subscribe`, so subscriptions made earlier are not re-wrapped.
+Nothing applies event handler middleware for you: wrap the handler before passing it as a projection's `Handler`. The first wrapper applied is the innermost, so apply the one that should run first last.
 
 ```go
-bus := memory.NewEventBus(100)
+handler := eventsourcing.EventHandler(group)
+handler = telemetry.EventTelemetry()(handler)
+handler = logging.EventLogging(logger)(handler)
 
-bus.Use(
-    logging.EventLogging(logger),
-    telemetry.EventBusTelemetry(),
-)
-
-bus.Subscribe(ctx, "order-projector", orderProjector)
-bus.Subscribe(ctx, "invoice-projector", invoiceProjector)
+runner := projection.NewRunner(projection.Definition{
+    Name:       "order-projector",
+    Handler:    handler,
+    EventTypes: group.StreamFilter(),
+}, store, projectionStore)
 ```
 
 ### Writing an event handler middleware
@@ -180,6 +180,6 @@ var metered eventsourcing.EventStoreMiddleware = func(next eventsourcing.EventSt
 | `telemetry.CommandTelemetry(...)` | `CommandHandlerMiddleware` | `bus.Use(...)` before `Register` |
 | `logging.QueryLogging(logger)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
 | `telemetry.QueryTelemetry(...)` | `QueryHandlerMiddleware` | `bus.Use(...)` before `RegisterQueryHandler` |
-| `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
-| `telemetry.EventBusTelemetry(...)` | `EventHandlerMiddleware` | `bus.Use(...)` before `Subscribe` |
+| `logging.EventLogging(logger)` | `EventHandlerMiddleware` | `handler = mw(handler)` |
+| `telemetry.EventTelemetry(...)` | `EventHandlerMiddleware` | `handler = mw(handler)` |
 | `telemetry.EventStoreTelemetry(...)` | `EventStoreMiddleware` | `store = mw(store)` |

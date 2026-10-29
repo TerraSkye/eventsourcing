@@ -32,8 +32,8 @@ const (
 // becomes env's EventID and the correlation ID env's CorrelationID, so a
 // command sent while handling env produces events caused by it. An event
 // stored without a CorrelationID counts as the root of its chain, its own
-// EventID the correlation. Every event bus and the projection runner call
-// WithEnvelope before a handler runs.
+// EventID the correlation. The projection runner calls WithEnvelope before
+// a handler runs.
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context {
 	var aggregateID string
 	if env.Event != nil {

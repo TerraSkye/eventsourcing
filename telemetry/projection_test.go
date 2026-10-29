@@ -298,7 +298,7 @@ func TestWithProjectionStoreTelemetry_DeadLetterStore(t *testing.T) {
 }
 
 // TestWithEventTelemetry_RecordsErrors checks a failing handler is counted
-// in EventBusErrors, tagged with the projection when it runs in a batch.
+// in EventHandlerErrors, tagged with the projection when it runs in a batch.
 func TestWithEventTelemetry_RecordsErrors(t *testing.T) {
 	name := newProjectionName()
 	boom := errors.New("boom")
@@ -310,8 +310,8 @@ func TestWithEventTelemetry_RecordsErrors(t *testing.T) {
 		t.Fatalf("Handle() = %v, want %v", err, boom)
 	}
 
-	if errs := forProjection(durationRecorder.recordsFor("eventsourcing.eventbus.errors"), name); len(errs) != 1 {
-		t.Errorf("eventbus errors for the projection = %d, want 1", len(errs))
+	if errs := forProjection(durationRecorder.recordsFor("eventsourcing.event_handler.errors"), name); len(errs) != 1 {
+		t.Errorf("event handler errors for the projection = %d, want 1", len(errs))
 	}
 }
 

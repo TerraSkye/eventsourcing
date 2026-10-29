@@ -1,6 +1,6 @@
 # sqlite
 
-An event store, an event bus and a projection store in one SQLite database, built on the pure-Go driver [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite). No server and no C toolchain: a file on disk for development and single-process services, or an in-memory database for tests that need real transactions.
+An event store and a projection store in one SQLite database, built on the pure-Go driver [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite). No server and no C toolchain: a file on disk for development and single-process services, or an in-memory database for tests that need real transactions.
 
 ## Package
 
@@ -30,20 +30,15 @@ if _, err := db.ExecContext(ctx, sqlite.Schema); err != nil {
 
 ```go
 func NewEventStore(db *sql.DB) *EventStore
-func NewEventBus(db *sql.DB, pollInterval time.Duration) *EventBus
 func NewProjectionStore(db *sql.DB) *ProjectionStore
 func Tx(ctx context.Context) *sql.Tx
 ```
 
-All three share `db`, which belongs to the caller: their `Close` methods do not close it.
+Both share `db`, which belongs to the caller: their `Close` methods do not close it.
 
 ## Event store
 
 `EventStore` implements `EventStore` and `GlobalReader`. The `events` table's `id` is the global position; SQLite commits one writer at a time, so ids become visible in order and `ReadAll` never skips an event. Streams are read in full before `LoadStream` returns. Events are serialized as JSON, so event types must be registered (see [Event registry](../event-registry.md)); `Save` rejects an unregistered type with `ErrEventNotRegistered`.
-
-## Event bus
-
-`EventBus` polls the `events` table every `pollInterval` and keeps each subscription's position in `event_subscriptions`, so a subscription resumes after a restart. Delivery is at-least-once and in id order; a handler that fails is called again on the next poll with the same event. No transaction is held while handlers run, so a handler may append events. Options: `WithFilterEvents`, `WithStartFrom`.
 
 ## Projection store
 

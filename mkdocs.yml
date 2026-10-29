@@ -71,9 +71,7 @@ nav:
       - Errors: reference/errors.md
       - Implementations:
           - memory.EventStore: reference/implementations/memory-store.md
-          - memory.EventBus: reference/implementations/memory-eventbus.md
           - postgres.EventStore: reference/implementations/postgres-store.md
-          - postgres.EventBus: reference/implementations/postgres-eventbus.md
           - sqlite: reference/implementations/sqlite.md
   - Explanation:
       - Event sourcing concepts: explanation/event-sourcing.md

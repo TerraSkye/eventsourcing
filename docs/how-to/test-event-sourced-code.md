@@ -1,6 +1,6 @@
 # How to test event-sourced code
 
-Test commands, queries, and projectors using the in-memory store and event bus.
+Test commands, queries, and projectors using the in-memory stores.
 
 ## Testing the decide function directly
 
@@ -204,6 +204,6 @@ func TestProjector_OnTaskCreated(t *testing.T) {
 
 - **Test `decide` and `evolve` in isolation** — they are pure functions and require no infrastructure.
 - **Use `memory.NewEventStore`** for integration tests that need a real store.
-- **Use `memory.NewEventBus`** for tests that involve event bus subscriptions.
-- **Close stores and buses** with `defer store.Close()` / `defer bus.Close()` to avoid goroutine leaks in tests.
+- **Use `memory.NewProjectionStore`** with a `projection.Runner` for tests of a projection.
+- **Close stores** with `defer store.Close()` to avoid goroutine leaks in tests.
 - **Register every event type** — `memory.NewEventStore` encodes events and checks the registry as the persistent stores do, so `Save` rejects an unregistered type. Registering in an `init` beside each event, as the tutorials do, covers every test that imports the package. The registry is global, and registering a name twice panics, so do not register again in a test.

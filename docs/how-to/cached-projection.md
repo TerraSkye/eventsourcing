@@ -66,7 +66,7 @@ func (l *TaskList) handle(ctx context.Context, event eventsourcing.Event) error 
 ```
 
 - `Name` keys the projection's checkpoint, so it must be unique and stable between releases.
-- `Handler` is any `eventsourcing.EventHandler`, the same type an event bus subscriber takes.
+- `Handler` is any `eventsourcing.EventHandler`; wrap it in middleware such as `telemetry.WithEventTelemetry` before passing it.
 - `EventTypes` lists the registered names of the event types the handler handles; the runner reads only those. Register each event with `eventsourcing.RegisterEvent` (see [Register events](./register-events.md)); `NewRunner` panics on a name that is not registered, so a typo shows up at startup. Keep `EventTypes` next to the handler, so adding a `case` and its name happen in the same place; the runner notices the change and rebuilds (see [Rebuild a projection](#rebuild-a-projection)).
 
 If you prefer one method per event type, group them and pass the group's filter:
@@ -241,7 +241,7 @@ if err := runner.ReplayStream(ctx, "order-42"); err != nil {
 
 `ReplayStream` works from any instance, whichever segments it holds: it records the request in the store, and the instance holding each segment with the stream's dead letters serves it between two batches. The call waits until they have all tried, so an admin endpoint can call it on any replica. A handler that returns `eventsourcing.SkippedEventError` has declined the event; that is not a failure.
 
-The runner logs its lifecycle to `Logger` (default `slog.Default()`): a segment claimed, released or lost, a rebuild started and finished, an event skipped, and a segment stalled with its error. It logs nothing per applied event and nothing while idle. To log every handler call as well, wrap the handler, the same way you would on an event bus. Logging is a deployment choice, so do it in `main.go`:
+The runner logs its lifecycle to `Logger` (default `slog.Default()`): a segment claimed, released or lost, a rebuild started and finished, an event skipped, and a segment stalled with its error. It logs nothing per applied event and nothing while idle. To log every handler call as well, wrap the handler in `logging.WithEventLogging`. Logging is a deployment choice, so do it in `main.go`:
 
 ```go
 p := tasklist.NewProjection(list)

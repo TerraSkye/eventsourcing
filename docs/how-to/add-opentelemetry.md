@@ -11,16 +11,13 @@ go get go.opentelemetry.io/otel
 
 ## Wrap a command handler
 
-```go
-import (
-    "github.com/terraskye/eventsourcing/telemetry"
-    "go.opentelemetry.io/otel"
-)
+The wrappers use the global OpenTelemetry tracer and meter providers, so configure those with `otel.SetTracerProvider` and `otel.SetMeterProvider` first.
 
-tracer := otel.Tracer("my-service")
+```go
+import "github.com/terraskye/eventsourcing/telemetry"
 
 // Assuming createTaskHandler is eventsourcing.CommandHandler[CreateTask]
-tracedHandler := telemetry.TraceCommandHandler(tracer, createTaskHandler,
+tracedHandler := telemetry.WithCommandTelemetry(createTaskHandler,
     telemetry.WithOperation("CreateTask"),
 )
 ```
@@ -30,7 +27,7 @@ Each command execution creates a span named `"CreateTask"` under the current tra
 ## Wrap a query handler
 
 ```go
-tracedQuery := telemetry.TraceQueryHandler(tracer, queryHandler,
+tracedQuery := telemetry.WithQueryTelemetry(queryHandler,
     telemetry.WithOperation("ListTasks"),
 )
 ```
@@ -38,7 +35,7 @@ tracedQuery := telemetry.TraceQueryHandler(tracer, queryHandler,
 ## Wrap the event store
 
 ```go
-tracedStore := telemetry.TraceEventStore(tracer, store,
+tracedStore := telemetry.WithEventStoreTelemetry(store,
     telemetry.WithOperation("EventStore"),
 )
 ```
@@ -48,11 +45,12 @@ Pass `tracedStore` to your command/query handlers instead of the raw store.
 ## Wrap an event handler
 
 ```go
-tracedEventHandler := telemetry.TraceEventHandler(tracer, projector.EventHandlers(),
+tracedEventHandler := telemetry.WithEventTelemetry(projector.EventHandlers(),
     telemetry.WithOperation("TaskListProjector"),
 )
-bus.Subscribe(ctx, "task-list", tracedEventHandler)
 ```
+
+Pass `tracedEventHandler` as the projection's `Handler`. Each call records `eventsourcing.event_handler.operations` and `eventsourcing.event_handler.duration`, and `eventsourcing.event_handler.errors` for an error other than a skipped event, all by `eventsourcing.event.type` and, under a runner, `eventsourcing.projection.name`.
 
 ## Instrument a projection
 
@@ -107,7 +105,7 @@ Use `WithAttributes` for static attributes, or `WithAttributeGetter` for dynamic
 ```go
 import "go.opentelemetry.io/otel/attribute"
 
-tracedHandler := telemetry.TraceCommandHandler(tracer, handler,
+tracedHandler := telemetry.WithCommandTelemetry(handler,
     telemetry.WithOperation("CreateTask"),
     telemetry.WithAttributes(attribute.String("service.version", "1.0.0")),
     telemetry.WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
@@ -136,8 +134,8 @@ telemetry.WithOperationGetter(func(ctx context.Context, operation string) string
 
 | Function | Wraps |
 |---|---|
-| `telemetry.TraceCommandHandler` | `CommandHandler[C]` |
-| `telemetry.TraceQueryHandler` | `QueryHandler[T, R]` |
-| `telemetry.TraceEventStore` | `EventStore` |
-| `telemetry.TraceEventHandler` | `EventHandler` |
-| `telemetry.TraceEventBus` | `EventBus` |
+| `telemetry.WithCommandTelemetry` | `CommandHandler[C]` |
+| `telemetry.WithQueryTelemetry` | `QueryHandler[T, R]` |
+| `telemetry.WithEventStoreTelemetry` | `EventStore` |
+| `telemetry.WithEventTelemetry` | `EventHandler` |
+| `telemetry.WithProjectionStoreTelemetry` | `projection.Store` |

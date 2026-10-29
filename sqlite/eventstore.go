@@ -311,7 +311,7 @@ func (s *EventStore) Head(ctx context.Context) (uint64, error) {
 }
 
 // Close does nothing: the *sql.DB belongs to the caller, who may share it
-// with an [EventBus] and a [ProjectionStore], and closes it when done.
+// with a [ProjectionStore], and closes it when done.
 func (s *EventStore) Close() error {
 	return nil
 }

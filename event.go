@@ -16,8 +16,8 @@ type Event interface {
 	EventType() string
 }
 
-// Envelope wraps an [Event] with the metadata an [EventStore] or [EventBus]
-// needs to persist, order, and route it.
+// Envelope wraps an [Event] with the metadata an [EventStore] needs to
+// persist and order it, and its readers need to route it.
 type Envelope struct {
 	// EventID uniquely identifies this occurrence of the event.
 	EventID uuid.UUID

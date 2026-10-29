@@ -8,10 +8,8 @@ import (
 )
 
 // EventLogging returns an [eventsourcing.EventHandlerMiddleware] that logs
-// event processing, as described on [WithEventLogging]. Register it with
-// [eventsourcing.EventBus.Use] — for example on the bus returned by
-// memory.NewEventBus or postgres.NewEventBus — to apply logging to every
-// subscriber on that bus.
+// event processing, as described on [WithEventLogging]. Apply it by
+// wrapping a handler, for example a projection's Handler.
 func EventLogging(logger *slog.Logger) eventsourcing.EventHandlerMiddleware {
 	return func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
 		return WithEventLogging(logger, next)

@@ -42,33 +42,25 @@ eventsourcing.RegisterEvent(&events.TaskArchived{})
 
 See [How to register events](./register-events.md) for details.
 
-## Event bus
+## Projections
 
-The KurrentDB event bus uses persistent subscriptions to deliver events reliably, with at-least-once semantics and automatic reconnection.
+`EventStore` implements `GlobalReader`, so a [projection runner](./cached-projection.md) reads KurrentDB's `$all` stream like any other store. KurrentDB has no projection store of its own: keep the checkpoint in another package's, next to the read model it describes.
 
 ```go
-// client is the *kurrentdb.Client from above; 256 is each subscriber's buffer.
-bus := kdb.NewEventBus(client, 256)
-defer bus.Close()
-
-// Subscribe — the subscription name is used as the consumer group name in KurrentDB.
-err = bus.Subscribe(ctx, "task-list-projector", projector.EventHandlers())
+// pool is a *pgxpool.Pool with postgres.Schema applied.
+runner := projection.NewRunner(tasklist.NewProjection(list), store, postgres.NewProjectionStore(pool))
+go runner.Run(ctx)
 ```
 
-Subscriptions are durable: if your service restarts, KurrentDB resumes from where it left off.
-
-## Filter events per subscriber
-
-The `EventGroupProcessor` implements `StreamFilter()` which returns the list of event type names handled by the group. The KurrentDB event bus uses this to subscribe only to relevant event streams, avoiding unnecessary traffic.
+The runner reads only the event types in the definition's `EventTypes`; for an `EventGroupProcessor`, pass its `StreamFilter()`.
 
 ## Differences from in-memory
 
 | Feature | In-memory | KurrentDB |
 |---|---|---|
 | Persistence | No | Yes |
-| Event bus delivery | In-process channel | Persistent subscription |
 | Registration required | Yes | Yes |
-| At-least-once delivery | N/A | Yes |
+| Projection store | Yes | No (use another package's) |
 
 ## Running KurrentDB locally
 

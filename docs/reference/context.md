@@ -1,6 +1,6 @@
 # Context helpers
 
-When an event is dispatched through the event bus, the `Envelope` fields are injected into the context via `WithEnvelope`. Event handlers can read these values using the helper functions below.
+When the projection runner calls a handler, the `Envelope` fields are injected into the context via `WithEnvelope`. Event handlers can read these values using the helper functions below.
 
 ## WithEnvelope
 
@@ -8,7 +8,7 @@ When an event is dispatched through the event bus, the `Envelope` fields are inj
 func WithEnvelope(ctx context.Context, env *Envelope) context.Context
 ```
 
-Injects all envelope fields into the context. Called automatically by the event bus before invoking handlers. You should not normally need to call this directly.
+Injects all envelope fields into the context. Called automatically by the projection runner before invoking handlers. You should not normally need to call this directly.
 
 ## Reader functions
 

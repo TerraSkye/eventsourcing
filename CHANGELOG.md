@@ -41,8 +41,48 @@ release may break the API; every break is listed under **Breaking**.
   event saved as a value. Metadata comes back as JSON decodes it:
   numbers as `float64`, and nil as an empty map.
 - `memory.NewEventStore` takes no arguments, and `EventStore.Events()`
-  is removed. Call `memory.EventBus.Dispatch` after `Save` to feed the
-  memory bus, or read what was saved with `ReadAll`.
+  is removed. Read what was saved with `ReadAll`, or run a
+  `projection.Runner` over the store.
+- The event bus is removed: the `EventBus` interface and
+  `SubscriberOption`, `memory.EventBus`, `postgres.EventBus`,
+  `sqlite.EventBus` and `kurrentdb.EventBus` with their options
+  (`WithFilterEvents`, `WithStartFrom`, `WithStartAt`,
+  `WithStartAtZero`, `WithFilterStream`), and `telemetry.EventBus` with
+  `WithEventBusTelemetry`. It did what `projection.Runner` does with
+  fewer guarantees. Move each subscriber to a runner: its name becomes
+  the `Definition`'s `Name`, its handler the `Handler`, and its event
+  types the `EventTypes` (`StreamFilter()` for an
+  `EventGroupProcessor`). A runner starts from the beginning of the
+  log; the position a subscription had reached is not carried over.
+  Apply event handler middleware by wrapping the handler, for example
+  with `logging.WithEventLogging` or `telemetry.WithEventTelemetry`.
+  `telemetry.EventBusTelemetry` is now `telemetry.EventTelemetry`.
+- The schemas no longer create the `event_subscriptions` table, or on
+  Postgres the trigger that sent a `NOTIFY` after every insert. Left in
+  place they do no harm, but the trigger still runs on every insert.
+  To remove them from an existing database, on Postgres:
+
+  ```sql
+  DROP TRIGGER IF EXISTS eventsourcing_events_notify ON events;
+  DROP FUNCTION IF EXISTS eventsourcing_notify_events_inserted();
+  DROP TABLE IF EXISTS event_subscriptions;
+  ```
+
+  and on SQLite:
+
+  ```sql
+  DROP TABLE IF EXISTS event_subscriptions;
+  ```
+
+- The metrics `WithEventTelemetry` records are renamed, since they
+  measure any event handler: `eventsourcing.eventbus.handled` is
+  `eventsourcing.event_handler.operations`,
+  `eventsourcing.eventbus.duration` is
+  `eventsourcing.event_handler.duration`, and
+  `eventsourcing.eventbus.errors` is
+  `eventsourcing.event_handler.errors`. Their Go variables are
+  `EventHandlerOperations`, `EventHandlerDuration` and
+  `EventHandlerErrors`. `AttrSubscriberName` is removed.
 
 ### Added
 
@@ -50,11 +90,6 @@ release may break the API; every break is listed under **Breaking**.
   `DecodeMetadata` for an envelope's metadata, are the JSON encoding
   every store in this module persists in. A store outside the module
   that calls them writes the same bytes.
-
-### Changed
-
-- The KurrentDB event bus hands a handler an empty `Metadata` map, not
-  nil, for an event stored without metadata, as the stores already do.
 
 ### Fixed
 

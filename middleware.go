@@ -131,13 +131,12 @@ func wrapQueryHandler[T Query, R any](h QueryHandler[T, R], middlewares []QueryH
 	})
 }
 
-// EventHandlerMiddleware decorates an event handler on an [EventBus] with a
-// cross-cutting concern such as logging, telemetry, or error handling. It
-// receives the next handler in the chain and returns a handler that wraps
-// it; call next to pass the event along, or return without calling it to
-// short-circuit. Middleware is applied when a handler is passed to
-// [EventBus.Subscribe], and the first middleware passed to
-// [EventBus.Use] is the outermost wrapper and runs first for each event.
+// EventHandlerMiddleware decorates an [EventHandler] with a cross-cutting
+// concern such as logging, telemetry, or error handling. It receives the
+// next handler in the chain and returns a handler that wraps it; call next
+// to pass the event along, or return without calling it to short-circuit.
+// Apply one by wrapping a handler directly: handler = mw(handler), for
+// example before passing it as a projection's Handler.
 //
 // Example Usage:
 //

@@ -27,7 +27,7 @@ type config struct {
 }
 
 // Option configures the telemetry behavior of a wrapper such as
-// [WithCommandTelemetry], [WithQueryTelemetry], [WithEventBusTelemetry], or
+// [WithCommandTelemetry], [WithQueryTelemetry], [WithEventTelemetry], or
 // [WithEventStoreTelemetry].
 type Option interface {
 	apply(*config)

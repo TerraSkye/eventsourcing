@@ -45,9 +45,8 @@ const (
 	AttrResultType  = attribute.Key("eventsourcing.query.result_type")
 	AttrResultCount = attribute.Key("eventsourcing.query.result_count")
 
-	// EventBus attributes
-	AttrSubscriberName = attribute.Key("eventsourcing.subscriber.name")
-	AttrHandlerName    = attribute.Key("eventsourcing.handler.name")
+	// Event handler attributes
+	AttrHandlerName = attribute.Key("eventsourcing.handler.name")
 
 	// Result attribute for outcome labelling on counters
 	AttrResult = attribute.Key("eventsourcing.result") // "success" | "failure"
@@ -127,26 +126,28 @@ var (
 		metric.WithUnit("{event}"),
 	)
 
-	// EventBus metrics
+	// Event handler metrics
 
-	// EventBusHandled counts events handled by subscribers.
-	EventBusHandled, _ = meter.Int64Counter(
-		"eventsourcing.eventbus.handled",
-		metric.WithDescription("Number of events handled by subscribers"),
+	// EventHandlerOperations counts events passed to an event handler.
+	EventHandlerOperations, _ = meter.Int64Counter(
+		"eventsourcing.event_handler.operations",
+		metric.WithDescription("Number of events passed to an event handler"),
 		metric.WithUnit("{event}"),
 	)
 
-	// EventBusErrors counts event bus handler errors.
-	EventBusErrors, _ = meter.Int64Counter(
-		"eventsourcing.eventbus.errors",
-		metric.WithDescription("Number of event bus handler errors"),
+	// EventHandlerErrors counts errors an event handler returned, other
+	// than a skipped event.
+	EventHandlerErrors, _ = meter.Int64Counter(
+		"eventsourcing.event_handler.errors",
+		metric.WithDescription("Number of errors returned by an event handler"),
 		metric.WithUnit("{error}"),
 	)
 
-	// EventBusDuration records event bus handler duration, in seconds.
-	EventBusDuration, _ = meter.Float64Histogram(
-		"eventsourcing.eventbus.duration",
-		metric.WithDescription("Event bus handler duration"),
+	// EventHandlerDuration records how long an event handler took, in
+	// seconds.
+	EventHandlerDuration, _ = meter.Float64Histogram(
+		"eventsourcing.event_handler.duration",
+		metric.WithDescription("Event handler duration"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)

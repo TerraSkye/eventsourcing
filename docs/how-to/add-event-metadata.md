@@ -53,7 +53,7 @@ If two extractors return the same key, the later one wins.
 
 ## Reading metadata from context in event handlers
 
-When an event handler is called by the event bus, envelope fields are injected into the context via `WithEnvelope`. Use the context helpers to read them:
+When the projection runner calls an event handler, envelope fields are injected into the context via `WithEnvelope`. Use the context helpers to read them:
 
 ```go
 func (p *Projector) OnTaskCreated(ctx context.Context, e *events.TaskCreated) error {

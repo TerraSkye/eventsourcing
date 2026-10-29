@@ -177,7 +177,7 @@ This is the same `evolve` pattern used in commands — the only difference is th
 |---|---|
 | Small number of events | Live read model (simpler) |
 | Large event streams | [Cached projection](../how-to/cached-projection.md) |
-| Real-time updates needed | [Cached projection with event bus](./04-projections.md) |
+| Real-time updates needed | [Cached projection with the projection runner](./04-projections.md) |
 | Eventual consistency is fine | Either |
 
 ---

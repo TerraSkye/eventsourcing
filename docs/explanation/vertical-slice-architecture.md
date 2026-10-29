@@ -97,7 +97,7 @@ A slice is a self-contained feature. There are two kinds:
 
 **Query slice**: reads state.
 - Contains: `Query` struct, read model struct, `QueryHandler`, `evolve` (for the read model).
-- Choose between live (rebuild on every query) or cached (rebuild once, update via event bus).
+- Choose between live (rebuild on every query) or cached (rebuild once, kept up to date by the projection runner).
 
 ### Events (the shared contract)
 
@@ -122,7 +122,7 @@ Example: when `OrderShipped` is received, schedule a follow-up email 3 days late
 
 ## Rules
 
-1. **Slices do not import other slices.** If two slices need to communicate, they do so through events and the event bus.
+1. **Slices do not import other slices.** If two slices need to communicate, they do so through events, read by a projection or an automation.
 2. **Events are the only shared domain code.** Value objects (Money, Email) may also be shared, but sparingly.
 3. **Screens import slices, slices do not import screens.**
 4. **`main.go` handles wiring only** — no business logic, no HTTP routing logic, just creating handlers and connecting them.

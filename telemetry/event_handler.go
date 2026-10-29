@@ -21,11 +21,11 @@ import (
 //
 // Each call starts a span linked to the original producer trace (recovered
 // from the event's metadata), tagged with the event type, event ID, global
-// and stream position, and stream ID. It records [EventBusHandled] and
-// [EventBusDuration] for every invocation. A returned
+// and stream position, and stream ID. It records [EventHandlerOperations] and
+// [EventHandlerDuration] for every invocation. A returned
 // [eventsourcing.SkippedEventError] is treated as an intentional, non-error
 // skip and marks the span OK, while any other error marks the span as
-// failed and records [EventBusErrors].
+// failed and records [EventHandlerErrors].
 //
 // When next is a [projection.Definition]'s handler and the runner commits
 // through a store wrapped with [WithProjectionStoreTelemetry], the span is a
@@ -101,11 +101,11 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		)
 		defer span.End()
 
-		EventBusHandled.Add(ctx, 1, metric.WithAttributes(metricAttr...))
+		EventHandlerOperations.Add(ctx, 1, metric.WithAttributes(metricAttr...))
 
 		startTime := time.Now()
 		err := next.Handle(ctx, event)
-		EventBusDuration.Record(ctx,
+		EventHandlerDuration.Record(ctx,
 			time.Since(startTime).Seconds(),
 			metric.WithAttributes(metricAttr...),
 		)
@@ -115,7 +115,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			if errors.As(err, &skipped) {
 				span.SetStatus(codes.Ok, "")
 			} else {
-				EventBusErrors.Add(ctx, 1, metric.WithAttributes(metricAttr...))
+				EventHandlerErrors.Add(ctx, 1, metric.WithAttributes(metricAttr...))
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
 			}
@@ -124,4 +124,12 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		span.SetStatus(codes.Ok, "")
 		return nil
 	})
+}
+
+// EventTelemetry returns an [eventsourcing.EventHandlerMiddleware] that
+// wraps each handler with [WithEventTelemetry].
+func EventTelemetry(options ...Option) eventsourcing.EventHandlerMiddleware {
+	return func(next eventsourcing.EventHandler) eventsourcing.EventHandler {
+		return WithEventTelemetry(next, options...)
+	}
 }

@@ -20,12 +20,6 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type, id);
 CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events (correlation_id);
 
--- Event bus: the position each subscription has delivered up to.
-CREATE TABLE IF NOT EXISTS event_subscriptions (
-    name     TEXT    PRIMARY KEY,
-    position INTEGER NOT NULL DEFAULT 0
-);
-
 -- Projections: one row per segment of each projection (checkpoint, claim
 -- with epoch and heartbeat, status), and the events skipped under a
 -- non-stalling error policy. Heartbeats are Unix time in milliseconds.

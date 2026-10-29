@@ -123,24 +123,6 @@ Stores guarantee that no event becomes visible behind a position already returne
 
 ---
 
-## EventBus
-
-```go
-type EventBus interface {
-    Subscribe(ctx context.Context, name string, handler EventHandler, options ...SubscriberOption) error
-    Errors() <-chan error
-    Close() error
-}
-```
-
-Distributes events to registered handlers.
-
-- `Subscribe` — registers a named handler. The context controls the handler's lifetime; when cancelled, the subscription is removed.
-- `Errors` — channel for asynchronous handler errors.
-- `Close` — shuts down all subscriptions and waits for in-flight events to finish.
-
----
-
 ## EventHandler
 
 ```go

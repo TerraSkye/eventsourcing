@@ -16,8 +16,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// OrderCreated is the event type the event store and event bus tests
-// append.
+// OrderCreated is the event type the event store tests append.
 type OrderCreated struct {
 	OrderID string
 }
@@ -85,7 +84,7 @@ func newPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect pool: %v", err)
 	}
-	_, err = pool.Exec(ctx, "TRUNCATE events RESTART IDENTITY; TRUNCATE event_subscriptions")
+	_, err = pool.Exec(ctx, "TRUNCATE events RESTART IDENTITY")
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

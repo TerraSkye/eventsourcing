@@ -1,6 +1,6 @@
-// Package sqlite keeps events, subscriptions and projections in SQLite: an
-// event store, an event bus and a projection store that share one
-// database file, or one in-memory database.
+// Package sqlite keeps events and projections in SQLite: an event store
+// and a projection store that share one database file, or one in-memory
+// database.
 //
 // It needs no server, which suits local development, tutorials and tests
 // that need real transactions, and it serves single-process production
