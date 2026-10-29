@@ -9,6 +9,13 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `RegisterEventByType` and `RegisterEventByName` panic when the factory
+  returns a value instead of a pointer. Stored events are decoded into
+  what the factory returns, and JSON can only decode into a pointer, so
+  such an event saved and then failed on every read: `LoadStream` for
+  its stream and every `ReadAll` page holding it, stalling projections.
+  Return a pointer from the factory, `&OrderCreated{}`, or use
+  `RegisterEvent`.
 - `Save` on every store in this module rejects a batch in which an
   envelope has no `EventID`, with an error wrapping
   `ErrInvalidEventBatch`. The Postgres and SQLite stores used to make
