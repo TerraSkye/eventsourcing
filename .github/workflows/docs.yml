@@ -24,6 +24,13 @@ permissions:
   pages: write
   id-token: write
 
+# Master runs share one group, so they build and deploy in push order and an
+# older site never deploys over a newer one. Each pull request gets its own
+# group, which a newer push to it cancels, so it never waits on a deploy.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -52,10 +59,6 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
-    # One deploy at a time; pull request builds don't wait on it.
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
