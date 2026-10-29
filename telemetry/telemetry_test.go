@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
 
+	"github.com/terraskye/eventsourcing"
 	otelapi "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -293,4 +296,26 @@ type recMeterProvider struct {
 
 func (p recMeterProvider) Meter(_ string, _ ...metric.MeterOption) metric.Meter {
 	return recMeter{rec: p.rec}
+}
+
+// TestErrorType covers the error.type values: one per error this module
+// defines and per ended context, found through wrapping, and "_OTHER" for
+// anything else, so the attribute keeps a fixed set of values.
+func TestErrorType(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("save: %w", &eventsourcing.StreamRevisionConflictError{Stream: "s"}), "stream_revision_conflict"},
+		{fmt.Errorf("save: %w", eventsourcing.ErrStreamExists), "stream_exists"},
+		{fmt.Errorf("load: %w", eventsourcing.ErrStreamNotFound), "stream_not_found"},
+		{fmt.Errorf("load: %w", context.DeadlineExceeded), "deadline_exceeded"},
+		{fmt.Errorf("load: %w", context.Canceled), "canceled"},
+		{errors.New("connection refused"), "_OTHER"},
+	}
+	for _, tt := range tests {
+		if got := errorType(tt.err); got != tt.want {
+			t.Errorf("errorType(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
 }
