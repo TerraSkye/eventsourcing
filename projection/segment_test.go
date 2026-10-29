@@ -847,7 +847,7 @@ func TestRunner_ShutdownDoesNotDeadLetter(t *testing.T) {
 	if len(dl) != 0 {
 		t.Errorf("shutdown dead-lettered %d events, want 0: %v", len(dl), dl)
 	}
-	if n := r.Skipped(); n != 0 {
-		t.Errorf("Skipped() = %d after shutdown, want 0", n)
+	if n := r.DeadLettered(); n != 0 {
+		t.Errorf("DeadLettered() = %d after shutdown, want 0", n)
 	}
 }

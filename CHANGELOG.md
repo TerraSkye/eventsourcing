@@ -139,6 +139,15 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Changed
 
+- The projection runner says "dead-lettered" where it said "skipped"
+  for an event whose handler failed under `SkipWhenLive` or
+  `SkipAlways`, so the word "skipped" is left to an event a handler
+  declines with `SkippedEventError`, which is not a failure. Its warning
+  is "projection event dead-lettered", not "projection event skipped",
+  and `ErrStreamParked` reads "an earlier event of the stream was
+  dead-lettered". Update log searches and alerts on the old text.
+  `Runner.DeadLettered` counts these events; `Runner.Skipped`, which
+  returns the same count, is deprecated.
 - `telemetry` counts a command rejected with a
   `BusinessRuleViolationError` in `eventsourcing.commands.count` with
   `eventsourcing.result="rejected"`, not `"failure"`, so a dashboard
