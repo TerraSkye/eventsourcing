@@ -17,8 +17,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/terraskye/eventsourcing v0.4.1 h1:yaBiUdefjbkefAij7tXZCUS3AyfEYdzBNSslFpeUETA=
-github.com/terraskye/eventsourcing v0.4.1/go.mod h1:ik1nIoklJiaMAxs7QZ4bVhImfdU0Cd/toC33zq5HLRs=
+github.com/terraskye/eventsourcing v0.5.0 h1:sb6InmxAlQK5sIyj/Khoq6GxB476kx6v61zlCwd/mtc=
+github.com/terraskye/eventsourcing v0.5.0/go.mod h1:ik1nIoklJiaMAxs7QZ4bVhImfdU0Cd/toC33zq5HLRs=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/otel v1.41.0 h1:YlEwVsGAlCvczDILpUXpIpPSL/VPugt7zHThEMLce1c=

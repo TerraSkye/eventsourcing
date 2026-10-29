@@ -129,7 +129,7 @@ On each dispatch the handler loads the stream, folds it through `evolve`, calls 
 eventsourcing.NewCommandHandler(store, initial, evolve, decide,
 	eventsourcing.WithStreamState(eventsourcing.NoStream{}),       // must not exist yet
 	eventsourcing.WithRetryStrategy(func() backoff.BackOff { // retry save conflicts
-		return backoff.NewExponentialBackOff()
+		return backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)
 	}),
 	eventsourcing.WithMetadataExtractor(func(ctx context.Context) map[string]any {
 		return map[string]any{"user_id": userFromContext(ctx)}
@@ -225,7 +225,7 @@ import "github.com/terraskye/eventsourcing/telemetry"
 
 bus.Use(telemetry.CommandTelemetry())
 store := telemetry.WithEventStoreTelemetry(sqlite.NewEventStore(db))
-telemetry.ObserveProjection(runner) // lag, position, phase and skipped events as gauges
+telemetry.ObserveProjection(runner) // lag, position and phase as gauges, dead-lettered events as a counter
 ```
 
 Spans carry `eventsourcing.command.type`, `eventsourcing.aggregate.id`, `eventsourcing.stream.id`, `eventsourcing.event.type`, `eventsourcing.event.global_position` and friends; metrics cover durations, in-flight counts, failures, concurrency conflicts, and events appended and loaded. Full list in [Add OpenTelemetry](https://terraskye.github.io/eventsourcing/how-to/add-opentelemetry/).
@@ -278,6 +278,7 @@ GOWORK=off go test -race ./...
 
 # docs
 pip install -r requirements-docs.txt && mkdocs serve
+mkdocs build --strict   # what CI runs on pull requests
 ```
 
 The repository's `go.work` points the nested modules at the local root; outside the repository they resolve the published version.

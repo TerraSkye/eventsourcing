@@ -529,8 +529,8 @@ func TestRunner_SkipWhenLiveAfterRestart(t *testing.T) {
 	if err := r.WaitUntil(ctx, last); err != nil {
 		t.Fatalf("WaitUntil: %v; status %+v", err, r.Status())
 	}
-	if n := r.Skipped(); n != 1 {
-		t.Fatalf("Skipped() = %d, want 1", n)
+	if n := r.DeadLettered(); n != 1 {
+		t.Fatalf("DeadLettered() = %d, want 1", n)
 	}
 }
 

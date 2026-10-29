@@ -500,7 +500,7 @@ func (r *Runner) skipEvent(ctx context.Context, seg int, env *eventsourcing.Enve
 		return err
 	}
 	r.skipped.Add(1)
-	r.log(ctx, slog.LevelWarn, seg, cp.Position, "projection event skipped",
+	r.log(ctx, slog.LevelWarn, seg, cp.Position, "projection event dead-lettered",
 		slog.String("stream", env.StreamID), slog.String("event_type", eventType), slog.String("error", cause.Error()))
 	return nil
 }

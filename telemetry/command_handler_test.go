@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -97,7 +98,7 @@ func (durationTestCommand) CommandType() string { return "durationTestCommand" }
 
 // TestCommandTelemetryDurationRecordedInSeconds is a regression test for
 // GitHub issue #57: CommandTelemetry recorded
-// time.Since(startTime).Milliseconds() into eventsourcing.commands.duration,
+// time.Since(startTime).Milliseconds() into eventsourcing.command.duration,
 // but the instrument declares metric.WithUnit("s") and second-scaled bucket
 // boundaries — every sample from the middleware path was 1000x too large,
 // and any operation faster than 1ms recorded as exactly 0 (Milliseconds()
@@ -107,7 +108,7 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 	rec := durationRecorder
 
 	const work = 50 * time.Millisecond
-	const instrument = "eventsourcing.commands.duration"
+	const instrument = "eventsourcing.command.duration"
 
 	tests := []struct {
 		name   string
@@ -156,6 +157,87 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 			if v < work.Seconds()*0.5 {
 				t.Errorf("%s recorded %v for a %v operation; expected ~%v seconds",
 					instrument, v, work, work.Seconds())
+			}
+		})
+	}
+}
+
+// TestCommandTelemetry_ResultLabels covers the result CommandDuration records
+// for each outcome, through both the middleware and the wrapper: a business
+// rule violation is "rejected", apart from a "failure", and a failure
+// carries its error.type, a conflict even when wrapped in a violation.
+func TestCommandTelemetry_ResultLabels(t *testing.T) {
+	const instrument = "eventsourcing.command.duration"
+	outcomes := []struct {
+		name        string
+		err         error
+		want        string
+		wantErrType string
+	}{
+		{"success", nil, "success", ""},
+		{"business rule violation", fmt.Errorf("decide: %w", eventsourcing.NewBusinessRuleViolation(errors.New("already done"))), "rejected", ""},
+		{"conflict", &eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}, "failure", "stream_revision_conflict"},
+		{"conflict in a violation", eventsourcing.NewBusinessRuleViolation(&eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}), "failure", "stream_revision_conflict"},
+		{"store error", errors.New("connection refused"), "failure", "_OTHER"},
+	}
+	for _, o := range outcomes {
+		forms := map[string]func() error{
+			"CommandTelemetry": func() error {
+				_, err := CommandTelemetry()(func(context.Context, eventsourcing.Command) (eventsourcing.AppendResult, error) {
+					return eventsourcing.AppendResult{}, o.err
+				})(context.Background(), panicProbeCmd{})
+				return err
+			},
+			"WithCommandTelemetry": func() error {
+				_, err := WithCommandTelemetry(func(context.Context, panicProbeCmd) (eventsourcing.AppendResult, error) {
+					return eventsourcing.AppendResult{}, o.err
+				})(context.Background(), panicProbeCmd{})
+				return err
+			},
+		}
+		for form, call := range forms {
+			t.Run(o.name+"/"+form, func(t *testing.T) {
+				from := len(durationRecorder.recordsFor(instrument))
+				if err := call(); !errors.Is(err, o.err) {
+					t.Fatalf("error = %v, want %v", err, o.err)
+				}
+				got := durationRecorder.recordsFor(instrument)[from:]
+				if len(got) != 1 {
+					t.Fatalf("recorded %d %s values, want 1", len(got), instrument)
+				}
+				if v, _ := got[0].attrs.Value(AttrResult); v.AsString() != o.want {
+					t.Errorf("%s = %q, want %q", AttrResult, v.AsString(), o.want)
+				}
+				if v, ok := got[0].attrs.Value(AttrErrorType); ok != (o.wantErrType != "") || v.AsString() != o.wantErrType {
+					t.Errorf("%s = %q (set %v), want %q", AttrErrorType, v.AsString(), ok, o.wantErrType)
+				}
+			})
+		}
+	}
+}
+
+// TestCommandTelemetry_SpanName covers the span name, the same through the
+// middleware and the wrapper: "handle" and the command type.
+func TestCommandTelemetry_SpanName(t *testing.T) {
+	const want = "handle durationTestCommand"
+	forms := map[string]func(){
+		"CommandTelemetry": func() {
+			_, _ = CommandTelemetry()(func(context.Context, eventsourcing.Command) (eventsourcing.AppendResult, error) {
+				return eventsourcing.AppendResult{}, nil
+			})(context.Background(), durationTestCommand{})
+		},
+		"WithCommandTelemetry": func() {
+			_, _ = WithCommandTelemetry(func(context.Context, durationTestCommand) (eventsourcing.AppendResult, error) {
+				return eventsourcing.AppendResult{}, nil
+			})(context.Background(), durationTestCommand{})
+		},
+	}
+	for form, call := range forms {
+		t.Run(form, func(t *testing.T) {
+			before := spanNameRecorder.len()
+			call()
+			if got := spanNameRecorder.since(before); len(got) != 1 || got[0] != want {
+				t.Errorf("spans = %v, want [%s]", got, want)
 			}
 		})
 	}

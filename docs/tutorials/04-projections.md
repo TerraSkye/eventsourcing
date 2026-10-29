@@ -255,6 +255,8 @@ if err := taskList.WaitUntil(ctx, res.GlobalPosition); err != nil {
 }
 ```
 
+`WaitUntil` waits, it does not wake the runner: on its own it can wait up to the poll interval. The example's `main.go` calls `Nudge` on its runners after every command, with a small piece of command bus middleware, so the wait ends as soon as the task list has the event. `Nudge` only reaches runners in the same process.
+
 `taskList.IsLive(ctx)` answers a related question: has the projection caught up with the log at all? Use it for a readiness probe, so the service only takes traffic once the task list is built.
 
 If the projection runs in another process, such as a worker, there is no runner to call. Wait on the projection store instead, with a `projection.Probe`; it needs only the store and the projection's name:

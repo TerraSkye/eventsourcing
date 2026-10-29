@@ -6,7 +6,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/google/uuid v1.6.0
 	github.com/kurrent-io/KurrentDB-Client-Go v1.1.0
-	github.com/terraskye/eventsourcing v0.4.1
+	github.com/terraskye/eventsourcing v0.5.0
 	github.com/testcontainers/testcontainers-go v0.42.0
 	google.golang.org/grpc v1.71.0
 )

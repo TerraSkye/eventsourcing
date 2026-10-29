@@ -7,8 +7,75 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-29
+
 ### Breaking
 
+- `telemetry` names its metrics, spans and attributes one way,
+  following the OpenTelemetry naming conventions: singular namespaces,
+  no `.count` counters next to a duration, and `{verb} {object}` span
+  names. Every duration histogram carries `eventsourcing.result`, and,
+  on a failure, the semantic conventions' `error.type`
+  (`stream_revision_conflict`, `stream_exists`, `stream_not_found`,
+  `deadline_exceeded`, `canceled` or `_OTHER`); its count replaces the
+  counters that were removed. The durations now include failed calls:
+  a failed load, which used to record none, and a failed append, which
+  used to be counted only in `eventstore.errors`. Filter on
+  `eventsourcing.result="success"` to keep latency percentiles as they
+  were. A load's duration used to run from the iterator's first step
+  until it closed: it missed the open call, where the Postgres and
+  SQLite stores run their query (SQLite reads the whole stream there),
+  and it counted the caller's work between events. It now counts only
+  the time spent in the store, the open call and each step; the `load
+  events` span runs from the open call until the iterator closes, and a
+  load that fails to open or closes before its first step gets one too. Update dashboards and alerts:
+
+  | Before | After |
+  |---|---|
+  | `eventsourcing.commands.count` (`CommandsCount`) | count of `eventsourcing.command.duration`, by `eventsourcing.result` |
+  | `eventsourcing.commands.duration` (`CommandsDuration`) | `eventsourcing.command.duration` (`CommandDuration`) |
+  | `eventsourcing.command.processing` (`CommandsProcessing`) | `eventsourcing.command.active` (`CommandActive`) |
+  | `eventsourcing.concurrency.conflicts` (`ConcurrencyConflicts`) | `eventsourcing.command.duration{error.type="stream_revision_conflict"}`, also for a conflict wrapped in a business rule violation |
+  | `eventsourcing.queries.count` (`QueriesCount`) | count of `eventsourcing.query.duration`, by `eventsourcing.result` |
+  | `eventsourcing.queries.duration` (`QueriesDuration`) | `eventsourcing.query.duration` (`QueryDuration`) |
+  | `eventsourcing.query.processing` (`QueriesProcessing`) | `eventsourcing.query.active` (`QueryActive`) |
+  | `eventsourcing.event_handler.operations` (`EventHandlerOperations`) | count of `eventsourcing.event_handler.duration` |
+  | `eventsourcing.event_handler.errors` (`EventHandlerErrors`) | `eventsourcing.event_handler.duration{eventsourcing.result="failure"}`; a skipped event is `"skipped"` |
+  | `eventsourcing.eventstore.duration` | `eventsourcing.event_store.duration`, by `eventsourcing.event_store.operation` and `eventsourcing.result` |
+  | `eventsourcing.eventstore.saves` (`EventStoreSaves`) | count of `eventsourcing.event_store.duration{eventsourcing.event_store.operation="append"}` |
+  | `eventsourcing.eventstore.errors` (`EventStoreErrors`) | `eventsourcing.event_store.duration{eventsourcing.result="failure"}`, by `error.type` |
+  | `eventsourcing.events.appended` (`EventsAppended`) | `eventsourcing.event_store.appended.events` (`EventStoreAppended`), only for saves that succeeded |
+  | `eventsourcing.events.loaded` (`EventsLoaded`) | `eventsourcing.event_store.loaded.events` (`EventStoreLoaded`) |
+  | `eventsourcing.projection.events.skipped` (`ProjectionEventsSkipped`) | `eventsourcing.projection.dead_lettered.events` (`ProjectionDeadLettered`) |
+
+  Spans: `command.handle X` (from `CommandTelemetry`) and `handle
+  command` (from `WithCommandTelemetry`) are both `handle X`, where X
+  is the command type; `query.handle *pkg.Q` and `handle query` are
+  both `handle pkg.Q`, and `eventsourcing.query.type` drops the `*` as
+  well. The event store's `append eventstore`, `load eventstore` and
+  `read_all eventstore` are `append events`, `load events` and `read
+  all events`. A failed span carries `error.type` too.
+
+  Attributes: `AttrDBSystem` (`db.system`, `"eventsourcing"` by default)
+  is `AttrDBSystemName` (`db.system.name`), set only when passed with
+  `WithAttributes`; the store's metrics carry it too.
+  `AttrOperation` (`eventsourcing.operation`) is `AttrEventStoreOperation`
+  (`eventsourcing.event_store.operation`), and its `save` value is
+  `append`, as the span is. `AttrClaimResult`
+  (`eventsourcing.projection.claim.result`) is removed: claims are
+  labelled by `eventsourcing.result`, with `failure` where it said
+  `error`. `AttrErrorType` was the unused `eventsourcing.error.type`
+  and is now `error.type`. `eventsourcing.events.count` is
+  `eventsourcing.event.count`. The unused `AttrHandlerName`,
+  `AttrRetryCount`, `AttrRetryMax`, `AttrConflictType`, `AttrShardID`,
+  `AttrQueueDepth`, `AttrResultType` and `AttrResultCount` are removed.
+- `RegisterEventByType` and `RegisterEventByName` panic when the factory
+  returns a value instead of a pointer. Stored events are decoded into
+  what the factory returns, and JSON can only decode into a pointer, so
+  such an event saved and then failed on every read: `LoadStream` for
+  its stream and every `ReadAll` page holding it, stalling projections.
+  Return a pointer from the factory, `&OrderCreated{}`, or use
+  `RegisterEvent`.
 - `Save` on every store in this module rejects a batch in which an
   envelope has no `EventID`, with an error wrapping
   `ErrInvalidEventBatch`. The Postgres and SQLite stores used to make
@@ -100,6 +167,25 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `kurrentdb.WithLogger` sets the logger the KurrentDB store reports
+  each retried append to, at warn level. It defaults to
+  `slog.Default()`.
+- The `dashboard` package serves a page that shows every projection's
+  progress live: how far each segment is, how far behind, how fast it
+  catches up, why a stalled segment stalled, and every instance running
+  it, those on standby included. It reads the status runners publish to
+  the projection store, so it shows projections wherever they run; mount
+  it with `dashboard.New(store, ...)` on any `http.ServeMux`. `WithReset` adds a rebuild button to every projection
+  shown, also from a process that does not run it: it requests the
+  rebuild through the store and shows it pending until it starts. It
+  answers only requests for localhost or an IP address, and for the host
+  names given with `WithAllowedHosts`. `go run ./examples/dashboard` starts
+  a demo.
+- `dashboard.WithEvents` adds an events view to the dashboard: the
+  global log, newest first, filtered by event type and stream prefix,
+  with each event's payload and metadata. On a store that implements
+  `CorrelationLoader`, an event opens its correlation chain as a tree of
+  what caused what, across streams.
 - `CorrelationLoader`, implemented by the memory, Postgres and SQLite
   stores, loads a correlation chain: every event, across all streams,
   with one `CorrelationID`, in `GlobalPosition` order. It is for
@@ -111,16 +197,69 @@ release may break the API; every break is listed under **Breaking**.
   every store in this module persists in. A store outside the module
   that calls them writes the same bytes.
 
+### Changed
+
+- The projection runner says "dead-lettered" where it said "skipped"
+  for an event whose handler failed under `SkipWhenLive` or
+  `SkipAlways`, so the word "skipped" is left to an event a handler
+  declines with `SkippedEventError`, which is not a failure. Its warning
+  is "projection event dead-lettered", not "projection event skipped",
+  and `ErrStreamParked` reads "an earlier event of the stream was
+  dead-lettered". Update log searches and alerts on the old text.
+  `Runner.DeadLettered` counts these events; `Runner.Skipped`, which
+  returns the same count, is deprecated.
+- `telemetry` counts a command rejected with a
+  `BusinessRuleViolationError` in `eventsourcing.commands.count` with
+  `eventsourcing.result="rejected"`, not `"failure"`, so a dashboard
+  can tell rejected input from a failing system. Its span was already
+  OK. An event handler span no longer carries an empty link when the
+  event was saved without a trace.
+- `logging.WithCommandLogging` and `CommandLogging` log a command
+  rejected with a `BusinessRuleViolationError` at info level, as
+  "command rejected", instead of at error level as "command failed".
+  `logging.WithEventLogging` logs an event its handler declined with a
+  `SkippedEventError` at debug level, as "event skipped" with the
+  reason, instead of at error level as "event failed". Neither is a
+  failure: the telemetry package already marks both spans OK, and the
+  projection runner moves past a skipped event. Alerts on error-level
+  logs no longer fire for them.
+
 ### Fixed
 
+- The KurrentDB store's `Save` did not retry a write that reached a
+  follower instead of the leader, though its doc said it retried
+  during a leader election: the client reports that without a gRPC
+  status, which was all `Save` checked. It now retries it, on the
+  leader the follower named. Each retry used to be printed to stdout
+  with `fmt.Printf`; it is now logged, see `WithLogger`.
 - A projection under `SkipAlways`, or `SkipWhenLive` while live,
   dead-lettered the events its handler was on when the runner stopped,
   if the handler returned its context's error, and parked their stream
   until `ReplayStream`. Those events are now left for the next run.
+- The KurrentDB store's `Save` kept retrying after its context ended,
+  until its backoff gave up (30 seconds by default): the client reports
+  an expired context as a retryable `DeadlineExceeded`. `Save` now stops
+  when the context ends, and its error matches the context's, such as
+  `context.DeadlineExceeded`.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
   metadata. Every read now decodes a new copy.
+- `CommandBus` ran a command whose context ended while it was queued
+  behind another command on its shard, though its `Dispatch` had
+  already returned the context's error. On a store that ignores the
+  context, such as the memory store, its events were appended. The
+  worker now skips such a command. A context that ends while the
+  handler runs is still passed to the handler, as before.
+- The memory store's `Save` kept the `Version` and `OccurredAt` the
+  caller set, where the other stores assign them. A `Save` with
+  `Version` left at zero, or two `Any` appends with stale versions,
+  stored versions 0 or duplicates, where Postgres stores 1 to n. A
+  `NewCommandHandler` that folded such a stream then loaded and saved
+  from the wrong `Revision`. `Save` now numbers each event by its
+  position in the stream, and fills a zero `OccurredAt` with the
+  current time. `AcceptanceTest` no longer sets `Version` on the
+  envelopes it saves, so it checks that the store assigns it.
 
 ## [0.4.1] - 2026-10-24
 

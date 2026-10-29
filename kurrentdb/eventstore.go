@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math"
 	"strings"
@@ -30,6 +31,7 @@ var (
 type EventStore struct {
 	client     *kurrentdb.Client
 	newBackoff func() backoff.BackOff
+	logger     *slog.Logger
 }
 
 // NewEventStore returns a KurrentDB-backed [EventStore] that uses db for all
@@ -38,6 +40,7 @@ func NewEventStore(db *kurrentdb.Client, opts ...Option) *EventStore {
 	e := &EventStore{
 		client:     db,
 		newBackoff: defaultSaveBackoff,
+		logger:     slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -56,6 +59,18 @@ type Option func(*EventStore)
 func WithBackoff(newBackoff func() backoff.BackOff) Option {
 	return func(e *EventStore) {
 		e.newBackoff = newBackoff
+	}
+}
+
+// WithLogger sets the logger Save reports each retried append to, at warn
+// level. The default is slog.Default(); pass
+// slog.New(slog.DiscardHandler) for silence. A nil logger keeps the
+// default.
+func WithLogger(logger *slog.Logger) Option {
+	return func(e *EventStore) {
+		if logger != nil {
+			e.logger = logger
+		}
 	}
 }
 
@@ -97,8 +112,9 @@ func defaultSaveBackoff() backoff.BackOff {
 // of N requires the stream to hold exactly N events. All events must
 // have the same StreamID, or Save returns a non-nil error without contacting
 // the server. The append is retried with backoff on transient gRPC errors
-// (such as those from an in-progress leader election), for up to 30 seconds
-// by default — see [WithBackoff] to override. On success it returns a [eventsourcing.AppendResult] whose
+// and on a write that reached a follower instead of the leader (such as
+// during a leader election), for up to 30 seconds by default — see
+// [WithBackoff] to override — and each retry is logged; see [WithLogger]. On success it returns a [eventsourcing.AppendResult] whose
 // NextExpectedVersion is the number of events the stream now holds.
 //
 // Failures are reported in this package's error vocabulary: a violated
@@ -190,7 +206,8 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
-	expBackoff := e.newBackoff()
+	// Bound to ctx, so a wait between attempts ends when ctx does.
+	expBackoff := backoff.WithContext(e.newBackoff(), ctx)
 
 	result, err := backoff.RetryNotifyWithData(func() (*kurrentdb.WriteResult, error) {
 		result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
@@ -200,6 +217,12 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		if err != nil {
 			// Check if this is a retryable error
 			if isRetryableError(err) {
+				// Once ctx is done every attempt fails the same way, with a
+				// DeadlineExceeded the client reports as retryable: stop,
+				// and say it was ctx.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, backoff.Permanent(fmt.Errorf("%w: %w", ctxErr, err))
+				}
 				// Return error without wrapping - this signals backoff to retry
 				return nil, err
 			}
@@ -208,8 +231,9 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		}
 		return result, err
 
-	}, expBackoff, func(err error, duration time.Duration) {
-		fmt.Printf("Retry attempt failed for stream %s: %v, retrying in %s", streamID, err, duration)
+	}, expBackoff, func(err error, wait time.Duration) {
+		e.logger.WarnContext(ctx, "kurrentdb append failed, retrying",
+			slog.String("stream", streamID), slog.String("error", err.Error()), slog.Duration("retry_in", wait))
 	})
 
 	if err != nil {
@@ -537,6 +561,15 @@ func (e EventStore) Close() error {
 // isRetryableError reports whether err is a transient gRPC error worth
 // retrying (as opposed to a permanent failure such as an invalid argument).
 func isRetryableError(err error) bool {
+	// A follower refusing a write carries no gRPC status: the client
+	// returns a bare ErrorCodeNotLeader, after it has started reconnecting
+	// to the leader the follower named. Nothing was written, so the next
+	// attempt goes to the leader.
+	var kErr *kurrentdb.Error
+	if errors.As(err, &kErr) && kErr.IsErrorCode(kurrentdb.ErrorCodeNotLeader) {
+		return true
+	}
+
 	s, ok := status.FromError(err)
 	if !ok {
 		// Not a gRPC error - don't retry

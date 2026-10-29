@@ -174,7 +174,7 @@
 // repeat belong in an automation, not in a projection.
 //
 // The runner logs its lifecycle to [Definition.Logger]: claims, releases,
-// rebuilds, skipped events and stalls, never each applied event. To log
+// rebuilds, dead-lettered events and stalls, never each applied event. To log
 // handler calls, wrap the Handler, for example with
 // logging.WithEventLogging. [Runner.Status] reports why a segment is
 // stalled.

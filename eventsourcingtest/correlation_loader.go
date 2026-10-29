@@ -78,8 +78,8 @@ func (c *correlationAcceptance) roundTrip(t *testing.T) {
 		t.Fatalf("LoadCorrelation returned %d events, want 2", len(got))
 	}
 	for i, out := range got {
-		if out.EventID != in[i].EventID || out.StreamID != id || out.Version != in[i].Version {
-			t.Errorf("event %d = %v %q@%d, want %v %q@%d", i, out.EventID, out.StreamID, out.Version, in[i].EventID, id, in[i].Version)
+		if want := uint64(i + 1); out.EventID != in[i].EventID || out.StreamID != id || out.Version != want {
+			t.Errorf("event %d = %v %q@%d, want %v %q@%d", i, out.EventID, out.StreamID, out.Version, in[i].EventID, id, want)
 		}
 		if out.CorrelationID != chain || out.CausationID != in[i].CausationID {
 			t.Errorf("event %d chain = %q/%q, want %q/%q", i, out.CorrelationID, out.CausationID, chain, in[i].CausationID)

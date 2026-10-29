@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
 
+	"github.com/terraskye/eventsourcing"
 	otelapi "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -48,19 +51,22 @@ type spanRecorder struct {
 	mu    sync.Mutex
 	names []string
 	attrs []attribute.Set // attributes each span was started with, by index
+	links [][]trace.Link  // links each span was started with, by index
 }
 
-func (r *spanRecorder) add(name string, attrs []attribute.KeyValue) {
+func (r *spanRecorder) add(name string, attrs []attribute.KeyValue, links []trace.Link) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.names = append(r.names, name)
 	r.attrs = append(r.attrs, attribute.NewSet(attrs...))
+	r.links = append(r.links, links)
 }
 
 // recSpan is a span started through a recTracerProvider.
 type recSpan struct {
 	name  string
 	attrs attribute.Set
+	links []trace.Link
 }
 
 // spansSince returns the spans recorded since from, as [spanRecorder.since]
@@ -70,7 +76,7 @@ func (r *spanRecorder) spansSince(from int) []recSpan {
 	defer r.mu.Unlock()
 	out := make([]recSpan, 0, len(r.names)-from)
 	for i := from; i < len(r.names); i++ {
-		out = append(out, recSpan{name: r.names[i], attrs: r.attrs[i]})
+		out = append(out, recSpan{name: r.names[i], attrs: r.attrs[i], links: r.links[i]})
 	}
 	return out
 }
@@ -98,7 +104,7 @@ type recTracer struct {
 
 func (t recTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	cfg := trace.NewSpanStartConfig(opts...)
-	t.rec.add(spanName, cfg.Attributes())
+	t.rec.add(spanName, cfg.Attributes(), cfg.Links())
 	return t.Tracer.Start(ctx, spanName, opts...)
 }
 
@@ -290,4 +296,26 @@ type recMeterProvider struct {
 
 func (p recMeterProvider) Meter(_ string, _ ...metric.MeterOption) metric.Meter {
 	return recMeter{rec: p.rec}
+}
+
+// TestErrorType covers the error.type values: one per error this module
+// defines and per ended context, found through wrapping, and "_OTHER" for
+// anything else, so the attribute keeps a fixed set of values.
+func TestErrorType(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("save: %w", &eventsourcing.StreamRevisionConflictError{Stream: "s"}), "stream_revision_conflict"},
+		{fmt.Errorf("save: %w", eventsourcing.ErrStreamExists), "stream_exists"},
+		{fmt.Errorf("load: %w", eventsourcing.ErrStreamNotFound), "stream_not_found"},
+		{fmt.Errorf("load: %w", context.DeadlineExceeded), "deadline_exceeded"},
+		{fmt.Errorf("load: %w", context.Canceled), "canceled"},
+		{errors.New("connection refused"), "_OTHER"},
+	}
+	for _, tt := range tests {
+		if got := errorType(tt.err); got != tt.want {
+			t.Errorf("errorType(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
 }

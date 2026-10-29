@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 	"time"
 
@@ -16,9 +15,9 @@ import (
 
 // CommandTelemetry returns an [eventsourcing.CommandHandlerMiddleware] that
 // instruments every command dispatched through the bus with OpenTelemetry
-// tracing and metrics. Use it with [eventsourcing.CommandBus.Use] to apply
-// telemetry to all registered handlers; the command type name is resolved at
-// dispatch time from the concrete type.
+// tracing and metrics, as [WithCommandTelemetry] describes. Use it with
+// [eventsourcing.CommandBus.Use] to apply telemetry to all registered
+// handlers; the command type is resolved at dispatch time from the command.
 func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
@@ -39,67 +38,9 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 				attr = append(attr, cfg.GetAttributes(ctx)...)
 			}
 
-			operation := fmt.Sprintf("command.handle %s", cmd.CommandType())
-			if cfg.Operation != "" {
-				operation = cfg.Operation
-			}
-			if cfg.GetOperation != nil {
-				if op := cfg.GetOperation(ctx, operation); op != "" {
-					operation = op
-				}
-			}
-
-			ctx, span := tracer.Start(ctx, operation,
-				trace.WithSpanKind(trace.SpanKindInternal),
-				trace.WithAttributes(attr...),
-			)
-			defer span.End()
-
-			CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
-			defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
-			startTime := time.Now()
-			result, err := next(ctx, cmd)
-
-			attr = append(attr,
-				AttrStreamID.String(result.StreamID),
-				AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-			)
-			CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
-			span.SetAttributes(attr...)
-
-			if err != nil {
-				var conflict *eventsourcing.StreamRevisionConflictError
-				if errors.As(err, &conflict) {
-					ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType())))
-					span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
-				}
-				var businessViolation *eventsourcing.BusinessRuleViolationError
-				if errors.As(err, &businessViolation) {
-					causeMessage := "business rule violation"
-					if cause := businessViolation.Cause(); cause != nil {
-						causeMessage = cause.Error()
-					}
-					span.SetAttributes(AttrErrorMessage.String(causeMessage))
-					span.SetStatus(codes.Ok, "")
-					span.AddEvent("business_rule_violation", trace.WithAttributes(
-						AttrCommandType.String(cmd.CommandType()),
-						AttrAggregateID.String(cmd.AggregateID()),
-						AttrStreamID.String(result.StreamID),
-						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-						AttrErrorMessage.String(causeMessage),
-					))
-					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("failure")))
-					return result, err
-				}
-				span.SetStatus(codes.Error, err.Error())
-				span.RecordError(err)
-				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("failure")))
-				return result, err
-			}
-
-			span.SetStatus(codes.Ok, "")
-			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("success")))
-			return result, err
+			return handleCommand(ctx, cfg, cmd.CommandType(), cmd.AggregateID(), attr, func(ctx context.Context) (eventsourcing.AppendResult, error) {
+				return next(ctx, cmd)
+			})
 		}
 	}
 }
@@ -108,14 +49,16 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 // returning an [eventsourcing.CommandHandler] of the same type that can be
 // used as a drop-in replacement.
 //
-// Each call to the returned handler starts a span covering the full
-// invocation of next, tagged with the command type and aggregate ID and, once
-// next returns, with the resulting stream ID and version. It also records
-// [CommandsProcessing] (in-flight commands), [CommandsDuration], and
-// [CommandsCount] labelled by [AttrResult]. A returned
-// [eventsourcing.StreamRevisionConflictError] is additionally counted in
-// [ConcurrencyConflicts]; a returned [eventsourcing.BusinessRuleViolationError]
-// is recorded on the span as an expected outcome rather than a span error.
+// Each call to the returned handler starts a span named "handle" followed by
+// the command type, covering the full invocation of next, tagged with the
+// command type and aggregate ID and, once next returns, with the resulting
+// stream ID and version. It also records [CommandActive] (in-flight
+// commands) and [CommandDuration] labelled by [AttrResult]. A returned
+// [eventsourcing.BusinessRuleViolationError] is an expected outcome rather
+// than a span error, recorded with result "rejected". Any other error fails
+// the span and is recorded with result "failure" and an [AttrErrorType],
+// "stream_revision_conflict" for a concurrency conflict, even one wrapped
+// in a violation.
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
 //	result, err := handler(ctx, myCommand)
@@ -126,16 +69,8 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 		o.apply(cfg)
 	}
 
-	var zero C
-	commandType := zero.CommandType()
-
 	baseAttributes := []attribute.KeyValue{}
 	baseAttributes = append(baseAttributes, cfg.Attributes...)
-
-	defaultOperation := "handle command"
-	if cfg.Operation != "" {
-		defaultOperation = cfg.Operation
-	}
 
 	return func(ctx context.Context, cmd C) (eventsourcing.AppendResult, error) {
 		// Clone before appending: baseAttributes is shared across every call
@@ -153,77 +88,80 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 			attr = append(attr, cfg.GetAttributes(ctx)...)
 		}
 
-		operation := defaultOperation
-		if cfg.GetOperation != nil {
-			if op := cfg.GetOperation(ctx, defaultOperation); op != "" {
-				operation = op
-			}
+		return handleCommand(ctx, cfg, cmd.CommandType(), cmd.AggregateID(), attr, func(ctx context.Context) (eventsourcing.AppendResult, error) {
+			return next(ctx, cmd)
+		})
+	}
+}
+
+// handleCommand runs next under a span with attr and records its outcome,
+// for both [CommandTelemetry] and [WithCommandTelemetry].
+func handleCommand(ctx context.Context, cfg *config, commandType, aggregateID string, attr []attribute.KeyValue, next func(context.Context) (eventsourcing.AppendResult, error)) (eventsourcing.AppendResult, error) {
+	operation := "handle " + commandType
+	if cfg.Operation != "" {
+		operation = cfg.Operation
+	}
+	if cfg.GetOperation != nil {
+		if op := cfg.GetOperation(ctx, operation); op != "" {
+			operation = op
 		}
+	}
 
-		ctx, span := tracer.Start(ctx, operation,
-			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithAttributes(attr...),
-		)
-		defer span.End()
+	ctx, span := tracer.Start(ctx, operation,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attr...),
+	)
+	defer span.End()
 
-		CommandsProcessing.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-		defer CommandsProcessing.Add(ctx, -1, metric.WithAttributes(AttrCommandType.String(commandType)))
-		startTime := time.Now()
-		result, err := next(ctx, cmd)
+	typeAttr := AttrCommandType.String(commandType)
+	CommandActive.Add(ctx, 1, metric.WithAttributes(typeAttr))
+	defer CommandActive.Add(ctx, -1, metric.WithAttributes(typeAttr))
+	startTime := time.Now()
+	result, err := next(ctx)
+	duration := time.Since(startTime).Seconds()
 
-		// Add streamID to attributes after execution
-		attr = append(attr,
+	span.SetAttributes(
+		AttrStreamID.String(result.StreamID),
+		AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
+	)
+
+	metricAttrs := []attribute.KeyValue{typeAttr}
+	var conflict *eventsourcing.StreamRevisionConflictError
+	var violation *eventsourcing.BusinessRuleViolationError
+	switch {
+	case err == nil:
+		metricAttrs = append(metricAttrs, AttrResult.String("success"))
+		span.SetStatus(codes.Ok, "")
+	// A conflict is checked first: it is a failure even when it is wrapped
+	// in a violation.
+	case !errors.As(err, &conflict) && errors.As(err, &violation):
+		// A rejection is an expected outcome, not a failure of the span.
+		metricAttrs = append(metricAttrs, AttrResult.String("rejected"))
+		causeMessage := "business rule violation"
+		if cause := violation.Cause(); cause != nil {
+			causeMessage = cause.Error()
+		}
+		span.SetAttributes(AttrErrorMessage.String(causeMessage))
+		span.SetStatus(codes.Ok, "")
+		span.AddEvent("business_rule_violation", trace.WithAttributes(
+			typeAttr,
+			AttrAggregateID.String(aggregateID),
 			AttrStreamID.String(result.StreamID),
 			AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-		)
-
-		// Record duration metric
-		CommandsDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrCommandType.String(commandType)))
-
-		// Update span attributes
-		span.SetAttributes(attr...)
-
-		if err != nil {
-			var conflict *eventsourcing.StreamRevisionConflictError
-			if errors.As(err, &conflict) {
-				ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-				// Span is still considered successful (operation executed)
-				span.AddEvent("concurrency_conflict", trace.WithAttributes(
-					AttrStreamID.String(result.StreamID),
-				))
-			}
-			var bussinessViolation *eventsourcing.BusinessRuleViolationError
-			if errors.As(err, &bussinessViolation) {
-
-				causeMessage := "business rule violation"
-				if cause := bussinessViolation.Cause(); cause != nil {
-					causeMessage = cause.Error()
-				}
-				span.SetAttributes(AttrErrorMessage.String(causeMessage))
-				span.SetStatus(codes.Ok, "")
-				span.AddEvent("business_rule_violation", trace.WithAttributes(
-					AttrCommandType.String(commandType),
-					AttrAggregateID.String(cmd.AggregateID()),
-					AttrStreamID.String(result.StreamID),
-					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
-					AttrErrorMessage.String(causeMessage),
-				))
-				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
-				return result, err
-			}
-
-			// Real system error
-			span.SetStatus(codes.Error, err.Error())
-			span.RecordError(err)
-			CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
-			return result, err
-
-		} else {
-			span.SetStatus(codes.Ok, "")
+			AttrErrorMessage.String(causeMessage),
+		))
+	default:
+		errType := AttrErrorType.String(errorType(err))
+		metricAttrs = append(metricAttrs, AttrResult.String("failure"), errType)
+		if conflict != nil {
+			// A conflict left after any retries is a failure too.
+			span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
 		}
-
-		CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("success")))
-
-		return result, err
+		span.SetAttributes(errType)
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
 	}
+
+	CommandDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
+	return result, err
 }

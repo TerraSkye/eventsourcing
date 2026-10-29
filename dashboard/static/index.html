@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projections</title>
+<style>
+  :root {
+    color-scheme: light;
+    --paper: #eef2f5;
+    --surface: #fbfcfd;
+    --ink: #15202b;
+    --muted: #5b6b7b;
+    --rule: #cdd6df;
+    --track: #dce3ea;
+    --live: #17876b;
+    --catching: #b9770e;
+    --stalled: #c03a35;
+    --idle: #8796a5;
+    --focus: #2f6fb3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --paper: #18212a;
+      --surface: #1f2a35;
+      --ink: #e3eaf1;
+      --muted: #91a0af;
+      --rule: #2e3b48;
+      --track: #26323e;
+      --live: #3cc29b;
+      --catching: #e3a43f;
+      --stalled: #ee6a62;
+      --idle: #7e8d9c;
+      --focus: #7fb0e6;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--paper); }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--paper);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  main { max-width: 64rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+
+  header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 1rem; flex-wrap: wrap;
+    padding-bottom: 1.25rem; border-bottom: 2px solid var(--ink);
+  }
+  h1 { margin: 0; font-size: 1.75rem; line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; }
+  .connection { color: var(--muted); font-size: 0.875rem; display: flex; align-items: center; gap: 0.5rem; }
+  .connection::before {
+    content: ""; width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--idle);
+  }
+  .connection[data-state="open"]::before { background: var(--live); }
+  .connection[data-state="lost"] { color: var(--stalled); }
+  .connection[data-state="lost"]::before { background: var(--stalled); }
+
+  .empty { padding: 3rem 0; color: var(--muted); max-width: 36rem; }
+  .empty strong { color: var(--ink); display: block; font-size: 1.125rem; margin-bottom: 0.25rem; }
+
+  section.projection { padding: 1.75rem 0; border-bottom: 1px solid var(--rule); }
+  .head { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  h2 { margin: 0; font-size: 1.25rem; font-weight: 620; line-height: 1.3; }
+  .state { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.9375rem; color: var(--muted); }
+  .state::before { content: ""; width: 0.625rem; height: 0.625rem; border-radius: 50%; background: var(--c, var(--idle)); }
+  .where { color: var(--muted); font-size: 0.875rem; }
+  .spacer { flex: 1; }
+
+  [data-state="live"] { --c: var(--live); }
+  [data-state="catching_up"], [data-state="replaying"], [data-state="rebuild_requested"] { --c: var(--catching); }
+  [data-state="stalled"], [data-state="unreadable"], [data-state="silent"] { --c: var(--stalled); }
+  [data-state="waiting"], [data-state="not_started"] { --c: var(--idle); }
+
+  /* The log track: the global log from 0 to the head, one lane per segment. */
+  .track { margin: 1.125rem 0 1rem; display: grid; gap: 3px; }
+  .lane { position: relative; height: 0.75rem; background: var(--track); border-radius: 2px; overflow: hidden; }
+  .track.many .lane { height: 0.4375rem; }
+  .fill {
+    position: absolute; inset: 0 auto 0 0; width: 0;
+    background: var(--c, var(--idle));
+    transition: width 450ms cubic-bezier(.2,.7,.3,1);
+  }
+
+  dl.numbers { display: flex; flex-wrap: wrap; gap: 0.5rem 2.25rem; margin: 0; }
+  dl.numbers div { min-width: 6rem; }
+  dt { font-size: 0.8125rem; color: var(--muted); }
+  dd { margin: 0; font-size: 1.0625rem; font-weight: 560; }
+
+  .problem {
+    margin: 1rem 0 0; padding: 0.75rem 1rem; background: var(--surface);
+    border-left: 3px solid var(--stalled); max-width: 48rem;
+  }
+  .problem.note { border-left-color: var(--catching); }
+  .problem p { margin: 0; }
+  .problem .detail { color: var(--muted); font-size: 0.875rem; margin-top: 0.25rem; overflow-wrap: anywhere; }
+
+  details { margin-top: 1rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: 0.875rem; width: fit-content; }
+  .segments-wrap { overflow-x: auto; margin-top: 0.5rem; }
+  table { border-collapse: collapse; font-size: 0.875rem; min-width: 32rem; }
+  th { text-align: left; font-weight: 500; color: var(--muted); padding: 0.375rem 1.5rem 0.375rem 0; border-bottom: 1px solid var(--rule); }
+  td { padding: 0.375rem 1.5rem 0.375rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  td.num, th.num { text-align: right; }
+  table.instances { margin-top: 1rem; }
+  table.instances td.standby { color: var(--muted); }
+
+  button {
+    font: inherit; font-size: 0.9375rem; color: var(--ink); background: transparent;
+    border: 1px solid var(--rule); border-radius: 6px; padding: 0.375rem 0.875rem; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:disabled { color: var(--muted); cursor: default; }
+  button.danger { background: var(--stalled); border-color: var(--stalled); color: #fff; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  dialog {
+    border: 1px solid var(--rule); border-radius: 8px; padding: 1.5rem; max-width: 30rem;
+    color: var(--ink); background: var(--surface);
+  }
+  dialog::backdrop { background: rgb(21 32 43 / 0.45); }
+  dialog h3 { margin: 0 0 0.5rem; font-size: 1.125rem; }
+  dialog p { margin: 0 0 1.25rem; color: var(--muted); }
+  .actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
+
+  .toasts { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); display: grid; gap: 0.5rem; width: min(32rem, calc(100% - 2rem)); }
+  .toast { background: var(--ink); color: var(--paper); padding: 0.75rem 1rem; border-radius: 6px; }
+  .toast.error { background: var(--stalled); color: #fff; }
+
+  /* Tabs, shown once the dashboard offers more than projections. */
+  nav.tabs { display: flex; gap: 1.5rem; margin-top: 1rem; }
+  nav.tabs a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; border-bottom: 2px solid transparent; }
+  nav.tabs a:hover { color: var(--ink); }
+  nav.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 560; }
+
+  /* The events view: a filter bar over the log, newest first. */
+  form.filters { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: end; padding: 1.5rem 0 1rem; }
+  form.filters label { display: grid; gap: 0.25rem; font-size: 0.8125rem; color: var(--muted); }
+  input {
+    font: inherit; font-size: 0.9375rem; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 0.375rem 0.625rem; min-width: 12rem;
+  }
+  form.filters .gap { flex: 1; }
+  .log-wrap { overflow-x: auto; }
+  table.log { width: 100%; }
+  table.log tbody tr.row { cursor: pointer; }
+  table.log tbody tr.row:hover td { background: var(--surface); }
+  table.log tbody tr.row[aria-expanded="true"] td { background: var(--surface); border-bottom-color: transparent; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8125rem; }
+  td.wrap { overflow-wrap: anywhere; }
+  tr.detail td { background: var(--surface); padding: 0.25rem 1rem 1rem; }
+  .detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0.5rem 0 0.75rem; font-size: 0.875rem; }
+  .detail-grid dt { font-size: 0.875rem; }
+  .detail-grid dd { font-size: 0.875rem; font-weight: 400; overflow-wrap: anywhere; }
+  pre {
+    margin: 0.25rem 0 0.75rem; padding: 0.75rem; overflow-x: auto; max-height: 24rem;
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8125rem; line-height: 1.45;
+  }
+  .label { font-size: 0.8125rem; color: var(--muted); }
+  a { color: var(--focus); }
+  .pager { display: flex; align-items: center; gap: 1rem; padding: 1rem 0; color: var(--muted); font-size: 0.875rem; }
+
+  /* The chain view: the causation tree of one correlation chain. */
+  .chain-head { padding: 1.5rem 0 0.5rem; }
+  .chain-head h2 { overflow-wrap: anywhere; }
+  .chain-head p { margin: 0.25rem 0 0; color: var(--muted); }
+  ul.tree, ul.tree ul { list-style: none; margin: 0; padding: 0; }
+  ul.tree ul { margin-left: 0.6875rem; padding-left: 1.25rem; border-left: 1px solid var(--rule); }
+  ul.tree li { padding: 0.125rem 0; }
+  .node {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1rem; width: 100%;
+    text-align: left; border: 1px solid transparent; border-radius: 6px; padding: 0.375rem 0.625rem;
+  }
+  .node:hover { border-color: var(--rule); background: var(--surface); }
+  .node[aria-expanded="true"] { border-color: var(--rule); background: var(--surface); }
+  .node.focus { border-color: var(--focus); }
+  .node .type { font-weight: 560; }
+  .node .stream { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+  .node .at { color: var(--muted); font-size: 0.8125rem; margin-left: auto; }
+  .node-body { padding: 0.25rem 0.625rem 0.5rem; }
+  .orphan { color: var(--catching); font-size: 0.8125rem; }
+
+  @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+  @media (max-width: 40rem) { main { padding-top: 1.5rem; } dl.numbers { gap: 0.5rem 1.5rem; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Projections</h1>
+    <span class="connection" id="connection" data-state="connecting" role="status">Connecting</span>
+  </header>
+  <nav class="tabs" id="tabs" hidden>
+    <a href="#projections" data-view="projections">Projections</a>
+    <a href="#events" data-view="events">Events</a>
+  </nav>
+  <div id="list" data-view="projections"></div>
+  <div id="events-view" data-view="events" hidden>
+    <form class="filters" id="filters">
+      <label>Event type <input name="type" list="types" placeholder="Any" autocomplete="off"></label>
+      <label>Stream ID starts with <input name="stream" placeholder="Any" autocomplete="off"></label>
+      <button type="submit">Filter</button>
+      <span class="gap"></span>
+      <label id="chain-open">Correlation ID <input name="chain" placeholder="Open a chain" autocomplete="off"></label>
+    </form>
+    <datalist id="types"></datalist>
+    <div class="log-wrap">
+      <table class="log">
+        <thead><tr>
+          <th class="num">Position</th><th>Occurred</th><th>Type</th><th>Stream</th><th class="num">Version</th>
+        </tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button type="button" id="newest">Newest</button>
+      <button type="button" id="older">Older</button>
+      <span id="pager-note"></span>
+    </div>
+  </div>
+  <div id="chain-view" data-view="chain" hidden></div>
+</main>
+
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <h3 id="confirm-title"></h3>
+  <p>This wipes the read model and replays the log from the start. Until it is live again, queries see an empty or partial read model.</p>
+  <div class="actions">
+    <button type="button" id="confirm-cancel">Cancel</button>
+    <button type="button" class="danger" id="confirm-ok">Rebuild</button>
+  </div>
+</dialog>
+
+<div class="toasts" aria-live="polite" id="toasts"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const STATE_TEXT = {
+    live: "Live",
+    catching_up: "Catching up",
+    replaying: "Replaying",
+    rebuild_requested: "Rebuild requested",
+    stalled: "Stalled",
+    silent: "Runner stopped publishing",
+    waiting: "Waiting for a runner",
+    not_started: "Not started",
+    unreadable: "Status unreadable",
+  };
+
+  const num = new Intl.NumberFormat();
+  const list = document.getElementById("list");
+  const connection = document.getElementById("connection");
+  const sections = new Map(); // projection name -> its DOM parts
+  const rebuilding = new Set();
+
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") node.className = v;
+      else node.setAttribute(k, v);
+    }
+    for (const child of children) node.append(child);
+    return node;
+  }
+
+  function duration(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return "";
+    if (seconds < 1) return "under a second";
+    if (seconds < 90) return `${Math.round(seconds)} s`;
+    if (seconds < 5400) return `${Math.round(seconds / 60)} min`;
+    return `${Math.round(seconds / 3600)} h`;
+  }
+
+  function heard(ageMs) {
+    if (ageMs < 2000) return "just now";
+    return `${duration(ageMs / 1000)} ago`;
+  }
+
+  function stat(label) {
+    const dd = el("dd");
+    const wrap = el("div", {}, el("dt", {}, label), dd);
+    return { wrap, dd };
+  }
+
+  // build creates the DOM for one projection once; update fills it in, so
+  // the lanes animate from their previous width.
+  function build(name) {
+    const h2 = el("h2", {}, name);
+    const state = el("span", { class: "state" });
+    const where = el("span", { class: "where" });
+    const button = el("button", { type: "button" }, "Rebuild");
+    button.hidden = true;
+    button.addEventListener("click", () => confirmRebuild(name));
+
+    const track = el("div", { class: "track" });
+    const stats = {
+      position: stat("Position"),
+      head: stat("Head of the log"),
+      behind: stat("Behind"),
+      rate: stat("Rate"),
+      eta: stat("Live in"),
+    };
+    const numbers = el("dl", { class: "numbers" }, ...Object.values(stats).map(s => s.wrap));
+    const problem = el("div", { class: "problem" });
+    problem.hidden = true;
+
+    const tbody = el("tbody");
+    const table = el("table", {},
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Segment"), el("th", {}, "State"),
+        el("th", { class: "num" }, "Position"), el("th", {}, "Owner"), el("th", {}, "Last heard"))),
+      tbody);
+    // Every live instance, those on standby that hold no segment included.
+    const itbody = el("tbody");
+    const itable = el("table", { class: "instances" },
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Instance"), el("th", { class: "num" }, "Segments"), el("th", {}, "Last heard"))),
+      itbody);
+    const summary = el("summary");
+    const details = el("details", {}, summary, el("div", { class: "segments-wrap" }, table, itable));
+    // Once someone opens or closes the table themselves, leave it that way.
+    summary.addEventListener("click", () => { details.dataset.touched = "1"; });
+
+    const section = el("section", { class: "projection", "aria-label": name },
+      el("div", { class: "head" }, h2, state, where, el("span", { class: "spacer" }), button),
+      track, numbers, problem, details);
+    const parts = { section, state, where, button, track, stats, problem, details, summary, tbody, itable, itbody, lanes: [] };
+    sections.set(name, parts);
+    return parts;
+  }
+
+  function update(p) {
+    const parts = sections.get(p.name) || build(p.name);
+    parts.section.dataset.state = p.state;
+    parts.state.textContent = STATE_TEXT[p.state] || p.state;
+    parts.where.textContent = p.local ? "runs here" : "";
+
+    parts.button.hidden = !p.canReset;
+    parts.requested = p.rebuildRequested;
+    setBusy(parts, rebuilding.has(p.name), p.rebuildRequested);
+
+    // One lane per segment, each filled to its position against the head.
+    const head = Math.max(p.head, ...p.segments.map(s => s.position), 1);
+    const segs = p.segments.length ? p.segments : [{ segment: 0, state: p.state, position: 0 }];
+    while (parts.lanes.length < segs.length) {
+      const fill = el("div", { class: "fill" });
+      const lane = el("div", { class: "lane", role: "progressbar", "aria-valuemin": "0" }, fill);
+      parts.track.append(lane);
+      parts.lanes.push({ lane, fill });
+    }
+    while (parts.lanes.length > segs.length) parts.lanes.pop().lane.remove();
+    parts.track.classList.toggle("many", segs.length > 1);
+    segs.forEach((s, i) => {
+      const { lane, fill } = parts.lanes[i];
+      lane.dataset.state = s.state;
+      lane.setAttribute("aria-valuemax", String(head));
+      lane.setAttribute("aria-valuenow", String(s.position));
+      lane.setAttribute("aria-label", `Segment ${s.segment} at ${num.format(s.position)} of ${num.format(head)}`);
+      fill.style.width = `${Math.min(100, (s.position / head) * 100)}%`;
+    });
+
+    const st = parts.stats;
+    st.position.dd.textContent = num.format(p.position);
+    st.head.dd.textContent = num.format(p.head);
+    st.behind.dd.textContent = p.behind ? num.format(p.behind) : "Nothing";
+    st.rate.dd.textContent = p.rate >= 1 ? `${num.format(Math.round(p.rate))} per second` : "Idle";
+    const eta = duration(p.eta);
+    st.eta.wrap.hidden = !((p.state === "catching_up" || p.state === "replaying") && eta);
+    st.eta.dd.textContent = eta;
+
+    // Say why a projection is not making progress, in the reader's terms.
+    const problem = describeProblem(p);
+    parts.problem.hidden = !problem;
+    parts.problem.classList.toggle("note", !!(problem && problem.note));
+    parts.problem.replaceChildren();
+    if (problem) {
+      parts.problem.append(el("p", {}, problem.text));
+      if (problem.detail) parts.problem.append(el("p", { class: "detail" }, problem.detail));
+    }
+
+    // The segment table shows who runs what, and the instance table who
+    // stands by; one healthy segment on one instance says nothing the line
+    // above does not.
+    const instances = p.instances || [];
+    const troubled = p.segments.some(s => !["live", "catching_up", "replaying"].includes(s.state));
+    parts.details.hidden = p.segments.length === 0 || (p.segments.length === 1 && !troubled && instances.length <= 1);
+    if (troubled && !parts.details.dataset.touched) parts.details.open = true;
+    const segText = p.segments.length === 1 ? "1 segment" : `${p.segments.length} segments`;
+    const instText = instances.length === 1 ? "1 instance" : `${instances.length} instances`;
+    parts.summary.textContent = instances.length ? `${segText} on ${instText}` : segText;
+    parts.itable.hidden = instances.length === 0;
+    parts.itbody.replaceChildren(...instances.map(m => el("tr", {},
+      el("td", {}, m.owner),
+      el("td", m.segments ? { class: "num" } : { class: "num standby" }, m.segments ? String(m.segments) : "Standby"),
+      el("td", {}, heard(m.ageMs)))));
+    parts.tbody.replaceChildren(...p.segments.map(s => el("tr", { "data-state": s.state },
+      el("td", {}, String(s.segment)),
+      el("td", {}, el("span", { class: "state" }, STATE_TEXT[s.state] || s.state)),
+      el("td", { class: "num" }, num.format(s.position)),
+      el("td", {}, s.owner || "None"),
+      el("td", {}, s.owner ? heard(s.ageMs) : ""))));
+
+    return parts.section;
+  }
+
+  function describeProblem(p) {
+    if (p.error) return { text: "The dashboard could not read this projection's status from the store.", detail: p.error };
+    const stalled = p.segments.find(s => s.state === "stalled");
+    if (stalled) return { text: `Segment ${stalled.segment} stopped at position ${num.format(stalled.position)} and is retrying.`, detail: stalled.lastError };
+    const silent = p.segments.find(s => s.state === "silent");
+    if (silent) return { text: `The runner of segment ${silent.segment} (${silent.owner}) has not published for ${duration(silent.ageMs / 1000)}. Another instance takes over once its claim expires.` };
+    if (p.rebuildRequested) return { note: true, text: "A rebuild was requested. The runner holding segment 0 starts it between two batches; until then the read model is unchanged." };
+    if (p.state === "not_started") return { text: "No runner has started this projection yet." };
+    return null;
+  }
+
+  function render(snap) {
+    document.title = snap.title;
+    document.getElementById("title").textContent = snap.title;
+    configure(snap);
+    if (!snap.projections.length) {
+      list.replaceChildren(el("div", { class: "empty" },
+        el("strong", {}, "No projections to show"),
+        "Pass the runners this program runs with dashboard.WithRunners, or the names of projections other programs run with dashboard.WithProjections."));
+      sections.clear();
+      return;
+    }
+    const nodes = snap.projections.map(update);
+    const shown = new Set(snap.projections.map(p => p.name));
+    for (const name of sections.keys()) if (!shown.has(name)) sections.delete(name);
+    list.replaceChildren(...nodes);
+  }
+
+  // Rebuild, after the person confirms it.
+  const dialog = document.getElementById("confirm");
+  let pending = null;
+  function confirmRebuild(name) {
+    pending = name;
+    document.getElementById("confirm-title").textContent = `Rebuild ${name}?`;
+    dialog.showModal();
+    document.getElementById("confirm-cancel").focus();
+  }
+  document.getElementById("confirm-cancel").addEventListener("click", () => dialog.close());
+  document.getElementById("confirm-ok").addEventListener("click", async () => {
+    const name = pending;
+    dialog.close();
+    if (!name) return;
+    rebuilding.add(name);
+    const parts = sections.get(name);
+    if (parts) setBusy(parts, true, false);
+    try {
+      const res = await fetch(`api/projections/${encodeURIComponent(name)}/rebuild`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      toast(body.message || body.error || `Rebuild failed with status ${res.status}.`, !res.ok);
+    } catch (err) {
+      toast(`Could not reach the dashboard to rebuild ${name}.`, true);
+    } finally {
+      rebuilding.delete(name);
+      // An update may have arrived while the request was out; keep what
+      // it said about a pending rebuild.
+      const parts = sections.get(name);
+      if (parts) setBusy(parts, false, parts.requested);
+    }
+  });
+
+  // A pending request disables the button too: another request would be
+  // served by the same rebuild.
+  function setBusy(parts, busy, requested) {
+    parts.button.disabled = busy || requested;
+    parts.button.textContent = busy ? "Requesting…" : requested ? "Rebuild requested" : "Rebuild";
+  }
+
+  function toast(text, isError) {
+    const t = el("div", { class: isError ? "toast error" : "toast", role: isError ? "alert" : "status" }, text);
+    document.getElementById("toasts").append(t);
+    setTimeout(() => t.remove(), isError ? 8000 : 4000);
+  }
+
+  // --- Events and chains ---
+
+  const tabs = document.getElementById("tabs");
+  const views = document.querySelectorAll("main > [data-view]");
+  const filters = document.getElementById("filters");
+  const log = document.getElementById("log");
+  const olderButton = document.getElementById("older");
+  const pagerNote = document.getElementById("pager-note");
+  const chainView = document.getElementById("chain-view");
+  const time = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
+  const config = { events: false, chains: false, known: false };
+  const seenTypes = new Set();
+  let olderCursor = 0;
+
+  // configure learns from the first snapshot which views the dashboard
+  // offers, and shows the one the address asks for.
+  function configure(snap) {
+    if (config.known && config.events === snap.events && config.chains === snap.chains) return;
+    Object.assign(config, { events: snap.events, chains: snap.chains, known: true });
+    tabs.hidden = !config.events;
+    document.getElementById("chain-open").hidden = !config.chains;
+    route();
+  }
+
+  function route() {
+    // Decode parts, not the whole hash: a correlation ID may hold any
+    // character, the separators included.
+    const hash = location.hash.slice(1);
+    let view = "projections";
+    if (config.events && hash.startsWith("events")) view = "events";
+    if (config.chains && hash.startsWith("chain/")) view = "chain";
+    for (const v of views) v.hidden = v.dataset.view !== view;
+    for (const a of tabs.querySelectorAll("a")) {
+      const current = a.dataset.view === view || (view === "chain" && a.dataset.view === "events");
+      if (current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+    if (view === "events") {
+      const params = new URLSearchParams(hash.slice("events".length + 1));
+      filters.elements.type.value = params.get("type") || "";
+      filters.elements.stream.value = params.get("stream") || "";
+      loadEvents(0, false);
+    }
+    if (view === "chain") {
+      const [id, eventID] = hash.slice("chain/".length).split("@");
+      loadChain(decodeURIComponent(id), eventID && decodeURIComponent(eventID));
+    }
+  }
+  window.addEventListener("hashchange", route);
+
+  filters.addEventListener("submit", e => {
+    e.preventDefault();
+    const chain = filters.elements.chain.value.trim();
+    if (chain) {
+      filters.elements.chain.value = "";
+      location.hash = chainHash(chain);
+      return;
+    }
+    const params = new URLSearchParams();
+    for (const name of ["type", "stream"]) {
+      const v = filters.elements[name].value.trim();
+      if (v) params.set(name, v);
+    }
+    const query = params.toString();
+    const target = query ? `events?${query}` : "events";
+    if (location.hash.slice(1) === target) route(); else location.hash = target;
+  });
+  document.getElementById("newest").addEventListener("click", () => loadEvents(0, false));
+  olderButton.addEventListener("click", () => loadEvents(olderCursor, true));
+
+  function chainHash(id, eventID) {
+    return "chain/" + encodeURIComponent(id) + (eventID ? "@" + eventID : "");
+  }
+
+  async function getJSON(url) {
+    const res = await fetch(url);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `The dashboard answered with status ${res.status}.`);
+    return body;
+  }
+
+  // loadEvents shows the newest page before position before (0: the head),
+  // replacing the table, or appending to it when more is set.
+  async function loadEvents(before, more) {
+    const params = new URLSearchParams();
+    if (before) params.set("before", before);
+    for (const name of ["type", "stream"]) {
+      const v = filters.elements[name].value.trim();
+      if (v) params.set(name, v);
+    }
+    olderButton.disabled = true;
+    pagerNote.textContent = "Loading…";
+    let page;
+    try {
+      page = await getJSON(`api/events?${params}`);
+    } catch (err) {
+      pagerNote.textContent = err.message;
+      return;
+    }
+    const rows = page.events.flatMap(eventRows);
+    if (more) log.append(...rows); else log.replaceChildren(...rows);
+    for (const ev of page.events) seenTypes.add(ev.type);
+    document.getElementById("types").replaceChildren(...[...seenTypes].sort().map(t => el("option", { value: t })));
+
+    olderCursor = page.older;
+    olderButton.disabled = !page.older;
+    const shown = log.querySelectorAll("tr.row").length;
+    if (!shown) pagerNote.textContent = page.head ? "No events match." : "The log is empty.";
+    else if (page.scanned) pagerNote.textContent = `${num.format(shown)} shown. Looked back to position ${num.format(page.scanned)}; Older looks further.`;
+    else pagerNote.textContent = `${num.format(shown)} shown, head of the log at ${num.format(page.head)}.`;
+  }
+
+  // eventRows returns an event's table row and the row that opens under it.
+  function eventRows(ev) {
+    const row = el("tr", { class: "row", tabindex: "0", "aria-expanded": "false" },
+      el("td", { class: "num" }, num.format(ev.position)),
+      el("td", {}, time.format(new Date(ev.occurredAt))),
+      el("td", { class: "wrap" }, ev.type),
+      el("td", { class: "mono wrap" }, ev.streamId),
+      el("td", { class: "num" }, num.format(ev.version)));
+    const detail = el("tr", { class: "detail" }, el("td", { colspan: "5" }, eventBody(ev)));
+    detail.hidden = true;
+    const toggle = () => {
+      detail.hidden = !detail.hidden;
+      row.setAttribute("aria-expanded", String(!detail.hidden));
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    return [row, detail];
+  }
+
+  // eventBody shows an event's identifiers, metadata and payload.
+  function eventBody(ev, inChain) {
+    const fields = [["Event ID", ev.eventId]];
+    if (ev.correlationId) {
+      const value = config.chains && !inChain
+        ? el("a", { href: "#" + chainHash(ev.correlationId, ev.eventId) }, ev.correlationId)
+        : ev.correlationId;
+      fields.push(["Correlation ID", value]);
+    }
+    if (ev.causationId) fields.push(["Caused by", ev.causationId]);
+    if (inChain) fields.push(["Stream", `${ev.streamId} @ ${ev.version}`], ["Position", num.format(ev.position)], ["Occurred", time.format(new Date(ev.occurredAt))]);
+    const grid = el("dl", { class: "detail-grid" }, ...fields.flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, v)]));
+    const parts = [grid, el("div", { class: "label" }, "Payload"), el("pre", {}, JSON.stringify(ev.payload, null, 2))];
+    if (ev.metadata && Object.keys(ev.metadata).length) {
+      parts.push(el("div", { class: "label" }, "Metadata"), el("pre", {}, JSON.stringify(ev.metadata, null, 2)));
+    }
+    return el("div", {}, ...parts);
+  }
+
+  // loadChain shows one correlation chain as the tree of what caused what,
+  // with focusID, the event the reader came from, opened.
+  async function loadChain(id, focusID) {
+    chainView.replaceChildren(el("p", { class: "label" }, "Loading…"));
+    let page;
+    try {
+      page = await getJSON(`api/correlations/${encodeURIComponent(id)}`);
+    } catch (err) {
+      chainView.replaceChildren(el("div", { class: "problem" }, el("p", {}, err.message)));
+      return;
+    }
+    const events = page.events;
+    const back = el("a", { href: "#events" }, "Back to events");
+    if (!events.length) {
+      chainView.replaceChildren(el("div", { class: "chain-head" }, back, el("h2", {}, id), el("p", {}, "No event carries this correlation ID.")));
+      return;
+    }
+
+    // An event's parent is the event whose ID is its CausationID. One with
+    // no CausationID started the chain; one whose cause is not in it was
+    // caused by an event the store no longer has, or another chain's.
+    const byID = new Map(events.map(ev => [ev.eventId, { ev, children: [] }]));
+    const roots = [];
+    for (const node of byID.values()) {
+      const parent = node.ev.causationId && byID.get(node.ev.causationId);
+      if (parent) parent.children.push(node); else roots.push(node);
+    }
+
+    const first = new Date(events[0].occurredAt);
+    const last = new Date(events[events.length - 1].occurredAt);
+    const streams = new Set(events.map(ev => ev.streamId)).size;
+    const span = duration((last - first) / 1000);
+    const summary = `${num.format(events.length)} ${events.length === 1 ? "event" : "events"} in ${streams} ${streams === 1 ? "stream" : "streams"}, starting ${time.format(first)}` + (span ? `, over ${span}` : "") + ".";
+
+    let focused = null;
+    function branch(node) {
+      const ev = node.ev;
+      const offset = (new Date(ev.occurredAt) - first) / 1000;
+      const head = el("button", { type: "button", class: "node", "aria-expanded": "false" },
+        el("span", { class: "type" }, ev.type),
+        el("span", { class: "stream mono" }, `${ev.streamId} @ ${ev.version}`),
+        el("span", { class: "at" }, offset > 0 ? `+${offset < 1 ? `${Math.round(offset * 1000)} ms` : duration(offset)}` : `#${num.format(ev.position)}`));
+      const body = el("div", { class: "node-body" }, eventBody(ev, true));
+      body.hidden = true;
+      head.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        head.setAttribute("aria-expanded", String(!body.hidden));
+      });
+      const li = el("li", {}, head);
+      if (ev.causationId && !byID.has(ev.causationId)) li.append(el("div", { class: "orphan" }, `Caused by ${ev.causationId}, which is not in this chain.`));
+      li.append(body);
+      if (ev.eventId === focusID) {
+        head.classList.add("focus");
+        head.click();
+        focused = head;
+      }
+      if (node.children.length) li.append(el("ul", {}, ...node.children.map(branch)));
+      return li;
+    }
+
+    chainView.replaceChildren(
+      el("div", { class: "chain-head" }, back, el("h2", { class: "mono" }, id), el("p", {}, summary)),
+      el("ul", { class: "tree" }, ...roots.map(branch)));
+    if (focused) focused.scrollIntoView({ block: "center" });
+  }
+
+  // Live updates. EventSource reconnects by itself after a lost connection.
+  const source = new EventSource("events");
+  source.onopen = () => { connection.dataset.state = "open"; connection.textContent = "Updating live"; };
+  source.onerror = () => { connection.dataset.state = "lost"; connection.textContent = "Connection lost, reconnecting"; };
+  source.onmessage = e => {
+    connection.dataset.state = "open";
+    connection.textContent = "Updating live";
+    render(JSON.parse(e.data));
+  };
+})();
+</script>
+</body>
+</html>

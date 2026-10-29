@@ -1,6 +1,15 @@
-name: Deploy Docs
+name: Docs
 
+# Pull requests build the site in strict mode, so a warning such as a
+# broken link fails the check; only master deploys it.
 on:
+  pull_request:
+    branches: [master]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - requirements-docs.txt
+      - .github/workflows/docs.yml
   push:
     branches: [master]
     paths:
@@ -15,9 +24,12 @@ permissions:
   pages: write
   id-token: write
 
+# Master runs share one group, so they build and deploy in push order and an
+# older site never deploys over a newer one. Each pull request gets its own
+# group, which a newer push to it cancels, so it never waits on a deploy.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -35,14 +47,16 @@ jobs:
         run: pip install -r requirements-docs.txt
 
       - name: Build site
-        run: mkdocs build -d site
+        run: mkdocs build --strict -d site
 
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,52 +151,67 @@ type BackoffProbeEvent struct{ N int }
 func (BackoffProbeEvent) AggregateID() string { return "backoff-probe" }
 func (BackoffProbeEvent) EventType() string   { return "BackoffProbeEvent" }
 
-// TestSave_UsesConfiguredBackoffNotDefault verifies Save actually retries
-// with the [kdb.Option] backoff it's given via [kdb.WithBackoff],
-// rather than silently falling back to a fresh, unconfigured
-// backoff.NewExponentialBackOff() (default MaxElapsedTime 15m). It uses a
-// short test-only backoff instead of Save's real 30s default so the test
-// runs in well under a second while still exercising the same code path.
-func TestSave_UsesConfiguredBackoffNotDefault(t *testing.T) {
-	const maxElapsed = 200 * time.Millisecond
+func init() {
+	eventsourcing.RegisterEventByType(func() eventsourcing.Event { return &BackoffProbeEvent{} })
+}
 
+// TestSave_UsesConfiguredBackoffNotDefault verifies Save takes its
+// backoff from the [kdb.Option] it's given via [kdb.WithBackoff], once per
+// call, rather than silently falling back to a fresh, unconfigured
+// backoff.NewExponentialBackOff().
+func TestSave_UsesConfiguredBackoffNotDefault(t *testing.T) {
+	var calls atomic.Int32
+	store := kdb.NewEventStore(testDB, kdb.WithBackoff(func() backoff.BackOff {
+		calls.Add(1)
+		return backoff.NewExponentialBackOff()
+	}))
+
+	if _, err := store.Save(t.Context(), []eventsourcing.Envelope{{
+		EventID:  uuid.New(),
+		StreamID: "backoff-probe-stream",
+		Event:    &BackoffProbeEvent{N: 1},
+		Metadata: map[string]any{},
+	}}, eventsourcing.Any{}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("WithBackoff factory called %d times by one Save, want 1", n)
+	}
+}
+
+// TestSave_StopsRetryingWhenCtxIsDone covers a Save whose ctx has already
+// expired. The client reports every attempt as a retryable
+// codes.DeadlineExceeded, so a Save that retried regardless of ctx would
+// keep going until its backoff gave up, 10s here. It must return at once,
+// with an error matching ctx's.
+func TestSave_StopsRetryingWhenCtxIsDone(t *testing.T) {
 	store := kdb.NewEventStore(testDB, kdb.WithBackoff(func() backoff.BackOff {
 		b := backoff.NewExponentialBackOff()
-		b.MaxElapsedTime = maxElapsed
+		b.MaxElapsedTime = 10 * time.Second
 		b.InitialInterval = 10 * time.Millisecond
 		b.MaxInterval = 50 * time.Millisecond
 		return b
 	}))
 
-	// A context that has already expired before Save's first attempt makes
-	// every retry attempt fail the same way: the KurrentDB client reports a
-	// retryable codes.DeadlineExceeded for each call, so the only thing
-	// bounding Save's total run time is the backoff it uses between
-	// attempts -- exactly the configuration this test verifies is honored.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
 	defer cancel()
-	time.Sleep(5 * time.Millisecond)
+	<-ctx.Done()
 
 	start := time.Now()
 	_, err := store.Save(ctx, []eventsourcing.Envelope{{
 		EventID:  uuid.New(),
 		StreamID: "backoff-probe-stream",
-		Event:    BackoffProbeEvent{N: 1},
+		Event:    &BackoffProbeEvent{N: 1},
 		Metadata: map[string]any{},
 	}}, eventsourcing.Any{})
 	elapsed := time.Since(start)
 
-	t.Logf("Save gave up after %s, err=%v", elapsed, err)
-
-	// Generous margin over maxElapsed for in-flight call overhead. If Save
-	// ignored the configured backoff and fell back to an unconfigured
-	// default (MaxElapsedTime 15m), elapsed would blow past this ceiling by
-	// orders of magnitude, not by a small margin.
-	const ceiling = 2 * time.Second
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Save() error = %v, want one matching context.DeadlineExceeded", err)
+	}
+	const ceiling = time.Second
 	if elapsed > ceiling {
-		t.Errorf("Save took %s to give up, want <= %s (configured via WithBackoff with "+
-			"MaxElapsedTime=%s; Save appears to be using a different backoff instead)",
-			elapsed, ceiling, maxElapsed)
+		t.Errorf("Save took %s to return after its ctx expired, want <= %s", elapsed, ceiling)
 	}
 }
 

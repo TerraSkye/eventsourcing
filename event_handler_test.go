@@ -365,50 +365,6 @@ func TestOnEvent_ReceivesEventsAsTheRegistryMintsThem(t *testing.T) {
 	}
 }
 
-// TestEventGroupProcessor_StreamFilter_ValueRegisteredAliases covers a type
-// whose registry factory mints a value while its handler takes a pointer.
-//
-// RegisterEventByType takes a plain func() Event, so what it mints is
-// whatever the caller wrote — a value here. OnEvent, by contrast, always
-// takes the pointer form. typeToNames used to key on %T of the instance, so
-// the factory filed the type under "eventsourcing.CartCreated" while the
-// handler looked it up as "*eventsourcing.CartCreated", and every alias
-// registered through RegisterEventByName went missing from the filter even
-// though the type genuinely was registered.
-//
-// The pointer and value forms are the same registered event, so they share
-// one entry now.
-func TestEventGroupProcessor_StreamFilter_ValueRegisteredAliases(t *testing.T) {
-
-	registryMu.Lock()
-	registry = map[string]func() Event{}
-	typeToNames = map[string][]string{}
-	registryMu.Unlock()
-
-	// Both factories mint a value, which RegisterEvent never does but
-	// RegisterEventByType/ByName leave entirely to the caller.
-	RegisterEventByType(func() Event { return CartCreated{} })
-	RegisterEventByName("LegacyCartCreated", func() Event { return CartCreated{} })
-
-	group := NewEventGroupProcessor(
-		OnEvent(func(ctx context.Context, ev *CartCreated) error { return nil }),
-	)
-
-	// Handle still routes correctly: this isn't about the handler being
-	// broken, only about StreamFilter() misreporting its aliases.
-	if err := group.Handle(context.Background(), &CartCreated{ID: "c1"}); err != nil {
-		t.Fatalf("Handle: unexpected error: %v", err)
-	}
-
-	names := group.StreamFilter()
-	expected := []string{"CartCreated", "LegacyCartCreated"}
-	if !reflect.DeepEqual(names, expected) {
-		t.Fatalf("StreamFilter() = %v, want %v: the aliases are missing because the "+
-			"value-minting factory and the pointer handler key the registry differently",
-			names, expected)
-	}
-}
-
 // TestStreamFilter_UnregisteredPointerHandlerOfValueReceiverEventIsOmitted
 // covers the combination that used to panic: a handler registered through
 // OnEvent with a pointer type parameter, over an Event whose methods take a

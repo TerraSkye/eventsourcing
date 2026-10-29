@@ -26,7 +26,7 @@ eventsourcing.RegisterEvent(&events.TaskCreated{})
 func RegisterEventByType(fn func() Event)
 ```
 
-Registers using a factory function. Equivalent to `RegisterEvent` but with explicit factory control:
+Registers using a factory function. Equivalent to `RegisterEvent` but with explicit factory control. The factory must return a pointer, since stored events are decoded into it; a factory that returns a value panics at registration:
 
 ```go
 eventsourcing.RegisterEventByType(func() eventsourcing.Event {

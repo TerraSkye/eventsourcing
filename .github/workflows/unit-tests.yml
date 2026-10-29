@@ -1,7 +1,10 @@
 name: Unit Tests
 
 on:
+  pull_request:
+    branches: [master]
   push:
+    branches: [master]
 
 jobs:
   test:
@@ -17,7 +20,7 @@ jobs:
           cache: true
 
       - name: Run unit tests
-        run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+        run: go test -race -v ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/... ./examples/dashboard/...
 
   lint:
     runs-on: ubuntu-latest

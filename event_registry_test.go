@@ -208,6 +208,50 @@ func TestFactoryReturnsNil(t *testing.T) {
 	})
 }
 
+// ValueEvent has value receivers, so a factory can return it as a value.
+type ValueEvent struct {
+	ID string
+}
+
+func (e ValueEvent) EventType() string   { return "ValueEvent" }
+func (e ValueEvent) AggregateID() string { return e.ID }
+
+// TestFactoryReturnsValue covers a factory that returns a value instead of
+// a pointer: it is refused at registration, since an event decoded into a
+// value would save and then fail on every read.
+func TestFactoryReturnsValue(t *testing.T) {
+	tests := map[string]func(){
+		"RegisterEventByType": func() { RegisterEventByType(func() Event { return ValueEvent{} }) },
+		"RegisterEventByName": func() { RegisterEventByName("LegacyValueEvent", func() Event { return ValueEvent{} }) },
+	}
+	for name, register := range tests {
+		t.Run(name, func(t *testing.T) {
+			resetRegistry(t)
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatal("expected panic when factory returns a value")
+				}
+				if names := EventNamesFor(ValueEvent{}); len(names) != 0 {
+					t.Errorf("EventNamesFor(ValueEvent{}) = %v after a refused registration, want none", names)
+				}
+			}()
+			register()
+		})
+	}
+
+	t.Run("pointer to the same type", func(t *testing.T) {
+		resetRegistry(t)
+		RegisterEventByType(func() Event { return &ValueEvent{} })
+		ev, err := DecodeEvent("ValueEvent", []byte(`{"ID":"v1"}`))
+		if err != nil {
+			t.Fatalf("DecodeEvent() error = %v", err)
+		}
+		if got, ok := ev.(*ValueEvent); !ok || got.ID != "v1" {
+			t.Errorf("DecodeEvent() = %#v, want &ValueEvent{ID: \"v1\"}", ev)
+		}
+	})
+}
+
 // SharedEvent mimics a normal domain event as documented in
 // docs/how-to/register-events.md: a pointer type registered with RegisterEvent.
 type SharedEvent struct {

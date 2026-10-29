@@ -41,6 +41,11 @@ func SegmentOf(key string, segments int) int {
 // ErrorPolicy decides what the runner does when a handler returns an error
 // for an event.
 //
+// Skipping a failing event dead-letters it: the runner records it as a
+// dead letter, if the store keeps them, and moves past it. That is not the
+// skip of an [eventsourcing.SkippedEventError], which a handler returns for
+// an event it does not process, and which is not a failure.
+//
 // A skipped event parks its stream: the runner skips that stream's later
 // events too, recording each as a dead letter, so a read model never sees
 // OrderShipped without the OrderPlaced it skipped. Other streams carry on.
@@ -220,7 +225,7 @@ type Definition struct {
 
 	// Logger receives the runner's lifecycle: a segment claimed, released
 	// or lost (Info, Warn), a rebuild started and finished (Info), an event
-	// skipped (Warn), and a segment stalled with its error (Error). Every
+	// dead-lettered (Warn), and a segment stalled with its error (Error). Every
 	// record carries projection, segment, owner, position and head. The
 	// runner logs nothing per applied event and nothing while idle; to log
 	// handler calls, wrap Handler, for example with

@@ -42,7 +42,7 @@ var (
 	// without running the handler, because an earlier event of its stream
 	// was skipped. Applying it would show the read model a later state of
 	// the stream without the earlier one; see [Runner.ReplayStream].
-	ErrStreamParked = errors.New("projection: an earlier event of the stream was skipped")
+	ErrStreamParked = errors.New("projection: an earlier event of the stream was dead-lettered")
 
 	// ErrNoDeadLetterStore is returned by [Runner.ReplayStream] when the
 	// Store does not implement [DeadLetterStore], so there are no skipped
@@ -557,9 +557,18 @@ func (r *Runner) notifyWatchers() {
 	}
 }
 
-// Skipped returns the number of events skipped under a non-stalling
-// [Definition.OnError] since the Runner was created.
-func (r *Runner) Skipped() int64 { return r.skipped.Load() }
+// DeadLettered returns the number of events dead-lettered under a
+// non-stalling [Definition.OnError] since the Runner was created: events
+// whose handler failed, and the later events of their parked streams.
+func (r *Runner) DeadLettered() int64 { return r.skipped.Load() }
+
+// Skipped returns the number of events dead-lettered since the Runner was
+// created.
+//
+// Deprecated: Use [Runner.DeadLettered]. "Skipped" also names an event a
+// handler declines with [eventsourcing.SkippedEventError], which is not a
+// failure.
+func (r *Runner) Skipped() int64 { return r.DeadLettered() }
 
 // lease returns this runner's [Lease] on seg.
 func (r *Runner) lease(seg int) Lease {

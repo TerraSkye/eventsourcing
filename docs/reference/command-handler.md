@@ -131,6 +131,8 @@ eventsourcing.WithRetryStrategy(func() backoff.BackOff {
 })
 ```
 
+The wait between retries happens inside the handler call. Behind a `CommandBus`, that blocks every command on the same shard, so keep it short there, for example `backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)`. See [Retry behind a CommandBus](../explanation/concurrency.md#retry-behind-a-commandbus).
+
 ### WithMetadataExtractor
 
 ```go
@@ -164,6 +166,9 @@ var DefaultStreamNamer StreamNamer // overrideable global default
 | Situation | Error type |
 |---|---|
 | `decide` returns an error | Wrapped in `*BusinessRuleViolationError` |
-| Stream revision mismatch | `*StreamRevisionConflictError` (retried if strategy set) |
+| Stream changed since it was loaded, under `Any{}` or `StreamExists{}` | `*StreamRevisionConflictError` (retried if a strategy is set) |
+| Stream not at version N, under `Revision(N)` | `*StreamRevisionConflictError`, never retried |
+| Stream already exists, under `NoStream{}` | `ErrStreamExists`, never retried |
+| Stream does not exist, under `StreamExists{}` | `ErrStreamNotFound`, never retried |
 | Store load failure | `error` with context |
 | Store save failure | `error` with context |

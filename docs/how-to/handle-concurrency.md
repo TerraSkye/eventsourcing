@@ -1,39 +1,38 @@
 # How to handle concurrency conflicts with optimistic locking
 
-Use `WithStreamState` and `WithRetryStrategy` to prevent lost updates when multiple processes write to the same aggregate stream simultaneously.
+Use `WithRetryStrategy` to resolve conflicts when several processes write to the same aggregate stream at once, and `WithStreamState` to state what the stream must look like.
 
 ## The problem
 
-By default, `NewCommandHandler` uses `Any{}` — it appends events without checking the current stream version. This is fine for most use cases, but if two goroutines handle commands for the same aggregate concurrently, the second write can silently overwrite the first.
+Two processes load the same stream at version 2. Both decide on that state and both append version 3. Whichever saves second decided on a state that no longer exists, so its event must not be stored as if nothing happened.
 
-## Solution: optimistic concurrency
+## Optimistic locking is on by default
 
-Pass `WithStreamState` to require the stream to be at a specific revision before saving. If the revision has changed since you loaded events, the store returns `StreamRevisionConflictError`.
-
-The framework tracks the latest version after loading and uses it automatically:
+`NewCommandHandler` saves against the version it just loaded. With the default `Any{}`, it saves with `Revision(N)`, where N is the last version it folded into state. A write that happened in between makes `Save` fail with `*StreamRevisionConflictError` instead of being stored. You never set the revision yourself:
 
 ```go
-import (
-    "github.com/terraskye/eventsourcing"
-    "github.com/cenkalti/backoff/v4"
-)
-
 handler := eventsourcing.NewCommandHandler(
     store,
     initialState,
     evolve,
     decide,
-    eventsourcing.WithStreamState(eventsourcing.Any{}), // default — no check
+    // eventsourcing.WithStreamState(eventsourcing.Any{}) is the default:
+    // saved against the version just loaded.
 )
 ```
 
-To enforce optimistic locking, the framework automatically switches to `Revision(N)` after loading events. You do not need to set the revision manually — just ensure you're not using `Any{}` in the retry path.
+Without a retry strategy, the conflict is returned to the caller.
 
 ## Add retry on conflict
 
 When a conflict occurs, retry by reloading events and re-deciding:
 
 ```go
+import (
+    "github.com/cenkalti/backoff/v4"
+    "github.com/terraskye/eventsourcing"
+)
+
 handler := eventsourcing.NewCommandHandler(
     store,
     initialState,
@@ -46,6 +45,8 @@ handler := eventsourcing.NewCommandHandler(
 ```
 
 The handler calls the function once per command, so every command gets its own retry budget, and a wait between retries ends when the command's context is cancelled.
+
+If the handler runs behind a `CommandBus`, use a short retry such as `backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)`. The wait between retries runs on the shard's worker and holds up every other command on that shard. See [Retry behind a CommandBus](../explanation/concurrency.md#retry-behind-a-commandbus).
 
 The retry loop:
 1. Reloads the stream from the last known revision.
@@ -69,7 +70,7 @@ handler := eventsourcing.NewCommandHandler(
 )
 ```
 
-If the stream already exists, `Save` returns `ErrStreamExists` immediately — no retry needed.
+If the stream already exists, the handler returns an error matching `ErrStreamExists` at once, without retrying.
 
 ## Requiring a stream to exist
 
@@ -85,16 +86,16 @@ handler := eventsourcing.NewCommandHandler(
 )
 ```
 
-If the stream does not exist, `Save` returns `ErrStreamNotFound`.
+If the stream does not exist, the handler returns an error matching `ErrStreamNotFound` at once, without retrying.
 
 ## Stream states reference
 
 | State | When to use |
 |---|---|
-| `Any{}` | No concurrency check needed (default) |
-| `NoStream{}` | First write only — creation commands |
-| `StreamExists{}` | Updates only — stream must already exist |
-| `Revision(N)` | Set by the framework during retry — do not set manually |
+| `Any{}` | Most commands: saved against the version just loaded; conflicts retried if `WithRetryStrategy` is set (default) |
+| `NoStream{}` | Creation commands: the stream must not exist yet |
+| `StreamExists{}` | Updates only: the stream must already exist |
+| `Revision(N)` | The caller read the stream at version N and asserts it is still there, such as an edit made against the version a user last saw. A conflict is returned, never retried |
 
 ## Handling `StreamRevisionConflictError`
 
