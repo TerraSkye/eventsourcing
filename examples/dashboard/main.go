@@ -7,6 +7,9 @@
 //	go run ./examples/dashboard
 //
 // then open http://localhost:8080 and press Rebuild on either projection.
+// http://localhost:8080/tasks shows both read models as they are in the
+// database; keep it open in another tab to watch a rebuild empty and refill
+// them.
 // With -stall, task-list fails on one event for 20 seconds, to show a
 // stalled projection and its recovery.
 //
@@ -155,14 +158,19 @@ func main() {
 		dashboard.WithEvents(events),
 		dashboard.WithTitle("Task service"),
 	)
-	srv := &http.Server{Addr: *addr, Handler: d}
+	mux := http.NewServeMux()
+	tasks := tasksHandler(db)
+	mux.Handle("/tasks", tasks)
+	mux.Handle("/tasks.json", tasks)
+	mux.Handle("/", d)
+	srv := &http.Server{Addr: *addr, Handler: mux}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
-	log.Printf("dashboard on http://%s, database %s", *addr, *dbPath)
+	log.Printf("dashboard on http://%s, read models on http://%s/tasks, database %s", *addr, *addr, *dbPath)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
