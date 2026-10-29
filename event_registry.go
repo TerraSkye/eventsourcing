@@ -22,7 +22,8 @@ var (
 // returns, i.e. fn().EventType(). Use this instead of [RegisterEvent]
 // when you need explicit control over the factory, for example to
 // inject constructor arguments. It panics if fn is nil, if fn() returns
-// nil, or if an event is already registered under that name.
+// nil or a non-pointer, or if an event is already registered under that
+// name.
 //
 // Example Usage:
 //
@@ -42,7 +43,7 @@ func RegisterEventByType(fn func() Event) {
 // event's own EventType() — useful when the name a store has events
 // persisted under no longer matches the current type name, for example
 // after a rename. As with [RegisterEventByType], it panics if fn is nil,
-// if fn() returns nil, or if name is already registered.
+// if fn() returns nil or a non-pointer, or if name is already registered.
 //
 // Example Usage:
 //
@@ -128,6 +129,11 @@ func registerEventName(name string, fn func() Event) {
 	ev := fn()
 	if ev == nil {
 		panic(fmt.Sprintf("factory returned nil for event: %s", name))
+	}
+	// Events are decoded into what the factory returns, and JSON can only
+	// decode into a pointer: a value would save and then fail every read.
+	if reflect.TypeOf(ev).Kind() != reflect.Pointer {
+		panic(fmt.Sprintf("factory for event %s returns %T, not a pointer", name, ev))
 	}
 
 	registry[name] = fn
