@@ -28,6 +28,11 @@ Without a retry strategy, the conflict is returned to the caller.
 When a conflict occurs, retry by reloading events and re-deciding:
 
 ```go
+import (
+    "github.com/cenkalti/backoff/v4"
+    "github.com/terraskye/eventsourcing"
+)
+
 handler := eventsourcing.NewCommandHandler(
     store,
     initialState,
@@ -87,7 +92,7 @@ If the stream does not exist, the handler returns an error matching `ErrStreamNo
 
 | State | When to use |
 |---|---|
-| `Any{}` | Most commands: saved against the version just loaded, conflicts retried (default) |
+| `Any{}` | Most commands: saved against the version just loaded; conflicts retried if `WithRetryStrategy` is set (default) |
 | `NoStream{}` | Creation commands: the stream must not exist yet |
 | `StreamExists{}` | Updates only: the stream must already exist |
 | `Revision(N)` | The caller read the stream at version N and asserts it is still there, such as an edit made against the version a user last saw. A conflict is returned, never retried |

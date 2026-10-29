@@ -110,13 +110,12 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // [WithRetryStrategy] (default: no retries). Each call gets a BackOff of
 // its own, and its waits end when ctx is done. [NoStream] and a specific
 // [Revision] pin the stream to an exact point (version 0, or N) that the
-// caller explicitly asserted; a
-// conflict there means that expectation was violated, so it is returned
-// immediately rather than retried. A [StreamExists] load failure (the
-// stream doesn't exist yet) is likewise always returned immediately, never
-// retried — it's a fail-fast precondition, not a save conflict to converge
-// on. Any other Save or load error is also returned directly, without
-// retrying.
+// caller explicitly asserted; a conflict there means that expectation was
+// violated, so it is returned immediately rather than retried. A
+// [StreamExists] load failure (the stream doesn't exist yet) is likewise
+// always returned immediately, never retried — it's a fail-fast
+// precondition, not a save conflict to converge on. Any other Save or load
+// error is also returned directly, without retrying.
 //
 // If decide returns no events, the handler returns a successful
 // [AppendResult] without calling Save. If decide returns a non-nil error,
@@ -295,11 +294,11 @@ func NewCommandHandler[T any, C Command](
 						return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
 							fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict)
 					}
-					// The caller asserted a specific stream expectation
-					// (Revision or NoStream); a conflict means that
-					// expectation was violated, so it is reported back
-					// directly instead of being retried against a different
-					// target.
+					// The caller asserted a specific Revision; a conflict
+					// means that expectation was violated, so it is
+					// reported back directly instead of being retried
+					// against a different target. A violated NoStream is
+					// ErrStreamExists, not a conflict, and never gets here.
 					return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
 						backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict))
 				}
