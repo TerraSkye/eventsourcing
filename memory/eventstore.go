@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
@@ -134,6 +135,10 @@ func (m *EventStore) Head(ctx context.Context) (uint64, error) {
 // exactly, returning a [eventsourcing.StreamRevisionConflictError] on
 // mismatch. On success it returns an [eventsourcing.AppendResult] whose
 // NextExpectedVersion is the stream's new length.
+//
+// Save sets each event's Version to its position in the stream, ignoring
+// the caller's, and fills in OccurredAt with the current time when it is
+// zero.
 func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
 		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
@@ -178,6 +183,9 @@ func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 		name := env.Event.EventType()
 		env.Event = nil
 		env.Metadata = nil
+		if env.OccurredAt.IsZero() {
+			env.OccurredAt = time.Now()
+		}
 		records[i] = &record{env: env, name: name, payload: payload, metadata: metadata}
 	}
 
@@ -219,6 +227,7 @@ func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 	}
 
 	for _, rec := range records {
+		rec.env.Version = currentVersion + 1
 		rec.env.GlobalPosition = uint64(len(m.global)) + 1
 		m.events[streamId] = append(m.events[streamId], rec)
 		m.global = append(m.global, rec)

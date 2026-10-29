@@ -50,10 +50,8 @@ type acceptance struct {
 // checked with [GlobalReaderAcceptanceTest]. The suite never calls Close;
 // that is left to the caller, who owns store.
 //
-// Envelopes are saved with Version already set, 1 for the first event of a
-// stream and counting up, the way [eventsourcing.NewCommandHandler] fills
-// them in, so a store that relies on the caller for Version and one that
-// assigns it itself are held to the same result.
+// Envelopes are saved with Version left at zero: the store assigns it, 1
+// for the first event of a stream and counting up, whatever the caller set.
 func AcceptanceTest(t *testing.T, store eventsourcing.EventStore) {
 	t.Helper()
 
@@ -66,6 +64,8 @@ func AcceptanceTest(t *testing.T, store eventsourcing.EventStore) {
 		"StreamExistsRejectsNew":    a.saveStreamExistsRejectsNew,
 		"StreamExistsAppends":       a.saveStreamExistsAppends,
 		"AnyAppends":                a.saveAnyAppends,
+		"AssignsVersions":           a.saveAssignsVersions,
+		"FillsOccurredAt":           a.saveFillsOccurredAt,
 		"RevisionAppends":           a.saveRevisionAppends,
 		"RevisionConflict":          a.saveRevisionConflict,
 		"MixedStreamsRejected":      a.saveMixedStreamsRejected,
@@ -177,6 +177,47 @@ func (a *acceptance) saveAnyAppends(t *testing.T) {
 		t.Errorf("NextExpectedVersion = %d, want 4", res.NextExpectedVersion)
 	}
 	a.wantStreamLen(t, id, 4)
+}
+
+// saveAssignsVersions saves events with Version left at zero and with
+// Versions that are wrong, and expects the store to number them by their
+// position in the stream either way.
+func (a *acceptance) saveAssignsVersions(t *testing.T) {
+	id := newStreamID()
+	a.save(t, envelopes(id, 1, 2), eventsourcing.Any{})
+	stale := envelopes(id, 3, 2)
+	stale[0].Version, stale[1].Version = 1, 1
+	a.save(t, stale, eventsourcing.Any{})
+	wrong := envelopes(id, 5, 1)
+	wrong[0].Version = 9
+	a.save(t, wrong, eventsourcing.Revision(4))
+
+	got := a.loadStream(t, id)
+	if vs := versions(got); !slices.Equal(vs, []uint64{1, 2, 3, 4, 5}) {
+		t.Errorf("LoadStream versions = %v, want [1 2 3 4 5]", vs)
+	}
+	got = a.loadStreamFrom(t, id, eventsourcing.Revision(3))
+	if ns := payloadNs(t, got); !slices.Equal(ns, []int{4, 5}) {
+		t.Errorf("LoadStreamFrom(eventsourcing.Revision(3)) returned events %v, want [4 5]", ns)
+	}
+}
+
+// saveFillsOccurredAt checks that an event saved without OccurredAt comes
+// back with one. Whether a caller's OccurredAt is kept is up to the store:
+// KurrentDB uses the server's time.
+func (a *acceptance) saveFillsOccurredAt(t *testing.T) {
+	id := newStreamID()
+	in := envelopes(id, 1, 1)
+	in[0].OccurredAt = time.Time{}
+	a.save(t, in, eventsourcing.NoStream{})
+
+	got := a.loadStream(t, id)
+	if len(got) != 1 {
+		t.Fatalf("LoadStream returned %d events, want 1", len(got))
+	}
+	if got[0].OccurredAt.IsZero() {
+		t.Errorf("OccurredAt is zero, want the time the event was saved")
+	}
 }
 
 // saveRevisionAppends checks Revision(N) against a stream of N events, the
@@ -461,9 +502,9 @@ func newStreamID() string {
 	return "acceptance-" + uuid.NewString()
 }
 
-// envelopes returns count envelopes for stream id, with Versions starting at
-// from and payloads numbered to match, so a loaded event can be traced back
-// to the Save it came from.
+// envelopes returns count envelopes for stream id, with payloads numbered
+// from from, so a loaded event can be traced back to the Save it came from.
+// Version is left at zero for the store to assign.
 func envelopes(id string, from uint64, count int) []eventsourcing.Envelope {
 	out := make([]eventsourcing.Envelope, count)
 	for i := range out {
@@ -473,7 +514,6 @@ func envelopes(id string, from uint64, count int) []eventsourcing.Envelope {
 			StreamID:      id,
 			Event:         &acceptanceEvent{ID: id, N: int(v)},
 			Metadata:      map[string]any{"acceptance": "yes"},
-			Version:       v,
 			OccurredAt:    time.Now(),
 			CorrelationID: "chain-" + id,
 			CausationID:   uuid.NewString(),
