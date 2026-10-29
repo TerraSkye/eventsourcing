@@ -20,7 +20,7 @@ import (
 // replacement.
 //
 // Each call starts a span linked to the original producer trace (recovered
-// from the event's metadata), tagged with the event type, event ID, global
+// from the event's metadata, when it carries one), tagged with the event type, event ID, global
 // and stream position, and stream ID. It records [EventHandlerOperations] and
 // [EventHandlerDuration] for every invocation. A returned
 // [eventsourcing.SkippedEventError] is treated as an intentional, non-error
@@ -89,16 +89,21 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			}
 		}
 
-		ctx, span := tracer.Start(ctx, operation,
+		opts := []trace.SpanStartOption{
 			trace.WithSpanKind(trace.SpanKindInternal),
-			trace.WithLinks(trace.Link{
+			trace.WithAttributes(attr...),
+		}
+		// An event saved without a trace has no producer to link to; the SDK
+		// would still record an empty link for the link's attributes.
+		if originalSpanContext.IsValid() {
+			opts = append(opts, trace.WithLinks(trace.Link{
 				SpanContext: originalSpanContext,
 				Attributes: []attribute.KeyValue{
 					attribute.String("eventsourcing.link.reason", "event.consumed.from.stream"),
 				},
-			}),
-			trace.WithAttributes(attr...),
-		)
+			}))
+		}
+		ctx, span := tracer.Start(ctx, operation, opts...)
 		defer span.End()
 
 		EventHandlerOperations.Add(ctx, 1, metric.WithAttributes(metricAttr...))

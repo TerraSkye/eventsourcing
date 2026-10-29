@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -158,5 +159,53 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 					instrument, v, work, work.Seconds())
 			}
 		})
+	}
+}
+
+// TestCommandTelemetry_ResultLabels covers the result CommandsCount records
+// for each outcome, through both the middleware and the wrapper: a business
+// rule violation is "rejected", apart from a "failure".
+func TestCommandTelemetry_ResultLabels(t *testing.T) {
+	const instrument = "eventsourcing.commands.count"
+	outcomes := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"success", nil, "success"},
+		{"business rule violation", fmt.Errorf("decide: %w", eventsourcing.NewBusinessRuleViolation(errors.New("already done"))), "rejected"},
+		{"conflict", &eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}, "failure"},
+		{"store error", errors.New("connection refused"), "failure"},
+	}
+	for _, o := range outcomes {
+		forms := map[string]func() error{
+			"CommandTelemetry": func() error {
+				_, err := CommandTelemetry()(func(context.Context, eventsourcing.Command) (eventsourcing.AppendResult, error) {
+					return eventsourcing.AppendResult{}, o.err
+				})(context.Background(), panicProbeCmd{})
+				return err
+			},
+			"WithCommandTelemetry": func() error {
+				_, err := WithCommandTelemetry(func(context.Context, panicProbeCmd) (eventsourcing.AppendResult, error) {
+					return eventsourcing.AppendResult{}, o.err
+				})(context.Background(), panicProbeCmd{})
+				return err
+			},
+		}
+		for form, call := range forms {
+			t.Run(o.name+"/"+form, func(t *testing.T) {
+				from := len(durationRecorder.recordsFor(instrument))
+				if err := call(); !errors.Is(err, o.err) {
+					t.Fatalf("error = %v, want %v", err, o.err)
+				}
+				got := durationRecorder.recordsFor(instrument)[from:]
+				if len(got) != 1 {
+					t.Fatalf("recorded %d %s increments, want 1", len(got), instrument)
+				}
+				if v, _ := got[0].attrs.Value(AttrResult); v.AsString() != o.want {
+					t.Errorf("%s = %q, want %q", AttrResult, v.AsString(), o.want)
+				}
+			})
+		}
 	}
 }

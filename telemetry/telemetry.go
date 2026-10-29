@@ -49,7 +49,7 @@ const (
 	AttrHandlerName = attribute.Key("eventsourcing.handler.name")
 
 	// Result attribute for outcome labelling on counters
-	AttrResult = attribute.Key("eventsourcing.result") // "success" | "failure"
+	AttrResult = attribute.Key("eventsourcing.result") // "success" | "failure"; also "rejected" for commands and "claim_lost" for projection batches
 
 	// Error attributes
 	AttrErrorType    = attribute.Key("eventsourcing.error.type")
@@ -86,8 +86,9 @@ var (
 var (
 	// Command metrics
 
-	// CommandsCount counts commands handled, labelled by
-	// [AttrResult] ("success" or "failure").
+	// CommandsCount counts commands handled, labelled by [AttrResult]:
+	// "success", "rejected" for a [eventsourcing.BusinessRuleViolationError],
+	// or "failure".
 	CommandsCount, _ = meter.Int64Counter(
 		"eventsourcing.commands.count",
 		metric.WithDescription("Total number of commands handled, labelled by eventsourcing.result"),
