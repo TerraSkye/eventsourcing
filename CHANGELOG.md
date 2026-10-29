@@ -158,6 +158,15 @@ release may break the API; every break is listed under **Breaking**.
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
   metadata. Every read now decodes a new copy.
+- The memory store's `Save` kept the `Version` and `OccurredAt` the
+  caller set, where the other stores assign them. A `Save` with
+  `Version` left at zero, or two `Any` appends with stale versions,
+  stored versions 0 or duplicates, where Postgres stores 1 to n. A
+  `NewCommandHandler` that folded such a stream then loaded and saved
+  from the wrong `Revision`. `Save` now numbers each event by its
+  position in the stream, and fills a zero `OccurredAt` with the
+  current time. `AcceptanceTest` no longer sets `Version` on the
+  envelopes it saves, so it checks that the store assigns it.
 
 ## [0.4.1] - 2026-10-24
 
