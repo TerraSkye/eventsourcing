@@ -36,7 +36,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, withReset bool) *fixture {
 	t.Helper()
-	f := &fixture{events: memory.NewEventStore(1024), store: memory.NewProjectionStore()}
+	f := &fixture{events: memory.NewEventStore(), store: memory.NewProjectionStore()}
 	def := projection.Definition{
 		Name:         "ticks",
 		Handler:      eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error { return nil }),
