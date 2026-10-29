@@ -98,6 +98,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A projection under `SkipAlways`, or `SkipWhenLive` while live,
+  dead-lettered the events its handler was on when the runner stopped,
+  if the handler returned its context's error, and parked their stream
+  until `ReplayStream`. Those events are now left for the next run.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
