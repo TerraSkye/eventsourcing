@@ -131,6 +131,8 @@ eventsourcing.WithRetryStrategy(func() backoff.BackOff {
 })
 ```
 
+The wait between retries happens inside the handler call. Behind a `CommandBus`, that blocks every command on the same shard, so keep it short there, for example `backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)`. See [Retry behind a CommandBus](../explanation/concurrency.md#retry-behind-a-commandbus).
+
 ### WithMetadataExtractor
 
 ```go

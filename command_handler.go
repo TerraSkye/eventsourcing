@@ -377,6 +377,12 @@ func WithStreamState(state StreamState) CommandHandlerOption {
 // handler binds that BackOff to the command's ctx, so a wait between
 // retries ends when ctx is done.
 //
+// The wait between retries runs inside the handler call. Behind a
+// [CommandBus], that blocks every command on the same shard, so use a short
+// retry there, such as backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3). A
+// conflict behind a bus comes from another process, and reloading resolves
+// it without waiting.
+//
 // Usage:
 //
 //	handler := NewCommandHandler(store, initialState, evolve, decide,
