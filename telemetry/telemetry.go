@@ -112,14 +112,17 @@ var (
 
 	// EventData metrics
 
-	// EventsAppended counts events appended to streams.
+	// EventsAppended counts events appended to streams. It carries no
+	// stream ID, since one series per stream would grow without bound; the
+	// store spans carry it instead.
 	EventsAppended, _ = meter.Int64Counter(
 		"eventsourcing.events.appended",
 		metric.WithDescription("Number of events appended to streams"),
 		metric.WithUnit("{event}"),
 	)
 
-	// EventsLoaded counts events loaded from streams.
+	// EventsLoaded counts events loaded from streams, with no stream ID
+	// for the same reason as [EventsAppended].
 	EventsLoaded, _ = meter.Int64Counter(
 		"eventsourcing.events.loaded",
 		metric.WithDescription("Number of events loaded from streams"),
