@@ -69,13 +69,7 @@ type app struct {
 // Completed tasks are archived archiveAfter their completion; the
 // automation checks for due tasks every checkEvery.
 func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
-	commandBus := eventsourcing.NewCommandBus(20, 1)
-	commandBus.Use(logging.CommandLogging(logger))
-
 	store := memory.NewEventStore()
-
-	eventsourcing.Register(commandBus, completetask.NewHandler(store))
-	eventsourcing.Register(commandBus, createtask.NewHandler(store))
 
 	// The task list, kept up to date by the projection runner (Part 4).
 	list := tasklist.NewTaskList()
@@ -89,6 +83,15 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 	todo := taskstoarchive.NewProjection(archiveList)
 	todo.Logger = logger
 	archiveTodo := projection.NewRunner(todo, store, memory.NewProjectionStore())
+
+	// Middleware applies to the handlers registered after it, so it comes
+	// first.
+	commandBus := eventsourcing.NewCommandBus(20, 1)
+	commandBus.Use(logging.CommandLogging(logger))
+	commandBus.Use(nudge(taskList, archiveTodo))
+
+	eventsourcing.Register(commandBus, completetask.NewHandler(store))
+	eventsourcing.Register(commandBus, createtask.NewHandler(store))
 
 	archive := archivetasks.NewAutomation(archiveList, archiveTodo, archivetask.NewHandler(store))
 	archive.Logger = logger
@@ -109,6 +112,24 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 			commandBus.Stop()
 			store.Close()
 		},
+	}
+}
+
+// nudge returns command bus middleware that wakes runners after every
+// command that appended events. A runner otherwise reads new events on its
+// next poll, up to a second later, and the HTTP handlers wait for the task
+// list to have the command's events before they answer.
+func nudge(runners ...*projection.Runner) eventsourcing.CommandHandlerMiddleware {
+	return func(next eventsourcing.CommandHandler[eventsourcing.Command]) eventsourcing.CommandHandler[eventsourcing.Command] {
+		return func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
+			result, err := next(ctx, cmd)
+			if err == nil {
+				for _, r := range runners {
+					r.Nudge()
+				}
+			}
+			return result, err
+		}
 	}
 }
 
