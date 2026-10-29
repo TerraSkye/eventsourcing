@@ -17,7 +17,10 @@ import (
 // create, list, complete, complete again, and the archive that follows.
 func TestWalkthrough(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	a := newApp(slog.New(slog.NewTextHandler(io.Discard, nil)), 100*time.Millisecond, 50*time.Millisecond)
+	// The completed task must still be listed right after it completes, so
+	// the archive delay has to outlast completing and listing it.
+	const archiveAfter = 500 * time.Millisecond
+	a := newApp(slog.New(slog.NewTextHandler(io.Discard, nil)), archiveAfter, 50*time.Millisecond)
 	defer a.close()
 
 	ctx := t.Context()
@@ -43,11 +46,19 @@ func TestWalkthrough(t *testing.T) {
 		t.Fatalf("list after create: got %+v, want one open task %s", got, created.TaskID)
 	}
 
-	// Complete it; again the list reflects it at once.
+	// Complete it; again the list reflects it at once. The command nudges
+	// the runners, so this takes milliseconds, not a poll interval: were it
+	// to take the archive delay, the task could be archived before it is
+	// listed.
+	completing := time.Now()
 	if resp := post(t, tasks+"/"+created.TaskID+"/complete", ""); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("complete: got status %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
-	if got := list(t, tasks); len(got) != 1 || !got[0].Completed {
+	got := list(t, tasks)
+	if took := time.Since(completing); took >= archiveAfter {
+		t.Fatalf("complete and list took %v, want less than the archive delay %v", took, archiveAfter)
+	}
+	if len(got) != 1 || !got[0].Completed {
 		t.Fatalf("list after complete: got %+v, want the task completed", got)
 	}
 
