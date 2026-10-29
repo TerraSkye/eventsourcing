@@ -13,7 +13,7 @@ var (
 	// required for a stream that already exists.
 	ErrStreamExists = errors.New("stream already exists")
 	// ErrInvalidEventBatch is returned by [EventStore.Save] when the given
-	// envelopes do not all share the same stream ID.
+	// envelopes do not all share the same stream ID, or one has no EventID.
 	ErrInvalidEventBatch = errors.New("invalid event batch")
 	// ErrHandlerNotFound is returned by a [QueryBus] when no [QueryHandler]
 	// is registered for a query's type.

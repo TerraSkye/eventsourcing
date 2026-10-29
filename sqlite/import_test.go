@@ -73,7 +73,7 @@ func TestImport_CopiesTheLogInOrder(t *testing.T) {
 func TestImport_RefusesAnOccupiedStream(t *testing.T) {
 	src := memory.NewEventStore()
 	t.Cleanup(func() { src.Close() })
-	if _, err := src.Save(t.Context(), []eventsourcing.Envelope{{StreamID: "task-1", Event: &taskCreated{ID: "1"}}}, eventsourcing.NoStream{}); err != nil {
+	if _, err := src.Save(t.Context(), []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: "task-1", Event: &taskCreated{ID: "1"}}}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("Save to source: %v", err)
 	}
 	dst := sqlite.NewEventStore(openDB(t, ":memory:"))

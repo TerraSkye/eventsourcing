@@ -784,7 +784,7 @@ func TestClose_LeavesGlobalEventsAccessible(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := store.Save(ctx, []eventsourcing.Envelope{
-		{StreamID: "s1", Event: &closeTestEvent{ID: "s1"}, Version: 1},
+		{EventID: uuid.New(), StreamID: "s1", Event: &closeTestEvent{ID: "s1"}, Version: 1},
 	}, eventsourcing.NoStream{}); err != nil {
 		t.Fatalf("save failed: %v", err)
 	}
@@ -825,6 +825,7 @@ func TestSave_ReusedCallerSliceCorruptsAllPreviouslySavedEnvelopes(t *testing.T)
 
 	for i, id := range []string{"agg-1", "agg-2", "agg-3"} {
 		buf[0] = eventsourcing.Envelope{
+			EventID:  uuid.New(),
 			StreamID: id,
 			Event:    &aliasTestEvent{ID: id, Value: id},
 			Version:  uint64(i + 1),

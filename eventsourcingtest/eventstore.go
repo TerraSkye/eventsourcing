@@ -69,6 +69,7 @@ func AcceptanceTest(t *testing.T, store eventsourcing.EventStore) {
 		"RevisionAppends":           a.saveRevisionAppends,
 		"RevisionConflict":          a.saveRevisionConflict,
 		"MixedStreamsRejected":      a.saveMixedStreamsRejected,
+		"MissingEventIDRejected":    a.saveMissingEventIDRejected,
 		"ConcurrentRevisionOneWins": a.saveConcurrentRevisionOneWins,
 	})
 	a.group(t, "LoadStream", map[string]func(*testing.T){
@@ -225,6 +226,17 @@ func (a *acceptance) saveMixedStreamsRejected(t *testing.T) {
 	}
 	a.wantStreamLen(t, first, 0)
 	a.wantStreamLen(t, second, 0)
+}
+
+func (a *acceptance) saveMissingEventIDRejected(t *testing.T) {
+	id := newStreamID()
+	batch := envelopes(id, 1, 2)
+	batch[1].EventID = uuid.Nil
+	_, err := a.store.Save(t.Context(), batch, eventsourcing.Any{})
+	if !errors.Is(err, eventsourcing.ErrInvalidEventBatch) {
+		t.Errorf("Save of a batch with an event without EventID: err = %v, want %v", err, eventsourcing.ErrInvalidEventBatch)
+	}
+	a.wantStreamLen(t, id, 0)
 }
 
 // saveConcurrentRevisionOneWins races several writers that all loaded the

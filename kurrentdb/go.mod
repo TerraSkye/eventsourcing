@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/cenkalti/backoff/v4 v4.3.0
+	github.com/google/uuid v1.6.0
 	github.com/kurrent-io/KurrentDB-Client-Go v1.1.0
 	github.com/terraskye/eventsourcing v0.4.1
 	github.com/testcontainers/testcontainers-go v0.42.0
@@ -29,7 +30,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect

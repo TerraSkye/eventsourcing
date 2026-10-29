@@ -30,7 +30,11 @@ import (
 //	return it.Err()
 type EventStore interface {
 	// Save appends events to the stream identified by their common StreamID,
-	// which must be the same across every element of events. revision states
+	// which must be the same across every element of events. Every event
+	// must carry its EventID: a store does not make one up, since an ID
+	// made per attempt cannot tell a retried append from a new one. Save
+	// returns [ErrInvalidEventBatch] for a batch that breaks either rule.
+	// revision states
 	// the caller's expectation of the stream's current state — [Any] to
 	// append unconditionally, [NoStream] to require the stream not already
 	// exist, [StreamExists] to require that it does, or a specific [Revision]

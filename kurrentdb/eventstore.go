@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/google/uuid"
 	"github.com/kurrent-io/KurrentDB-Client-Go/kurrentdb"
 	"github.com/terraskye/eventsourcing"
 	"google.golang.org/grpc/codes"
@@ -121,6 +122,12 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 					"save events to stream %q: %w: event %d has different stream ID %q",
 					streamID, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
 				)
+		}
+		if env.EventID == uuid.Nil {
+			return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has no event ID",
+				streamID, eventsourcing.ErrInvalidEventBatch, i,
+			)
 		}
 	}
 
