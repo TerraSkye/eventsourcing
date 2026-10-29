@@ -20,7 +20,13 @@ release may break the API; every break is listed under **Breaking**.
   a failed load, which used to record none, and a failed append, which
   used to be counted only in `eventstore.errors`. Filter on
   `eventsourcing.result="success"` to keep latency percentiles as they
-  were. Update dashboards and alerts:
+  were. A load's duration used to run from the iterator's first step
+  until it closed: it missed the open call, where the Postgres and
+  SQLite stores run their query (SQLite reads the whole stream there),
+  and it counted the caller's work between events. It now counts only
+  the time spent in the store, the open call and each step; the `load
+  events` span runs from the open call until the iterator closes, and a
+  load that fails to open or closes before its first step gets one too. Update dashboards and alerts:
 
   | Before | After |
   |---|---|

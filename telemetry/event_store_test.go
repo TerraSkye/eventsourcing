@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/terraskye/eventsourcing"
 )
@@ -418,6 +420,120 @@ func TestEventStore_Metrics(t *testing.T) {
 			}
 			if n := len(rec.recordsFor(appended)[fromAppended:]); n != tt.wantAppended {
 				t.Errorf("recorded %d %s increments, want %d", n, appended, tt.wantAppended)
+			}
+		})
+	}
+}
+
+// slowOpenStore is a stubStore whose LoadStream and LoadStreamFrom take
+// delay before they return, as SQLite does when it reads a whole stream at
+// open, and fail with openErr when it is set.
+type slowOpenStore struct {
+	stubStore
+	delay   time.Duration
+	openErr error
+}
+
+func (s *slowOpenStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	time.Sleep(s.delay)
+	if s.openErr != nil {
+		return nil, s.openErr
+	}
+	return s.stubStore.LoadStream(ctx, id)
+}
+
+func (s *slowOpenStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	time.Sleep(s.delay)
+	if s.openErr != nil {
+		return nil, s.openErr
+	}
+	return s.stubStore.LoadStreamFrom(ctx, id, version)
+}
+
+// TestEventStore_LoadDuration covers what a load records: the duration
+// counts the open call, where the SQL stores do their work, but not the
+// caller's work between events, and every load gets a "load events" span,
+// one that fails to open or closes before its first advance included.
+func TestEventStore_LoadDuration(t *testing.T) {
+	const instrument = "eventsourcing.event_store.duration"
+	const open, work = 50 * time.Millisecond, 50 * time.Millisecond
+	ctx := context.Background()
+	boom := errors.New("connection refused")
+
+	loads := func(from int) []histRecord {
+		var out []histRecord
+		for _, r := range durationRecorder.recordsFor(instrument)[from:] {
+			if attrString(r.attrs, AttrEventStoreOperation) == "load" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	forms := map[string]func(eventsourcing.EventStore) (*eventsourcing.Iterator[*eventsourcing.Envelope], error){
+		"LoadStream": func(s eventsourcing.EventStore) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return s.LoadStream(ctx, "agg-1")
+		},
+		"LoadStreamFrom": func(s eventsourcing.EventStore) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return s.LoadStreamFrom(ctx, "agg-1", eventsourcing.Any{})
+		},
+	}
+	for form, load := range forms {
+		t.Run(form+"/open counted, consumer not", func(t *testing.T) {
+			store := WithEventStoreTelemetry(&slowOpenStore{stubStore: stubStore{events: envelopes(3)}, delay: open})
+			from, spans := len(durationRecorder.recordsFor(instrument)), spanNameRecorder.len()
+
+			it, err := load(store)
+			if err != nil {
+				t.Fatalf("%s() error = %v", form, err)
+			}
+			for it.Next() {
+				time.Sleep(work) // the caller's own work
+			}
+			if err := it.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			got := loads(from)
+			if len(got) != 1 {
+				t.Fatalf("recorded %d loads, want 1", len(got))
+			}
+			if v := got[0].value; v < open.Seconds() || v >= (open+work).Seconds() {
+				t.Errorf("load duration = %.3fs, want the %v open call without the 3 x %v of work", v, open, work)
+			}
+			if names := spanNameRecorder.since(spans); !slices.Equal(names, []string{"load events"}) {
+				t.Errorf("spans = %v, want [load events]", names)
+			}
+		})
+
+		t.Run(form+"/failed open", func(t *testing.T) {
+			store := WithEventStoreTelemetry(&slowOpenStore{openErr: boom})
+			from, spans := len(durationRecorder.recordsFor(instrument)), spanNameRecorder.len()
+
+			if _, err := load(store); !errors.Is(err, boom) {
+				t.Fatalf("%s() error = %v, want %v", form, err, boom)
+			}
+			got := loads(from)
+			if len(got) != 1 || attrString(got[0].attrs, AttrResult) != "failure" {
+				t.Errorf("loads = %v, want one with result failure", got)
+			}
+			if names := spanNameRecorder.since(spans); !slices.Equal(names, []string{"load events"}) {
+				t.Errorf("spans = %v, want [load events]", names)
+			}
+		})
+
+		t.Run(form+"/closed before the first advance", func(t *testing.T) {
+			store := WithEventStoreTelemetry(&slowOpenStore{stubStore: stubStore{events: envelopes(3)}})
+			from := len(durationRecorder.recordsFor(instrument))
+
+			it, err := load(store)
+			if err != nil {
+				t.Fatalf("%s() error = %v", form, err)
+			}
+			if err := it.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if got := loads(from); len(got) != 1 || attrString(got[0].attrs, AttrResult) != "success" {
+				t.Errorf("loads = %v, want one with result success", got)
 			}
 		})
 	}

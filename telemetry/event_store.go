@@ -134,108 +134,76 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 }
 
 // LoadStream loads the stream id from the underlying
-// [eventsourcing.EventStore]. If the initial call fails, it records
-// [EventStoreDuration] with result "failure" and returns immediately.
-// Otherwise it returns an iterator that, on its first advance, starts a
-// client span tagged with the stream ID; each yielded event increments
+// [eventsourcing.EventStore], as [EventStore.load] describes.
+func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return t.load(ctx, []attribute.KeyValue{AttrStreamID.String(id)}, func(ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+		return t.next.LoadStream(ctx, id)
+	})
+}
+
+// LoadStreamFrom loads stream id from version onward from the underlying
+// [eventsourcing.EventStore], as [EventStore.load] describes, additionally
+// tagging the span with the requested version.
+func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	return t.load(ctx, []attribute.KeyValue{AttrStreamID.String(id), AttrStreamVersion.Int64(version.ToRawInt64())}, func(ctx context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+		return t.next.LoadStreamFrom(ctx, id, version)
+	})
+}
+
+// load opens a stream with open inside a "load events" client span tagged
+// with attrs, and returns an iterator over it; each yielded event increments
 // [EventStoreLoaded].
+//
+// The span runs from the open call until the iterator closes: the wall time
+// of the load, the caller's own work between events included.
+// [EventStoreDuration] records only the time spent in the store: the open
+// call, where the SQL stores run their query and SQLite reads the whole
+// stream, plus the time inside each advance of the underlying iterator. So
+// a slow consumer shows in the trace, not in the store's latency.
 //
 // The returned iterator owns the underlying one: closing it — by reading to
 // the end, by failing, or by an explicit Close — closes the underlying
 // iterator, ends the span, and records [EventStoreDuration], labelled by
-// whether the load failed. A caller that stops early is
-// therefore instrumented like any other, provided it closes the iterator.
-func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+// whether the load failed. A load that fails to open is recorded the same
+// way. A caller that stops early is therefore instrumented like any other,
+// provided it closes the iterator.
+func (t EventStore) load(ctx context.Context, attrs []attribute.KeyValue, open func(context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error)) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	spanAttrs := append(t.baseAttrs(), AttrEventStoreOperation.String("load"))
+	// Keep the span's context for the metrics recorded below, so they are
+	// attributed to the span rather than to ctx alone.
+	spanCtx, span := tracer.Start(ctx, "load events",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(append(spanAttrs, attrs...)...),
+	)
+
 	calledAt := time.Now()
-	src, err := t.next.LoadStream(ctx, id)
+	src, err := open(spanCtx)
+	inStore := time.Since(calledAt)
+	var eventCount int64
+	done := func(err error) {
+		span.SetAttributes(AttrEventCount.Int64(eventCount))
+		EventStoreDuration.Record(spanCtx, inStore.Seconds(), t.metricAttrs("load", err))
+		if err != nil {
+			span.SetAttributes(AttrErrorType.String(errorType(err)))
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}
 	if err != nil {
-		EventStoreDuration.Record(ctx, time.Since(calledAt).Seconds(), t.metricAttrs("load", err))
+		done(err)
 		return src, err
 	}
 
-	var (
-		startedAt time.Time
-		span      trace.Span
-		spanCtx   = ctx
-	)
-
 	return eventsourcing.Wrap(src,
 		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
-			if span == nil {
-				startedAt = time.Now()
-				spanAttrs := append(t.baseAttrs(),
-					AttrEventStoreOperation.String("load"),
-					AttrStreamID.String(id),
-				)
-				// Keep the span's context for the metrics recorded below, so
-				// they are attributed to the span rather than to ctx alone.
-				spanCtx, span = tracer.Start(ctx, "load events",
-					trace.WithSpanKind(trace.SpanKindClient),
-					trace.WithAttributes(spanAttrs...),
-				)
-			}
-
-			if !src.Next() {
+			advancedAt := time.Now()
+			ok := src.Next()
+			inStore += time.Since(advancedAt)
+			if !ok {
 				// io.EOF, not src.Err(): the source's failure reaches this
-				// iterator through Close, and the done function below sees
-				// it. Returning it here as well would report it twice.
-				return nil, io.EOF
-			}
-
-			EventStoreLoaded.Add(spanCtx, 1, metric.WithAttributes(t.dbSystem()...))
-			return src.Value(), nil
-		},
-		func(err error) {
-			if span == nil {
-				// Closed before the first advance: no span was started, so
-				// there is no load to report.
-				return
-			}
-			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
-			if err != nil {
-				span.SetAttributes(AttrErrorType.String(errorType(err)))
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			}
-			span.End()
-		}), nil
-}
-
-// LoadStreamFrom loads stream id from version onward from the underlying
-// [eventsourcing.EventStore]. It behaves like [EventStore.LoadStream],
-// additionally tagging the span with the requested version and, once the
-// iterator closes, with the number of events yielded.
-func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	calledAt := time.Now()
-	src, err := t.next.LoadStreamFrom(ctx, id, version)
-	if err != nil {
-		EventStoreDuration.Record(ctx, time.Since(calledAt).Seconds(), t.metricAttrs("load", err))
-		return src, err
-	}
-
-	var (
-		startedAt  time.Time
-		span       trace.Span
-		spanCtx    = ctx
-		eventCount int64
-	)
-
-	return eventsourcing.Wrap(src,
-		func(ctx context.Context, src *eventsourcing.Iterator[*eventsourcing.Envelope]) (*eventsourcing.Envelope, error) {
-			if span == nil {
-				startedAt = time.Now()
-				spanAttrs := append(t.baseAttrs(),
-					AttrEventStoreOperation.String("load"),
-					AttrStreamID.String(id),
-					AttrStreamVersion.Int64(version.ToRawInt64()),
-				)
-				spanCtx, span = tracer.Start(ctx, "load events",
-					trace.WithSpanKind(trace.SpanKindClient),
-					trace.WithAttributes(spanAttrs...),
-				)
-			}
-
-			if !src.Next() {
+				// iterator through Close, and done sees it. Returning it
+				// here as well would report it twice.
 				return nil, io.EOF
 			}
 
@@ -243,19 +211,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 			EventStoreLoaded.Add(spanCtx, 1, metric.WithAttributes(t.dbSystem()...))
 			return src.Value(), nil
 		},
-		func(err error) {
-			if span == nil {
-				return
-			}
-			span.SetAttributes(AttrEventCount.Int64(eventCount))
-			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
-			if err != nil {
-				span.SetAttributes(AttrErrorType.String(errorType(err)))
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
-			}
-			span.End()
-		}), nil
+		done), nil
 }
 
 // telemetryGlobalStore is an [EventStore] around a store that also

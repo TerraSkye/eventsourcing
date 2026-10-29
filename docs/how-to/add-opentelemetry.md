@@ -67,7 +67,7 @@ same `error.type`.
 | `eventsourcing.query.duration` | histogram | Query handling time, by `eventsourcing.query.type`, `eventsourcing.result` and `error.type` |
 | `eventsourcing.query.active` | up-down counter | Queries being handled, by `eventsourcing.query.type` |
 | `eventsourcing.event_handler.duration` | histogram | Event handler time, by `eventsourcing.event.type`, `eventsourcing.result` (`success`, `skipped`, `failure`), `error.type` and, under a runner, `eventsourcing.projection.name` |
-| `eventsourcing.event_store.duration` | histogram | Store operation time, by `eventsourcing.event_store.operation` (`append`, `load`, `read_all`), `eventsourcing.result`, `error.type` and `db.system.name`. Failed loads and appends are included, so filter on `eventsourcing.result="success"` for latency |
+| `eventsourcing.event_store.duration` | histogram | Store operation time, by `eventsourcing.event_store.operation` (`append`, `load`, `read_all`), `eventsourcing.result`, `error.type` and `db.system.name`. Failed loads and appends are included, so filter on `eventsourcing.result="success"` for latency. A load counts the time spent in the store, the open call and each step of the iterator, not the caller's work between events; its `load events` span runs from the open call until the iterator closes |
 | `eventsourcing.event_store.appended.events` | counter | Events appended by appends that succeeded, by `db.system.name` |
 | `eventsourcing.event_store.loaded.events` | counter | Events loaded from streams and the global log, by `db.system.name` |
 
