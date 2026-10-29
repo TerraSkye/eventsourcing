@@ -19,7 +19,7 @@ Step-by-step guides to learn event sourcing by building a real application.
 - [Part 5: Background Processing](./tutorials/05-background-processing.md) — automations that work off a todo list
 
 A runnable version of everything built across these parts lives in
-[`examples/todolist`](../examples/todolist/README.md).
+[`examples/todolist`](https://github.com/TerraSkye/eventsourcing/tree/master/examples/todolist).
 
 ---
 
@@ -31,7 +31,6 @@ Practical recipes for specific tasks.
 - [Handle concurrency conflicts with optimistic locking](./how-to/handle-concurrency.md)
 - [Add metadata to events](./how-to/add-event-metadata.md)
 - [Customise stream names (multi-tenancy)](./how-to/custom-stream-names.md)
-- [Retry commands on conflict](./how-to/retry-on-conflict.md)
 - [The aggregate variant — when to use it and when not to](./how-to/share-state-with-aggregate.md)
 
 **Events**
@@ -39,13 +38,13 @@ Practical recipes for specific tasks.
 - [Version events when the schema changes](./how-to/version-events.md)
 
 **Queries**
-- [Build a live read model](./how-to/live-read-model.md)
-- [Build a cached projection](./how-to/cached-projection.md)
+- [Build a projection](./how-to/cached-projection.md)
+- [Rebuild a projection without downtime](./how-to/rebuild-without-downtime.md)
 
 **Infrastructure**
 - [Use KurrentDB as the event store](./how-to/use-kurrentdb.md)
 - [Add OpenTelemetry tracing](./how-to/add-opentelemetry.md)
-- [Add structured logging](./how-to/add-logging.md)
+- [Use middleware, such as structured logging](./how-to/use-middleware.md)
 - [Test event-sourced code](./how-to/test-event-sourced-code.md)
 
 ---
@@ -67,7 +66,8 @@ Complete API documentation.
 - **Implementations**
   - [memory.EventStore](./reference/implementations/memory-store.md)
   - [postgres.EventStore](./reference/implementations/postgres-store.md)
-  - [kurrentdb.EventStore](./reference/implementations/kurrentdb-store.md)
+  - [sqlite.EventStore](./reference/implementations/sqlite.md)
+  - kurrentdb.EventStore: see [Use KurrentDB as the event store](./how-to/use-kurrentdb.md)
 
 ---
 
