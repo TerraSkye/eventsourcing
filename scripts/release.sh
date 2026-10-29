@@ -129,11 +129,14 @@ tag_modules() {
 		tags+=("$dir/$v")
 	done
 
-	# Check the commit being tagged, not the working tree.
+	# Check the commit being tagged, not the working tree. check runs as a
+	# function in a subshell inside that worktree, so the commit does not
+	# need to contain this script. The trap expands $tmp now: it runs at
+	# exit, after this function's locals are gone.
 	tmp=$(mktemp -d)
-	trap 'git worktree remove --force "$tmp"' EXIT
+	trap "git worktree remove --force '$tmp'" EXIT
 	git worktree add -q --detach "$tmp" origin/master
-	(cd "$tmp" && ./scripts/release.sh check)
+	(cd "$tmp" && check)
 
 	for tag in "${tags[@]}"; do
 		git tag -a "$tag" -m "$tag" origin/master
