@@ -278,6 +278,7 @@ GOWORK=off go test -race ./...
 
 # docs
 pip install -r requirements-docs.txt && mkdocs serve
+mkdocs build --strict   # what CI runs on pull requests
 ```
 
 The repository's `go.work` points the nested modules at the local root; outside the repository they resolve the published version.
