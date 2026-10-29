@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
@@ -14,9 +15,9 @@ import (
 
 // QueryTelemetry returns an [eventsourcing.QueryHandlerMiddleware] that
 // instruments every query dispatched through the bus with OpenTelemetry
-// tracing and metrics. Use it with [eventsourcing.QueryBus.Use] to apply
-// telemetry to all registered handlers; the query type name is resolved at
-// dispatch time from the concrete type.
+// tracing and metrics, as [WithQueryTelemetry] describes. Use it with
+// [eventsourcing.QueryBus.Use] to apply telemetry to all registered
+// handlers; the query type is resolved at dispatch time from the query.
 func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 	cfg := &config{}
 	for _, o := range options {
@@ -25,52 +26,9 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 
 	return func(next eventsourcing.QueryGateway[eventsourcing.Query, any]) eventsourcing.QueryGateway[eventsourcing.Query, any] {
 		return func(ctx context.Context, qry eventsourcing.Query) (any, error) {
-			queryType := fmt.Sprintf("%T", qry)
-			queryID := string(qry.ID())
-
-			baseAttributes := []attribute.KeyValue{
-				AttrQueryType.String(queryType),
-				AttrQueryID.String(queryID),
-			}
-			baseAttributes = append(baseAttributes, cfg.Attributes...)
-			if cfg.GetAttributes != nil {
-				baseAttributes = append(baseAttributes, cfg.GetAttributes(ctx)...)
-			}
-
-			operation := fmt.Sprintf("query.handle %s", queryType)
-			if cfg.Operation != "" {
-				operation = cfg.Operation
-			}
-			if cfg.GetOperation != nil {
-				if op := cfg.GetOperation(ctx, operation); op != "" {
-					operation = op
-				}
-			}
-
-			ctx, span := tracer.Start(ctx, operation,
-				trace.WithSpanKind(trace.SpanKindInternal),
-				trace.WithAttributes(baseAttributes...),
-			)
-			defer span.End()
-
-			QueriesProcessing.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType)))
-			defer QueriesProcessing.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(queryType)))
-
-			startTime := time.Now()
-			result, err := next(ctx, qry)
-
-			QueriesDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrQueryType.String(queryType)))
-
-			if err != nil {
-				span.SetStatus(codes.Error, err.Error())
-				span.RecordError(err)
-				QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType), AttrResult.String("failure")))
-				return result, err
-			}
-
-			span.SetStatus(codes.Ok, "")
-			QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(queryType), AttrResult.String("success")))
-			return result, nil
+			return handleQuery(ctx, cfg, queryTypeName(qry), qry, func(ctx context.Context) (any, error) {
+				return next(ctx, qry)
+			})
 		}
 	}
 }
@@ -79,83 +37,96 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 // returning an [eventsourcing.QueryHandler] of the same type that can be
 // used as a drop-in replacement.
 //
-// Each call to the returned handler's HandleQuery starts a span covering the
-// full invocation of next, tagged with the query type and query ID. It also
-// records [QueriesProcessing] (in-flight queries), [QueriesDuration], and
-// [QueriesCount] labelled by [AttrResult].
+// Each call to the returned handler's HandleQuery starts a span named
+// "handle" followed by the query type, such as "handle queries.GetTask",
+// covering the full invocation of next and tagged with the query type and
+// query ID. It also records [QueryActive] (in-flight queries) and
+// [QueryDuration] labelled by [AttrResult], and on a failure by
+// [AttrErrorType].
 //
 //	handler := WithQueryTelemetry(myQueryHandler)
 //	result, err := handler.HandleQuery(ctx, myQuery)
 func WithQueryTelemetry[T eventsourcing.Query, R any](next eventsourcing.QueryHandler[T, R], options ...Option) eventsourcing.QueryHandler[T, R] {
-	var zero T
-	queryType := fmt.Sprintf("%T", zero)
-
 	cfg := &config{}
 
 	for _, o := range options {
 		o.apply(cfg)
 	}
 	return &telemetryQueryHandler[T, R]{
-		next:      next,
-		queryType: queryType,
-		cfg:       cfg,
+		next: next,
+		cfg:  cfg,
 	}
 }
 
 type telemetryQueryHandler[T eventsourcing.Query, R any] struct {
-	next      eventsourcing.QueryHandler[T, R]
-	queryType string
-	cfg       *config
+	next eventsourcing.QueryHandler[T, R]
+	cfg  *config
 }
 
+// HandleQuery reads the query's type from qry, not from T: T may be an
+// interface, such as [eventsourcing.Query], whose zero value has no type.
 func (h *telemetryQueryHandler[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
+	var result R
+	_, err := handleQuery(ctx, h.cfg, queryTypeName(qry), qry, func(ctx context.Context) (any, error) {
+		var err error
+		result, err = h.next.HandleQuery(ctx, qry)
+		return result, err
+	})
+	return result, err
+}
 
-	baseAttributes := []attribute.KeyValue{
-		AttrQueryType.String(h.queryType),
+// queryTypeName returns the name a query's type is reported under: its Go
+// type without a leading pointer, such as "queries.GetTask".
+func queryTypeName(qry any) string {
+	return strings.TrimPrefix(fmt.Sprintf("%T", qry), "*")
+}
+
+// handleQuery runs next under a span and records its outcome, for both
+// [QueryTelemetry] and [WithQueryTelemetry].
+func handleQuery(ctx context.Context, cfg *config, queryType string, qry eventsourcing.Query, next func(context.Context) (any, error)) (any, error) {
+	attr := []attribute.KeyValue{
+		AttrQueryType.String(queryType),
 		AttrQueryID.String(string(qry.ID())),
 	}
-	baseAttributes = append(baseAttributes, h.cfg.Attributes...)
-
-	if h.cfg.GetAttributes != nil {
-		baseAttributes = append(baseAttributes, h.cfg.GetAttributes(ctx)...)
+	attr = append(attr, cfg.Attributes...)
+	if cfg.GetAttributes != nil {
+		attr = append(attr, cfg.GetAttributes(ctx)...)
 	}
 
-	defaultOperation := "handle query"
-
-	if h.cfg.Operation != "" {
-		defaultOperation = h.cfg.Operation
+	operation := "handle " + queryType
+	if cfg.Operation != "" {
+		operation = cfg.Operation
 	}
-
-	if h.cfg.GetOperation != nil {
-		if op := h.cfg.GetOperation(ctx, defaultOperation); op != "" {
-			defaultOperation = op
+	if cfg.GetOperation != nil {
+		if op := cfg.GetOperation(ctx, operation); op != "" {
+			operation = op
 		}
 	}
 
-	ctx, span := tracer.Start(ctx, defaultOperation,
+	ctx, span := tracer.Start(ctx, operation,
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(baseAttributes...),
+		trace.WithAttributes(attr...),
 	)
 	defer span.End()
 
-	QueriesProcessing.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
-	defer QueriesProcessing.Add(ctx, -1, metric.WithAttributes(AttrQueryType.String(h.queryType)))
+	typeAttr := AttrQueryType.String(queryType)
+	QueryActive.Add(ctx, 1, metric.WithAttributes(typeAttr))
+	defer QueryActive.Add(ctx, -1, metric.WithAttributes(typeAttr))
 
 	startTime := time.Now()
-	result, err := h.next.HandleQuery(ctx, qry)
+	result, err := next(ctx)
+	duration := time.Since(startTime).Seconds()
 
-	// Record duration metric
-	QueriesDuration.Record(ctx, time.Since(startTime).Seconds(), metric.WithAttributes(AttrQueryType.String(h.queryType)))
-
+	metricAttrs := []attribute.KeyValue{typeAttr, AttrResult.String("success")}
 	if err != nil {
+		errType := AttrErrorType.String(errorType(err))
+		metricAttrs = []attribute.KeyValue{typeAttr, AttrResult.String("failure"), errType}
+		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-		QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType), AttrResult.String("failure")))
-		return result, err
+	} else {
+		span.SetStatus(codes.Ok, "")
 	}
-
-	span.SetStatus(codes.Ok, "")
-	QueriesCount.Add(ctx, 1, metric.WithAttributes(AttrQueryType.String(h.queryType), AttrResult.String("success")))
-
-	return result, nil
+	QueryDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
+	return result, err
 }
