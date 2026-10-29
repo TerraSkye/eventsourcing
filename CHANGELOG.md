@@ -93,6 +93,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- The KurrentDB store's `Save` left an empty `EventID` to the client,
+  which made a new one on every retry attempt. An append that committed
+  but lost its response was then appended a second time under `Any`, or
+  reported as a conflict under `Revision`. `Save` now assigns the ID
+  once, before it retries, as the Postgres and SQLite stores do.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
