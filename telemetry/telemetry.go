@@ -1,6 +1,9 @@
 package telemetry
 
 import (
+	"context"
+	"errors"
+
 	"github.com/terraskye/eventsourcing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -47,9 +50,20 @@ const (
 	AttrQueryID   = attribute.Key("eventsourcing.query.id")
 
 	// AttrResult labels an outcome: "success" or "failure", and also
-	// "rejected" for a command, "skipped" for an event handler and
-	// "claim_lost" for a projection batch.
+	// "rejected" for a command, "skipped" for an event handler,
+	// "claim_lost" for a projection batch, and "acquired" or "held" for a
+	// projection claim.
 	AttrResult = attribute.Key("eventsourcing.result")
+
+	// AttrErrorType classifies a failure, following the OpenTelemetry
+	// semantic conventions: it is set on the span and the duration metric
+	// of an operation that failed, and never on one that succeeded. See
+	// [errorType] for its values.
+	AttrErrorType = attribute.Key("error.type")
+
+	// AttrLinkReason says why an event handler span links to the span of
+	// the command that appended its event.
+	AttrLinkReason = attribute.Key("eventsourcing.link.reason")
 
 	// AttrErrorMessage carries the cause of a business rule violation on a
 	// command span.
@@ -60,11 +74,10 @@ const (
 	AttrProjectionSegment  = attribute.Key("eventsourcing.projection.segment")
 	AttrProjectionPosition = attribute.Key("eventsourcing.projection.position")
 	AttrProjectionPhase    = attribute.Key("eventsourcing.projection.phase")
-	AttrClaimResult        = attribute.Key("eventsourcing.projection.claim.result") // "acquired" | "held" | "error"
 
-	// AttrOperation names the event store operation: "save", "load" or
-	// "read_all".
-	AttrOperation = attribute.Key("eventsourcing.operation")
+	// AttrEventStoreOperation names the event store operation: "append",
+	// "load" or "read_all".
+	AttrEventStoreOperation = attribute.Key("eventsourcing.event_store.operation")
 )
 
 // meter and tracer are the shared OpenTelemetry instruments used by every
@@ -85,7 +98,8 @@ var (
 	// CommandDuration records command handling duration, in seconds,
 	// labelled by [AttrCommandType] and [AttrResult]: "success",
 	// "rejected" for a [eventsourcing.BusinessRuleViolationError], or
-	// "failure". Its count is the number of commands handled.
+	// "failure" with [AttrErrorType], "stream_revision_conflict" for a
+	// concurrency conflict. Its count is the number of commands handled.
 	CommandDuration, _ = meter.Float64Histogram(
 		"eventsourcing.command.duration",
 		metric.WithDescription("Command handling duration, labelled by eventsourcing.result"),
@@ -100,19 +114,11 @@ var (
 		metric.WithUnit("{command}"),
 	)
 
-	// CommandConflicts counts commands that failed with a
-	// [eventsourcing.StreamRevisionConflictError].
-	CommandConflicts, _ = meter.Int64Counter(
-		"eventsourcing.command.conflicts",
-		metric.WithDescription("Number of commands that failed with a concurrency conflict"),
-		metric.WithUnit("{conflict}"),
-	)
-
 	// Query metrics
 
 	// QueryDuration records query handling duration, in seconds, labelled
-	// by [AttrQueryType] and [AttrResult] ("success" or "failure"). Its
-	// count is the number of queries handled.
+	// by [AttrQueryType] and [AttrResult] ("success", or "failure" with
+	// [AttrErrorType]). Its count is the number of queries handled.
 	QueryDuration, _ = meter.Float64Histogram(
 		"eventsourcing.query.duration",
 		metric.WithDescription("Query handling duration, labelled by eventsourcing.result"),
@@ -131,8 +137,8 @@ var (
 
 	// EventHandlerDuration records how long an event handler took, in
 	// seconds, labelled by [AttrEventType] and [AttrResult]: "success",
-	// "skipped" for a [eventsourcing.SkippedEventError], or "failure". Its
-	// count is the number of events handled.
+	// "skipped" for a [eventsourcing.SkippedEventError], or "failure" with
+	// [AttrErrorType]. Its count is the number of events handled.
 	EventHandlerDuration, _ = meter.Float64Histogram(
 		"eventsourcing.event_handler.duration",
 		metric.WithDescription("Event handler duration, labelled by eventsourcing.result"),
@@ -143,11 +149,12 @@ var (
 	// Event store metrics
 
 	// EventStoreDuration records event store operation duration, in
-	// seconds, labelled by [AttrOperation], [AttrResult] and, when set,
-	// [AttrDBSystemName]. Its count is the number of operations.
+	// seconds, labelled by [AttrEventStoreOperation], [AttrResult] (with
+	// [AttrErrorType] on a failure) and, when set, [AttrDBSystemName]. Its
+	// count is the number of operations.
 	EventStoreDuration, _ = meter.Float64Histogram(
 		"eventsourcing.event_store.duration",
-		metric.WithDescription("Event store operation duration, labelled by eventsourcing.operation and eventsourcing.result"),
+		metric.WithDescription("Event store operation duration, labelled by eventsourcing.event_store.operation and eventsourcing.result"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
@@ -184,10 +191,11 @@ var (
 	)
 
 	// ProjectionClaims counts attempts to claim a projection segment,
-	// labelled by [AttrProjectionName] and [AttrClaimResult].
+	// labelled by [AttrProjectionName] and [AttrResult]: "acquired", "held"
+	// by another instance, or "failure".
 	ProjectionClaims, _ = meter.Int64Counter(
 		"eventsourcing.projection.claims",
-		metric.WithDescription("Attempts to claim a projection segment, labelled by eventsourcing.projection.claim.result"),
+		metric.WithDescription("Attempts to claim a projection segment, labelled by eventsourcing.result"),
 		metric.WithUnit("{claim}"),
 	)
 
@@ -229,3 +237,25 @@ var (
 		metric.WithUnit("{segment}"),
 	)
 )
+
+// errorType returns the [AttrErrorType] value for err: a name for the
+// errors this module defines and for a context that ended, and "_OTHER",
+// the semantic conventions' fallback, for anything else, so the attribute
+// keeps a small, fixed set of values.
+func errorType(err error) string {
+	var conflict *eventsourcing.StreamRevisionConflictError
+	switch {
+	case errors.As(err, &conflict):
+		return "stream_revision_conflict"
+	case errors.Is(err, eventsourcing.ErrStreamExists):
+		return "stream_exists"
+	case errors.Is(err, eventsourcing.ErrStreamNotFound):
+		return "stream_not_found"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "_OTHER"
+	}
+}

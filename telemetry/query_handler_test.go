@@ -80,8 +80,9 @@ func TestQueryTelemetryDurationRecordedInSeconds(t *testing.T) {
 }
 
 // TestQueryTelemetry_SpanName covers the span name, the same through the
-// middleware and the wrapper and for a value or pointer query: "handle"
-// and the query type, without a pointer.
+// middleware and the wrapper, for a value or pointer query and for a
+// handler over an interface: "handle" and the query's type, without a
+// pointer.
 func TestQueryTelemetry_SpanName(t *testing.T) {
 	const want = "handle telemetry.durationTestQuery"
 	gateway := QueryTelemetry()(func(context.Context, eventsourcing.Query) (any, error) { return nil, nil })
@@ -90,6 +91,11 @@ func TestQueryTelemetry_SpanName(t *testing.T) {
 		"QueryTelemetry pointer": func() { _, _ = gateway(context.Background(), &durationTestQuery{}) },
 		"WithQueryTelemetry": func() {
 			_, _ = WithQueryTelemetry(eventsourcing.NewQueryHandlerFunc(func(context.Context, durationTestQuery) (int, error) {
+				return 0, nil
+			})).HandleQuery(context.Background(), durationTestQuery{})
+		},
+		"WithQueryTelemetry interface": func() {
+			_, _ = WithQueryTelemetry(eventsourcing.NewQueryHandlerFunc(func(context.Context, eventsourcing.Query) (int, error) {
 				return 0, nil
 			})).HandleQuery(context.Background(), durationTestQuery{})
 		},

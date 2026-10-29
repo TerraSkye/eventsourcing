@@ -91,11 +91,11 @@ func (t ProjectionStore) Claim(ctx context.Context, l projection.Lease, ttl time
 	result := "acquired"
 	switch {
 	case err != nil:
-		result = "error"
+		result = "failure"
 	case !ok:
 		result = "held"
 	}
-	ProjectionClaims.Add(ctx, 1, metric.WithAttributes(AttrProjectionName.String(l.Name), AttrClaimResult.String(result)))
+	ProjectionClaims.Add(ctx, 1, metric.WithAttributes(AttrProjectionName.String(l.Name), AttrResult.String(result)))
 	return claimed, cp, ok, err
 }
 

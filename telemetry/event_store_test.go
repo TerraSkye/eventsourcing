@@ -382,18 +382,21 @@ func TestEventStore_Metrics(t *testing.T) {
 		opts         []Option
 		wantErr      error
 		wantResult   string
+		wantErrType  string
 		wantSystem   string
 		wantAppended int
 	}{
-		{"success", &stubStore{}, nil, nil, "success", "", 1},
-		{"db.system.name set", &stubStore{}, []Option{WithAttributes(AttrDBSystemName.String("postgresql"))}, nil, "success", "postgresql", 1},
-		{"failed save", &stubStore{saveErr: boom}, nil, boom, "failure", "", 0},
+		{"success", &stubStore{}, nil, nil, "success", "", "", 1},
+		{"db.system.name set", &stubStore{}, []Option{WithAttributes(AttrDBSystemName.String("postgresql"))}, nil, "success", "", "postgresql", 1},
+		{"failed save", &stubStore{saveErr: boom}, nil, boom, "failure", "_OTHER", "", 0},
+		{"conflicting save", &stubStore{saveErr: &eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}}, nil, nil, "failure", "stream_revision_conflict", "", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fromDuration, fromAppended := len(rec.recordsFor(duration)), len(rec.recordsFor(appended))
 			store := WithEventStoreTelemetry(tt.store, tt.opts...)
-			if _, err := store.Save(ctx, batch(), eventsourcing.Any{}); !errors.Is(err, tt.wantErr) {
+			_, err := store.Save(ctx, batch(), eventsourcing.Any{})
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantResult == "success") {
 				t.Fatalf("Save() error = %v, want %v", err, tt.wantErr)
 			}
 
@@ -401,8 +404,11 @@ func TestEventStore_Metrics(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("recorded %d %s values, want 1", len(got), duration)
 			}
-			if op := attrString(got[0].attrs, AttrOperation); op != "save" {
-				t.Errorf("%s = %q, want save", AttrOperation, op)
+			if op := attrString(got[0].attrs, AttrEventStoreOperation); op != "append" {
+				t.Errorf("%s = %q, want append", AttrEventStoreOperation, op)
+			}
+			if et, ok := got[0].attrs.Value(AttrErrorType); ok != (tt.wantErrType != "") || et.AsString() != tt.wantErrType {
+				t.Errorf("%s = %q (set %v), want %q", AttrErrorType, et.AsString(), ok, tt.wantErrType)
 			}
 			if r := attrString(got[0].attrs, AttrResult); r != tt.wantResult {
 				t.Errorf("%s = %q, want %q", AttrResult, r, tt.wantResult)

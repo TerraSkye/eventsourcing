@@ -26,7 +26,7 @@ import (
 // [eventsourcing.SkippedEventError] is treated as an intentional, non-error
 // skip: it marks the span OK and is recorded with result "skipped". Any
 // other error marks the span as failed and is recorded with result
-// "failure".
+// "failure" and an [AttrErrorType].
 //
 // When next is a [projection.Definition]'s handler and the runner commits
 // through a store wrapped with [WithProjectionStoreTelemetry], the span is a
@@ -100,7 +100,7 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 			opts = append(opts, trace.WithLinks(trace.Link{
 				SpanContext: originalSpanContext,
 				Attributes: []attribute.KeyValue{
-					attribute.String("eventsourcing.link.reason", "event.consumed.from.stream"),
+					AttrLinkReason.String("event.consumed.from.stream"),
 				},
 			}))
 		}
@@ -111,20 +111,22 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		err := next.Handle(ctx, event)
 		duration := time.Since(startTime).Seconds()
 
-		outcome := "success"
 		var skipped *eventsourcing.SkippedEventError
 		switch {
 		case err == nil:
+			metricAttr = append(metricAttr, AttrResult.String("success"))
 			span.SetStatus(codes.Ok, "")
 		case errors.As(err, &skipped):
-			outcome = "skipped"
+			metricAttr = append(metricAttr, AttrResult.String("skipped"))
 			span.SetStatus(codes.Ok, "")
 		default:
-			outcome = "failure"
+			errType := AttrErrorType.String(errorType(err))
+			metricAttr = append(metricAttr, AttrResult.String("failure"), errType)
+			span.SetAttributes(errType)
 			span.SetStatus(codes.Error, err.Error())
 			span.RecordError(err)
 		}
-		EventHandlerDuration.Record(ctx, duration, metric.WithAttributes(append(metricAttr, AttrResult.String(outcome))...))
+		EventHandlerDuration.Record(ctx, duration, metric.WithAttributes(metricAttr...))
 		return err
 	})
 }

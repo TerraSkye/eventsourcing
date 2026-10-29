@@ -41,33 +41,33 @@ func QueryTelemetry(options ...Option) eventsourcing.QueryHandlerMiddleware {
 // "handle" followed by the query type, such as "handle queries.GetTask",
 // covering the full invocation of next and tagged with the query type and
 // query ID. It also records [QueryActive] (in-flight queries) and
-// [QueryDuration] labelled by [AttrResult].
+// [QueryDuration] labelled by [AttrResult], and on a failure by
+// [AttrErrorType].
 //
 //	handler := WithQueryTelemetry(myQueryHandler)
 //	result, err := handler.HandleQuery(ctx, myQuery)
 func WithQueryTelemetry[T eventsourcing.Query, R any](next eventsourcing.QueryHandler[T, R], options ...Option) eventsourcing.QueryHandler[T, R] {
-	var zero T
 	cfg := &config{}
 
 	for _, o := range options {
 		o.apply(cfg)
 	}
 	return &telemetryQueryHandler[T, R]{
-		next:      next,
-		queryType: queryTypeName(zero),
-		cfg:       cfg,
+		next: next,
+		cfg:  cfg,
 	}
 }
 
 type telemetryQueryHandler[T eventsourcing.Query, R any] struct {
-	next      eventsourcing.QueryHandler[T, R]
-	queryType string
-	cfg       *config
+	next eventsourcing.QueryHandler[T, R]
+	cfg  *config
 }
 
+// HandleQuery reads the query's type from qry, not from T: T may be an
+// interface, such as [eventsourcing.Query], whose zero value has no type.
 func (h *telemetryQueryHandler[T, R]) HandleQuery(ctx context.Context, qry T) (R, error) {
 	var result R
-	_, err := handleQuery(ctx, h.cfg, h.queryType, qry, func(ctx context.Context) (any, error) {
+	_, err := handleQuery(ctx, h.cfg, queryTypeName(qry), qry, func(ctx context.Context) (any, error) {
 		var err error
 		result, err = h.next.HandleQuery(ctx, qry)
 		return result, err
@@ -117,14 +117,16 @@ func handleQuery(ctx context.Context, cfg *config, queryType string, qry eventso
 	result, err := next(ctx)
 	duration := time.Since(startTime).Seconds()
 
-	outcome := "success"
+	metricAttrs := []attribute.KeyValue{typeAttr, AttrResult.String("success")}
 	if err != nil {
-		outcome = "failure"
+		errType := AttrErrorType.String(errorType(err))
+		metricAttrs = []attribute.KeyValue{typeAttr, AttrResult.String("failure"), errType}
+		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
-	QueryDuration.Record(ctx, duration, metric.WithAttributes(typeAttr, AttrResult.String(outcome)))
+	QueryDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
 	return result, err
 }

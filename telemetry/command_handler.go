@@ -54,10 +54,11 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 // command type and aggregate ID and, once next returns, with the resulting
 // stream ID and version. It also records [CommandActive] (in-flight
 // commands) and [CommandDuration] labelled by [AttrResult]. A returned
-// [eventsourcing.StreamRevisionConflictError] is additionally counted in
-// [CommandConflicts] and fails the span; a returned
 // [eventsourcing.BusinessRuleViolationError] is an expected outcome rather
-// than a span error, recorded with result "rejected".
+// than a span error, recorded with result "rejected". Any other error fails
+// the span and is recorded with result "failure" and an [AttrErrorType],
+// "stream_revision_conflict" for a concurrency conflict, even one wrapped
+// in a violation.
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
 //	result, err := handler(ctx, myCommand)
@@ -124,15 +125,18 @@ func handleCommand(ctx context.Context, cfg *config, commandType, aggregateID st
 		AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 	)
 
-	outcome := "success"
+	metricAttrs := []attribute.KeyValue{typeAttr}
 	var conflict *eventsourcing.StreamRevisionConflictError
 	var violation *eventsourcing.BusinessRuleViolationError
 	switch {
 	case err == nil:
+		metricAttrs = append(metricAttrs, AttrResult.String("success"))
 		span.SetStatus(codes.Ok, "")
-	case errors.As(err, &violation):
+	// A conflict is checked first: it is a failure even when it is wrapped
+	// in a violation.
+	case !errors.As(err, &conflict) && errors.As(err, &violation):
 		// A rejection is an expected outcome, not a failure of the span.
-		outcome = "rejected"
+		metricAttrs = append(metricAttrs, AttrResult.String("rejected"))
 		causeMessage := "business rule violation"
 		if cause := violation.Cause(); cause != nil {
 			causeMessage = cause.Error()
@@ -147,16 +151,17 @@ func handleCommand(ctx context.Context, cfg *config, commandType, aggregateID st
 			AttrErrorMessage.String(causeMessage),
 		))
 	default:
-		outcome = "failure"
-		if errors.As(err, &conflict) {
+		errType := AttrErrorType.String(errorType(err))
+		metricAttrs = append(metricAttrs, AttrResult.String("failure"), errType)
+		if conflict != nil {
 			// A conflict left after any retries is a failure too.
-			CommandConflicts.Add(ctx, 1, metric.WithAttributes(typeAttr))
 			span.AddEvent("concurrency_conflict", trace.WithAttributes(AttrStreamID.String(result.StreamID)))
 		}
+		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
 	}
 
-	CommandDuration.Record(ctx, duration, metric.WithAttributes(typeAttr, AttrResult.String(outcome)))
+	CommandDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
 	return result, err
 }

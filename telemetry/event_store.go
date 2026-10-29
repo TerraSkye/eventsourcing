@@ -41,15 +41,16 @@ func (t EventStore) baseAttrs() []attribute.KeyValue {
 // for operation op that returned err, plus [AttrDBSystemName] when cfg sets
 // it, so stores of different systems can be told apart.
 func (t EventStore) metricAttrs(op string, err error) metric.MeasurementOption {
-	outcome := "success"
+	attrs := []attribute.KeyValue{AttrEventStoreOperation.String(op), AttrResult.String("success")}
 	if err != nil {
-		outcome = "failure"
+		attrs = []attribute.KeyValue{AttrEventStoreOperation.String(op), AttrResult.String("failure"), AttrErrorType.String(errorType(err))}
 	}
-	attrs := []attribute.KeyValue{AttrOperation.String(op), AttrResult.String(outcome)}
 	return metric.WithAttributes(append(attrs, t.dbSystem()...)...)
 }
 
 // dbSystem returns the [AttrDBSystemName] attribute from cfg, if it sets one.
+// Only [WithAttributes] counts: an attribute from [WithAttributeGetter] is
+// computed per call for spans and does not reach the metrics.
 func (t EventStore) dbSystem() []attribute.KeyValue {
 	for _, kv := range t.cfg.Attributes {
 		if kv.Key == AttrDBSystemName {
@@ -74,7 +75,7 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	}
 
 	spanAttrs := append(t.baseAttrs(),
-		AttrOperation.String("save"),
+		AttrEventStoreOperation.String("append"),
 		AttrStreamID.String(streamID),
 		AttrStreamVersion.Int64(revision.ToRawInt64()),
 	)
@@ -119,11 +120,12 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	result, err := t.next.Save(ctx, events, revision)
 	duration := time.Since(start)
 
-	EventStoreDuration.Record(ctx, duration.Seconds(), t.metricAttrs("save", err))
+	EventStoreDuration.Record(ctx, duration.Seconds(), t.metricAttrs("append", err))
 
 	if err == nil {
 		EventStoreAppended.Add(ctx, int64(len(events)), metric.WithAttributes(t.dbSystem()...))
 	} else {
+		span.SetAttributes(AttrErrorType.String(errorType(err)))
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
@@ -162,7 +164,7 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 			if span == nil {
 				startedAt = time.Now()
 				spanAttrs := append(t.baseAttrs(),
-					AttrOperation.String("load"),
+					AttrEventStoreOperation.String("load"),
 					AttrStreamID.String(id),
 				)
 				// Keep the span's context for the metrics recorded below, so
@@ -191,6 +193,7 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 			}
 			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
 			if err != nil {
+				span.SetAttributes(AttrErrorType.String(errorType(err)))
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
 			}
@@ -222,7 +225,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 			if span == nil {
 				startedAt = time.Now()
 				spanAttrs := append(t.baseAttrs(),
-					AttrOperation.String("load"),
+					AttrEventStoreOperation.String("load"),
 					AttrStreamID.String(id),
 					AttrStreamVersion.Int64(version.ToRawInt64()),
 				)
@@ -247,6 +250,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 			span.SetAttributes(AttrEventCount.Int64(eventCount))
 			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
 			if err != nil {
+				span.SetAttributes(AttrErrorType.String(errorType(err)))
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
 			}
@@ -288,13 +292,14 @@ func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts ev
 		trace.WithTimestamp(startedAt),
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(append(t.baseAttrs(),
-			AttrOperation.String("read_all"),
+			AttrEventStoreOperation.String("read_all"),
 			AttrStreamVersion.Int64(int64(min(after, math.MaxInt64))),
 			AttrEventCount.Int64(int64(len(res.Events))),
 		)...),
 	)
 	defer span.End()
 	if err != nil {
+		span.SetAttributes(AttrErrorType.String(errorType(err)))
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}

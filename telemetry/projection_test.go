@@ -163,7 +163,7 @@ func TestWithProjectionStoreTelemetry_Claim(t *testing.T) {
 
 	var results []string
 	for _, rec := range forProjection(durationRecorder.recordsFor("eventsourcing.projection.claims"), name) {
-		results = append(results, attrString(rec.attrs, AttrClaimResult))
+		results = append(results, attrString(rec.attrs, AttrResult))
 	}
 	if want := []string{"acquired", "held"}; !slices.Equal(results, want) {
 		t.Errorf("claim results = %v, want %v", results, want)

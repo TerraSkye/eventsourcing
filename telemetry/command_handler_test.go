@@ -164,18 +164,21 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 
 // TestCommandTelemetry_ResultLabels covers the result CommandDuration records
 // for each outcome, through both the middleware and the wrapper: a business
-// rule violation is "rejected", apart from a "failure".
+// rule violation is "rejected", apart from a "failure", and a failure
+// carries its error.type, a conflict even when wrapped in a violation.
 func TestCommandTelemetry_ResultLabels(t *testing.T) {
 	const instrument = "eventsourcing.command.duration"
 	outcomes := []struct {
-		name string
-		err  error
-		want string
+		name        string
+		err         error
+		want        string
+		wantErrType string
 	}{
-		{"success", nil, "success"},
-		{"business rule violation", fmt.Errorf("decide: %w", eventsourcing.NewBusinessRuleViolation(errors.New("already done"))), "rejected"},
-		{"conflict", &eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}, "failure"},
-		{"store error", errors.New("connection refused"), "failure"},
+		{"success", nil, "success", ""},
+		{"business rule violation", fmt.Errorf("decide: %w", eventsourcing.NewBusinessRuleViolation(errors.New("already done"))), "rejected", ""},
+		{"conflict", &eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}, "failure", "stream_revision_conflict"},
+		{"conflict in a violation", eventsourcing.NewBusinessRuleViolation(&eventsourcing.StreamRevisionConflictError{Stream: "agg-1"}), "failure", "stream_revision_conflict"},
+		{"store error", errors.New("connection refused"), "failure", "_OTHER"},
 	}
 	for _, o := range outcomes {
 		forms := map[string]func() error{
@@ -204,6 +207,9 @@ func TestCommandTelemetry_ResultLabels(t *testing.T) {
 				}
 				if v, _ := got[0].attrs.Value(AttrResult); v.AsString() != o.want {
 					t.Errorf("%s = %q, want %q", AttrResult, v.AsString(), o.want)
+				}
+				if v, ok := got[0].attrs.Value(AttrErrorType); ok != (o.wantErrType != "") || v.AsString() != o.wantErrType {
+					t.Errorf("%s = %q (set %v), want %q", AttrErrorType, v.AsString(), ok, o.wantErrType)
 				}
 			})
 		}
