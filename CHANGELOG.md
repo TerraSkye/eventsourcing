@@ -158,6 +158,12 @@ release may break the API; every break is listed under **Breaking**.
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
   metadata. Every read now decodes a new copy.
+- `CommandBus` ran a command whose context ended while it was queued
+  behind another command on its shard, though its `Dispatch` had
+  already returned the context's error. On a store that ignores the
+  context, such as the memory store, its events were appended. The
+  worker now skips such a command. A context that ends while the
+  handler runs is still passed to the handler, as before.
 - The memory store's `Save` kept the `Version` and `OccurredAt` the
   caller set, where the other stores assign them. A `Save` with
   `Version` left at zero, or two `Any` appends with stale versions,

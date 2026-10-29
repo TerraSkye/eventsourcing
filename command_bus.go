@@ -37,6 +37,10 @@ type commandResult struct {
 // same shard and processed one at a time, [Stop] waits for in-flight
 // dispatches to finish, and a handler panic is recovered rather than
 // crashing the bus.
+//
+// A shard serves many aggregates, so a slow handler delays every command
+// queued on its shard. This includes a handler waiting between retries; see
+// [WithRetryStrategy].
 type CommandBus struct {
 	handlers    map[string]CommandHandler[Command]
 	queues      []chan queuedCommand
@@ -168,6 +172,16 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 			default:
 				return
 			}
+		}
+
+		// Skip a command whose context ended while it was queued: its Dispatch
+		// has already returned, or is about to return, ctx.Err(), so running the
+		// handler would commit a command the caller was told failed. A context
+		// that ends once the handler is running is left to the handler, which
+		// receives it and passes it on to the store.
+		if err := cmd.Ctx.Err(); err != nil {
+			cmd.ResponseCh <- commandResult{Result: AppendResult{Successful: false}, Err: err}
+			continue
 		}
 
 		h, exists := b.handlerFor(cmd.Command.CommandType())

@@ -24,6 +24,8 @@ func NewCommandBus(bufferSize int, shardCount int) *CommandBus
 | `bufferSize` | Size of the internal buffered channel per shard. |
 | `shardCount` | Number of shards (workers). Values `<= 0` are coerced to `1`. Commands for the same `AggregateID` always go to the same shard (FNV hash). |
 
+Each shard runs one command at a time, so a slow handler holds up every command queued on its shard, for any aggregate. This includes a handler waiting between retries: keep `WithRetryStrategy` short on handlers you register here. See [Retry behind a CommandBus](../explanation/concurrency.md#retry-behind-a-commandbus).
+
 ```go
 bus := eventsourcing.NewCommandBus(100, 4)
 ```
