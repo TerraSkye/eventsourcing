@@ -47,6 +47,8 @@ handler := eventsourcing.NewCommandHandler(
 
 The handler calls the function once per command, so every command gets its own retry budget, and a wait between retries ends when the command's context is cancelled.
 
+If the handler runs behind a `CommandBus`, use a short retry such as `backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)`. The wait between retries runs on the shard's worker and holds up every other command on that shard. See [Retry behind a CommandBus](../explanation/concurrency.md#retry-behind-a-commandbus).
+
 The retry loop:
 1. Reloads the stream from the last known revision.
 2. Re-evolves state from the new events.

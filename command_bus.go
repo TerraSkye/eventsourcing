@@ -37,6 +37,10 @@ type commandResult struct {
 // same shard and processed one at a time, [Stop] waits for in-flight
 // dispatches to finish, and a handler panic is recovered rather than
 // crashing the bus.
+//
+// A shard serves many aggregates, so a slow handler delays every command
+// queued on its shard. This includes a handler waiting between retries; see
+// [WithRetryStrategy].
 type CommandBus struct {
 	handlers    map[string]CommandHandler[Command]
 	queues      []chan queuedCommand

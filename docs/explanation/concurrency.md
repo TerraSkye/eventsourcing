@@ -50,15 +50,42 @@ On conflict, the handler:
 3. Re-runs `decide` with the updated state.
 4. Retries `Save`.
 
+The handler waits between attempts as the `BackOff` says. The default exponential backoff starts at 500ms and grows from there, so five retries can wait several seconds in total. That is fine when you call the handler directly. Behind a `CommandBus`, keep the wait short; see [Retry behind a CommandBus](#retry-behind-a-commandbus).
+
 This retry-and-converge behavior applies to `Any{}` and, once the stream is confirmed to exist, `StreamExists{}` — neither pins the stream to an exact version, so a save conflict can be resolved by reloading and retrying. `NoStream{}` and a specific `Revision(N)` pin the stream to an exact point (version 0, or N) the caller explicitly asserted — a conflict there is returned immediately as `*StreamRevisionConflictError`, regardless of `WithRetryStrategy`. Retrying those wouldn't converge: silently re-checking against a stream a `NoStream{}` caller wanted empty, or resaving a `Revision(N)` caller pinned to a version they specifically read, would defeat the reason those checks were requested in the first place (e.g. detecting a lost update in an "edit this document at the version I last saw" flow).
 
 `StreamExists{}` also has a fail-fast side, distinct from a save conflict: if the stream doesn't exist *at all* when the handler loads it, that's a missing precondition, not a version race, and it's returned immediately — never retried — even with `WithRetryStrategy` configured. Only once loading succeeds (the stream is confirmed non-empty) does the "no version pinned, retry on conflict" behavior kick in for the subsequent save.
 
 ## CommandBus sharding
 
-The `CommandBus` provides an alternative approach: commands for the same aggregate are always routed to the same worker shard (via FNV hash of `AggregateID()`). Within a shard, commands are processed sequentially. This eliminates conflicts without requiring retries, at the cost of reduced throughput per shard.
+The `CommandBus` provides an alternative approach: commands for the same aggregate are always routed to the same worker shard (via FNV hash of `AggregateID()`). Within a shard, commands are processed sequentially. Two commands on one bus never conflict with each other, at the cost of reduced throughput per shard.
 
-Combine both approaches for maximum resilience: CommandBus reduces conflicts, and retry handles the rare cases that still occur (e.g., from other processes).
+A bus does not see writes from outside it: another instance of your service, or code that calls the handler directly. Those writes can still cause a conflict, so you may still want `WithRetryStrategy`.
+
+### Retry behind a CommandBus
+
+A shard serves many aggregates, and its worker runs one command at a time. The wait between retries happens inside the handler call, on that worker. While one command waits, every command queued on the same shard waits too, whatever its aggregate. With an exponential backoff, that stall lasts seconds.
+
+Waiting does not help here. Behind a bus, a conflict can only come from another process, and its events are already in the store when `Save` fails. The retry reloads them, re-runs `decide` on the new state, and saves again. That works straight away, so retry a few times without waiting:
+
+```go
+eventsourcing.WithRetryStrategy(func() backoff.BackOff {
+    return backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)
+})
+```
+
+If many processes write the same aggregate at once, a few milliseconds with jitter spreads them out without stalling the shard for long:
+
+```go
+eventsourcing.WithRetryStrategy(func() backoff.BackOff {
+    return backoff.WithMaxRetries(backoff.NewExponentialBackOff(
+        backoff.WithInitialInterval(2*time.Millisecond),
+        backoff.WithMaxInterval(10*time.Millisecond),
+    ), 3)
+})
+```
+
+`NewExponentialBackOff` randomizes each interval by ±50% by default, which provides the jitter.
 
 ## Stream states
 
