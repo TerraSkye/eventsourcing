@@ -124,6 +124,11 @@ release may break the API; every break is listed under **Breaking**.
   dead-lettered the events its handler was on when the runner stopped,
   if the handler returned its context's error, and parked their stream
   until `ReplayStream`. Those events are now left for the next run.
+- The KurrentDB store's `Save` kept retrying after its context ended,
+  until its backoff gave up (30 seconds by default): the client reports
+  an expired context as a retryable `DeadlineExceeded`. `Save` now stops
+  when the context ends, and its error matches the context's, such as
+  `context.DeadlineExceeded`.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its
