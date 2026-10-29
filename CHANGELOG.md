@@ -137,6 +137,18 @@ release may break the API; every break is listed under **Breaking**.
   every store in this module persists in. A store outside the module
   that calls them writes the same bytes.
 
+### Changed
+
+- `logging.WithCommandLogging` and `CommandLogging` log a command
+  rejected with a `BusinessRuleViolationError` at info level, as
+  "command rejected", instead of at error level as "command failed".
+  `logging.WithEventLogging` logs an event its handler declined with a
+  `SkippedEventError` at debug level, as "event skipped" with the
+  reason, instead of at error level as "event failed". Neither is a
+  failure: the telemetry package already marks both spans OK, and the
+  projection runner moves past a skipped event. Alerts on error-level
+  logs no longer fire for them.
+
 ### Fixed
 
 - The KurrentDB store's `Save` did not retry a write that reached a

@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/terraskye/eventsourcing"
@@ -21,7 +22,10 @@ func EventLogging(logger *slog.Logger) eventsourcing.EventHandlerMiddleware {
 // ID, correlation ID, stream ID, version, global position, and aggregate ID
 // found on ctx, plus
 // the event's [eventsourcing.Event.EventType]. If next returns an error, that
-// error is logged at error level instead of the second debug message.
+// error is logged at error level instead of the second debug message. A
+// [eventsourcing.SkippedEventError] means next declined the event, which is
+// not a failure, so it is logged at debug level as "event skipped", with the
+// reason.
 // Attributes are only built when the logger is enabled for the level. A nil
 // logger uses [slog.Default].
 //
@@ -37,13 +41,20 @@ func WithEventLogging(logger *slog.Logger, next eventsourcing.EventHandler) even
 
 		err := next.Handle(ctx, event)
 
+		var skipped *eventsourcing.SkippedEventError
 		switch {
-		case err != nil:
+		case err == nil:
+			if debug {
+				logger.LogAttrs(ctx, slog.LevelDebug, "event handled", eventAttrs(ctx, event)...)
+			}
+		case errors.As(err, &skipped):
+			if debug {
+				logger.LogAttrs(ctx, slog.LevelDebug, "event skipped", append(eventAttrs(ctx, event), slog.String("reason", err.Error()))...)
+			}
+		default:
 			if logger.Enabled(ctx, slog.LevelError) {
 				logger.LogAttrs(ctx, slog.LevelError, "event failed", append(eventAttrs(ctx, event), slog.Any("error", err))...)
 			}
-		case debug:
-			logger.LogAttrs(ctx, slog.LevelDebug, "event handled", eventAttrs(ctx, event)...)
 		}
 
 		return err

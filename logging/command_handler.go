@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/terraskye/eventsourcing"
@@ -10,8 +11,11 @@ import (
 // WithCommandLogging wraps next so that every invocation is logged. Before
 // calling next it logs the command's [eventsourcing.Command.CommandType] and
 // [eventsourcing.Command.AggregateID] at info level; if next returns an error,
-// that error is logged at error level as well. Attributes are only built when
-// the logger is enabled for the level. A nil logger uses [slog.Default].
+// that error is logged at error level as well. A
+// [eventsourcing.BusinessRuleViolationError] is an expected rejection rather
+// than a failure, so it is logged at info level as "command rejected".
+// Attributes are only built when the logger is enabled for the level. A nil
+// logger uses [slog.Default].
 //
 // This is where command errors get logged; callers that also log the returned
 // error will log it twice.
@@ -26,8 +30,17 @@ func WithCommandLogging[C eventsourcing.Command](logger *slog.Logger, next event
 		}
 
 		result, err := next(ctx, cmd)
-		if err != nil && logger.Enabled(ctx, slog.LevelError) {
-			logger.LogAttrs(ctx, slog.LevelError, "command failed",
+		if err == nil {
+			return result, nil
+		}
+
+		level, msg := slog.LevelError, "command failed"
+		var violation *eventsourcing.BusinessRuleViolationError
+		if errors.As(err, &violation) {
+			level, msg = slog.LevelInfo, "command rejected"
+		}
+		if logger.Enabled(ctx, level) {
+			logger.LogAttrs(ctx, level, msg,
 				slog.String("command_type", cmd.CommandType()),
 				slog.String("aggregate_id", cmd.AggregateID()),
 				slog.Any("error", err),

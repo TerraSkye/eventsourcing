@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -141,6 +142,31 @@ func TestWithCommandLogging_Error(t *testing.T) {
 	})
 }
 
+// TestWithCommandLogging_BusinessRuleViolation covers a command the domain
+// rejected: an expected outcome, logged at info level, not as a failure.
+func TestWithCommandLogging_BusinessRuleViolation(t *testing.T) {
+	logger, records := newTestLogger(t, slog.LevelDebug)
+	h := WithCommandLogging(logger, func(ctx context.Context, cmd testCommand) (eventsourcing.AppendResult, error) {
+		return eventsourcing.AppendResult{}, fmt.Errorf("handle command: %w", eventsourcing.NewBusinessRuleViolation(errors.New("already completed")))
+	})
+
+	if _, err := h(context.Background(), testCommand{}); err == nil {
+		t.Fatal("expected error")
+	}
+
+	rs := records()
+	if len(rs) != 2 {
+		t.Fatalf("got %d records, want 2: %v", len(rs), rs)
+	}
+	assertRecord(t, rs[1], "INFO", "command rejected", map[string]any{
+		"command_type": "PlaceOrder",
+		"aggregate_id": "order-1",
+	})
+	if msg, _ := rs[1]["error"].(string); !strings.Contains(msg, "already completed") {
+		t.Errorf("record error = %q, want it to carry the violation's cause", msg)
+	}
+}
+
 func TestWithCommandLogging_DisabledLevelSkipsAttributes(t *testing.T) {
 	logger, records := newTestLogger(t, slog.LevelError)
 	h := WithCommandLogging(logger, func(ctx context.Context, cmd testCommand) (eventsourcing.AppendResult, error) {
@@ -223,6 +249,43 @@ func TestWithEventLogging_ErrorLoggedWithDebugDisabled(t *testing.T) {
 		"event_type": "OrderPlaced",
 		"stream_id":  "order-1",
 		"error":      "boom",
+	})
+}
+
+// TestWithEventLogging_Skipped covers a handler that declined the event: not
+// a failure, so it is logged at debug level only, with the reason.
+func TestWithEventLogging_Skipped(t *testing.T) {
+	skip := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, event eventsourcing.Event) error {
+		return fmt.Errorf("route: %w", &eventsourcing.SkippedEventError{Event: event, Expected: "*orders.Shipped"})
+	})
+
+	t.Run("debug", func(t *testing.T) {
+		logger, records := newTestLogger(t, slog.LevelDebug)
+		if err := WithEventLogging(logger, skip).Handle(eventContext(), testEvent{}); err == nil {
+			t.Fatal("expected the skip to be returned")
+		}
+
+		rs := records()
+		if len(rs) != 2 {
+			t.Fatalf("got %d records, want 2: %v", len(rs), rs)
+		}
+		assertRecord(t, rs[1], "DEBUG", "event skipped", map[string]any{
+			"event_type": "OrderPlaced",
+			"stream_id":  "order-1",
+		})
+		if reason, _ := rs[1]["reason"].(string); !strings.Contains(reason, "*orders.Shipped") {
+			t.Errorf("record reason = %q, want the skip's message", reason)
+		}
+	})
+
+	t.Run("info", func(t *testing.T) {
+		logger, records := newTestLogger(t, slog.LevelInfo)
+		if err := WithEventLogging(logger, skip).Handle(eventContext(), testEvent{}); err == nil {
+			t.Fatal("expected the skip to be returned")
+		}
+		if rs := records(); len(rs) != 0 {
+			t.Errorf("got %d records at info level, want 0: %v", len(rs), rs)
+		}
 	})
 }
 
