@@ -9,6 +9,15 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `Save` on every store in this module rejects a batch in which an
+  envelope has no `EventID`, with an error wrapping
+  `ErrInvalidEventBatch`. The Postgres and SQLite stores used to make
+  one up, and the KurrentDB client made a new one on every retry
+  attempt, so an append that committed but lost its response could be
+  appended again under `Any`, or reported as a conflict under
+  `Revision`. `NewCommandHandler` already sets one; code that calls
+  `Save` directly must set `EventID` itself, for example to
+  `uuid.New()`. `eventsourcingtest.AcceptanceTest` checks it.
 - `projection.Store` has two new methods, `FailRebuild` and
   `RebuildFailure`, so `Runner.Rebuild` called on one instance returns
   the error of a reset that failed on another, as its text, instead of
@@ -93,11 +102,6 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
-- The KurrentDB store's `Save` left an empty `EventID` to the client,
-  which made a new one on every retry attempt. An append that committed
-  but lost its response was then appended a second time under `Any`, or
-  reported as a conflict under `Revision`. `Save` now assigns the ID
-  once, before it retries, as the Postgres and SQLite stores do.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its

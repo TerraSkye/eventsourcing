@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -148,6 +149,12 @@ func (m *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 					"save events to stream %q: %w: event %d has different stream ID %q",
 					streamId, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
 				)
+		}
+		if env.EventID == uuid.Nil {
+			return eventsourcing.AppendResult{StreamID: streamId}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has no event ID",
+				streamId, eventsourcing.ErrInvalidEventBatch, i,
+			)
 		}
 	}
 

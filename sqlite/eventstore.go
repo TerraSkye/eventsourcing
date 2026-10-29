@@ -66,6 +66,12 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 				streamID, eventsourcing.ErrInvalidEventBatch, i, e.StreamID,
 			)
 		}
+		if e.EventID == uuid.Nil {
+			return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has no event ID",
+				streamID, eventsourcing.ErrInvalidEventBatch, i,
+			)
+		}
 	}
 
 	// Encode before the transaction, so it covers only the database work.
@@ -94,11 +100,7 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 		if occurredAt.IsZero() {
 			occurredAt = time.Now()
 		}
-		eventID := e.EventID
-		if eventID == uuid.Nil {
-			eventID = uuid.New()
-		}
-		rows[i] = row{eventID.String(), e.Event.EventType(), payload, metadataJSON, occurredAt.UnixNano(), e.CorrelationID, e.CausationID}
+		rows[i] = row{e.EventID.String(), e.Event.EventType(), payload, metadataJSON, occurredAt.UnixNano(), e.CorrelationID, e.CausationID}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

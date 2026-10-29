@@ -123,17 +123,49 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 					streamID, eventsourcing.ErrInvalidEventBatch, i, env.StreamID,
 				)
 		}
+		if env.EventID == uuid.Nil {
+			return eventsourcing.AppendResult{StreamID: streamID}, fmt.Errorf(
+				"save events to stream %q: %w: event %d has no event ID",
+				streamID, eventsourcing.ErrInvalidEventBatch, i,
+			)
+		}
 	}
 
 	var kEvents = make([]kurrentdb.EventData, len(events))
 
 	for i, ev := range events {
-		data, err := toEventData(ev)
+		eventData, err := eventsourcing.EncodeEvent(ev.Event)
 		if err != nil {
 			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
-		kEvents[i] = data
+
+		// KurrentDB keeps the chain IDs in the metadata, under its own keys.
+		// Those keys come only from the Envelope's fields: the same keys in
+		// Metadata would be read back as the chain.
+		metadata := make(map[string]any, len(ev.Metadata)+2)
+		maps.Copy(metadata, ev.Metadata)
+		delete(metadata, correlationIDKey)
+		delete(metadata, causationIDKey)
+		if ev.CorrelationID != "" {
+			metadata[correlationIDKey] = ev.CorrelationID
+		}
+		if ev.CausationID != "" {
+			metadata[causationIDKey] = ev.CausationID
+		}
+		metadataJSON, err := eventsourcing.EncodeMetadata(metadata)
+		if err != nil {
+			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
+		}
+
+		kEvents[i] = kurrentdb.EventData{
+			EventID:     ev.EventID,
+			EventType:   ev.Event.EventType(),
+			ContentType: kurrentdb.ContentTypeJson,
+			Data:        eventData,
+			Metadata:    metadataJSON,
+		}
 	}
 
 	var streamState kurrentdb.StreamState
@@ -496,48 +528,6 @@ const (
 	correlationIDKey = "$correlationId"
 	causationIDKey   = "$causationId"
 )
-
-// toEventData encodes ev for KurrentDB. An ev without an EventID gets a new
-// one here, so every attempt of Save's retry sends the same ID: the client
-// would otherwise make a new one per attempt, and the server could not tell
-// a retry of an append that committed from a new append.
-func toEventData(ev eventsourcing.Envelope) (kurrentdb.EventData, error) {
-	eventData, err := eventsourcing.EncodeEvent(ev.Event)
-	if err != nil {
-		return kurrentdb.EventData{}, err
-	}
-
-	// KurrentDB keeps the chain IDs in the metadata, under its own keys.
-	// Those keys come only from the Envelope's fields: the same keys in
-	// Metadata would be read back as the chain.
-	metadata := make(map[string]any, len(ev.Metadata)+2)
-	maps.Copy(metadata, ev.Metadata)
-	delete(metadata, correlationIDKey)
-	delete(metadata, causationIDKey)
-	if ev.CorrelationID != "" {
-		metadata[correlationIDKey] = ev.CorrelationID
-	}
-	if ev.CausationID != "" {
-		metadata[causationIDKey] = ev.CausationID
-	}
-	metadataJSON, err := eventsourcing.EncodeMetadata(metadata)
-	if err != nil {
-		return kurrentdb.EventData{}, err
-	}
-
-	eventID := ev.EventID
-	if eventID == uuid.Nil {
-		eventID = uuid.New()
-	}
-
-	return kurrentdb.EventData{
-		EventID:     eventID,
-		EventType:   ev.Event.EventType(),
-		ContentType: kurrentdb.ContentTypeJson,
-		Data:        eventData,
-		Metadata:    metadataJSON,
-	}, nil
-}
 
 // Close closes the underlying KurrentDB client connection.
 func (e EventStore) Close() error {

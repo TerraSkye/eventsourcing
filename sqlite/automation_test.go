@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/automation/automationtest"
@@ -116,7 +117,7 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 		Claim:    list.Claim,
 		Work: func(ctx context.Context, id string) error {
 			// The command's outcome: the event that removes the item.
-			_, err := store.Save(ctx, []eventsourcing.Envelope{{StreamID: "task-" + id, Event: &taskDone{ID: id}}}, eventsourcing.StreamExists{})
+			_, err := store.Save(ctx, []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: "task-" + id, Event: &taskDone{ID: id}}}, eventsourcing.StreamExists{})
 			return err
 		},
 		Interval: time.Hour, // nudges from the runner do the waking

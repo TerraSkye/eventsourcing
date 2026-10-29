@@ -94,7 +94,7 @@ type EventStore interface {
 
 Append-only store for event envelopes. See [Stream states](./stream-states.md) for the `revision` / `version` parameter.
 
-- `Save` — appends events with an optional concurrency check.
+- `Save` — appends events with an optional concurrency check. Every envelope must carry its `EventID`; `Save` returns `ErrInvalidEventBatch` otherwise.
 - `LoadStream` — loads all events for a stream (requires stream to exist).
 - `LoadStreamFrom` — loads events from a given revision.
 - `Close` — releases resources.

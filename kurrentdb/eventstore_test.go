@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/eventsourcingtest"
 	kdb "github.com/terraskye/eventsourcing/kurrentdb"
@@ -57,6 +58,7 @@ func TestLoadStreamFrom_RevisionIsInclusiveNotExclusive(t *testing.T) {
 	// Save 3 events (Versions 1, 2, 3; native KurrentDB revisions 0, 1, 2).
 	for i := 0; i < 3; i++ {
 		_, err := store.Save(ctx, []eventsourcing.Envelope{{
+			EventID:    uuid.New(),
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
@@ -106,6 +108,7 @@ func TestReadAll_ReachesTheEndOfAll(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		if _, err := store.Save(ctx, []eventsourcing.Envelope{{
+			EventID:    uuid.New(),
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
@@ -175,6 +178,7 @@ func TestSave_UsesConfiguredBackoffNotDefault(t *testing.T) {
 
 	start := time.Now()
 	_, err := store.Save(ctx, []eventsourcing.Envelope{{
+		EventID:  uuid.New(),
 		StreamID: "backoff-probe-stream",
 		Event:    BackoffProbeEvent{N: 1},
 		Metadata: map[string]any{},
@@ -241,6 +245,7 @@ func TestLoadStream_ReturnsEveryEventInLargeStreams(t *testing.T) {
 		batch := make([]eventsourcing.Envelope, 0, end-start)
 		for i := start; i < end; i++ {
 			batch = append(batch, eventsourcing.Envelope{
+				EventID:    uuid.New(),
 				StreamID:   streamID,
 				Event:      &CountProbeEvent{N: i},
 				Metadata:   map[string]any{},
@@ -295,6 +300,7 @@ func TestLoadStreamFrom_HugeRevisionIsRefusedNotReplayed(t *testing.T) {
 	// Save 3 events (native KurrentDB revisions 0, 1, 2).
 	for i := 0; i < 3; i++ {
 		_, err := store.Save(ctx, []eventsourcing.Envelope{{
+			EventID:    uuid.New(),
 			StreamID:   streamID,
 			Event:      &CheckEvent{N: i},
 			Metadata:   map[string]any{},
@@ -370,6 +376,7 @@ func TestSave_ChainKeysInMetadataDoNotBecomeTheChain(t *testing.T) {
 	streamID := "check-chain-keys"
 
 	if _, err := store.Save(ctx, []eventsourcing.Envelope{{
+		EventID:  uuid.New(),
 		StreamID: streamID,
 		Event:    &CheckEvent{N: 1},
 		Metadata: map[string]any{
