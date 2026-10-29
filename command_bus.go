@@ -260,7 +260,7 @@ func (b *CommandBus) selectShard(aggregateID string) int {
 //
 // Example:
 //
-//	err := Register(bus, fooHandler)
+//	Register(bus, fooHandler)
 func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	var zero C
 	cmdName := zero.CommandType()

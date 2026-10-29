@@ -108,8 +108,9 @@ type CommandHandlerOption func(configuration *handlerOptions)
 // and, on conflict, retries the whole load-evolve-decide-save cycle
 // according to a [backoff.BackOff] from the factory set via
 // [WithRetryStrategy] (default: no retries). Each call gets a BackOff of
-// its own, and its waits end when ctx is done. [NoStream] and a specific [Revision] pin the stream to an
-// exact point (version 0, or N) that the caller explicitly asserted; a
+// its own, and its waits end when ctx is done. [NoStream] and a specific
+// [Revision] pin the stream to an exact point (version 0, or N) that the
+// caller explicitly asserted; a
 // conflict there means that expectation was violated, so it is returned
 // immediately rather than retried. A [StreamExists] load failure (the
 // stream doesn't exist yet) is likewise always returned immediately, never

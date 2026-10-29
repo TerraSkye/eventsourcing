@@ -166,6 +166,9 @@ var DefaultStreamNamer StreamNamer // overrideable global default
 | Situation | Error type |
 |---|---|
 | `decide` returns an error | Wrapped in `*BusinessRuleViolationError` |
-| Stream revision mismatch | `*StreamRevisionConflictError` (retried if strategy set) |
+| Stream changed since it was loaded, under `Any{}` or `StreamExists{}` | `*StreamRevisionConflictError` (retried if a strategy is set) |
+| Stream not at version N, under `Revision(N)` | `*StreamRevisionConflictError`, never retried |
+| Stream already exists, under `NoStream{}` | `ErrStreamExists`, never retried |
+| Stream does not exist, under `StreamExists{}` | `ErrStreamNotFound`, never retried |
 | Store load failure | `error` with context |
 | Store save failure | `error` with context |
