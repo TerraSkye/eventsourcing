@@ -355,7 +355,7 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }
 
-func TestCorrelationReaderAcceptance(t *testing.T) {
+func TestCorrelationLoaderAcceptance(t *testing.T) {
 	store := postgres.NewEventStore(newPool(t))
-	eventsourcingtest.CorrelationReaderAcceptanceTest(t, store, store)
+	eventsourcingtest.CorrelationLoaderAcceptanceTest(t, store, store)
 }

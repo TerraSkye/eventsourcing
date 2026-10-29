@@ -86,11 +86,11 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
-- `CorrelationReader`, implemented by the memory, Postgres and SQLite
+- `CorrelationLoader`, implemented by the memory, Postgres and SQLite
   stores, loads a correlation chain: every event, across all streams,
   with one `CorrelationID`, in `GlobalPosition` order. It is for
   debugging and auditing what a command set off.
-  `eventsourcingtest.CorrelationReaderAcceptanceTest` checks a store
+  `eventsourcingtest.CorrelationLoaderAcceptanceTest` checks a store
   against it.
 - `EncodeEvent` and `DecodeEvent`, and `EncodeMetadata` and
   `DecodeMetadata` for an envelope's metadata, are the JSON encoding

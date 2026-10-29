@@ -14,7 +14,7 @@ import (
 var (
 	_ eventsourcing.EventStore        = (*EventStore)(nil)
 	_ eventsourcing.GlobalReader      = (*EventStore)(nil)
-	_ eventsourcing.CorrelationReader = (*EventStore)(nil)
+	_ eventsourcing.CorrelationLoader = (*EventStore)(nil)
 )
 
 // EventStore is an in-memory [eventsourcing.EventStore] intended for tests
@@ -296,7 +296,7 @@ func (m *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 	return iter, nil
 }
 
-// LoadCorrelation implements [eventsourcing.CorrelationReader]. It scans
+// LoadCorrelation implements [eventsourcing.CorrelationLoader]. It scans
 // the global log for the chain's events under the read lock, then decodes
 // them as the caller iterates.
 func (m *EventStore) LoadCorrelation(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {

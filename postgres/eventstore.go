@@ -21,7 +21,7 @@ const pgUniqueViolation = "23505"
 var (
 	_ eventsourcing.EventStore        = (*EventStore)(nil)
 	_ eventsourcing.GlobalReader      = (*EventStore)(nil)
-	_ eventsourcing.CorrelationReader = (*EventStore)(nil)
+	_ eventsourcing.CorrelationLoader = (*EventStore)(nil)
 )
 
 // appendLockKey is the two-key advisory lock every Save takes before it
@@ -282,7 +282,7 @@ func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 	}
 }
 
-// LoadCorrelation implements [eventsourcing.CorrelationReader], using the
+// LoadCorrelation implements [eventsourcing.CorrelationLoader], using the
 // index on correlation_id. Like [EventStore.LoadStream], the iterator holds
 // a pooled connection until it ends or is closed.
 func (s *EventStore) LoadCorrelation(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {

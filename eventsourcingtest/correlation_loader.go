@@ -11,10 +11,10 @@ import (
 
 type correlationAcceptance struct {
 	store  eventsourcing.EventStore
-	reader eventsourcing.CorrelationReader
+	reader eventsourcing.CorrelationLoader
 }
 
-// CorrelationReaderAcceptanceTest runs the [eventsourcing.CorrelationReader]
+// CorrelationLoaderAcceptanceTest runs the [eventsourcing.CorrelationLoader]
 // contract against reader as a set of subtests. store must be the store
 // reader reads from; the suite appends to it through Save and checks what
 // LoadCorrelation returns.
@@ -31,12 +31,12 @@ type correlationAcceptance struct {
 //   - the empty correlation ID returns an error wrapping
 //     [eventsourcing.ErrEmptyCorrelationID];
 //   - closing the iterator before reading it to the end succeeds.
-func CorrelationReaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, reader eventsourcing.CorrelationReader) {
+func CorrelationLoaderAcceptanceTest(t *testing.T, store eventsourcing.EventStore, reader eventsourcing.CorrelationLoader) {
 	t.Helper()
 
 	c := &correlationAcceptance{store: store, reader: reader}
 	a := &acceptance{store: store}
-	a.group(t, "CorrelationReader", map[string]func(*testing.T){
+	a.group(t, "CorrelationLoader", map[string]func(*testing.T){
 		"AcrossStreams": c.acrossStreams,
 		"RoundTrip":     c.roundTrip,
 		"Unknown":       c.unknown,

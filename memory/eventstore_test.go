@@ -865,11 +865,11 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }
 
-func TestCorrelationReaderAcceptance(t *testing.T) {
+func TestCorrelationLoaderAcceptance(t *testing.T) {
 	store := memory.NewEventStore()
 	t.Cleanup(func() { store.Close() })
 
-	eventsourcingtest.CorrelationReaderAcceptanceTest(t, store, store)
+	eventsourcingtest.CorrelationLoaderAcceptanceTest(t, store, store)
 }
 
 // Save copied each envelope into the store before assigning its

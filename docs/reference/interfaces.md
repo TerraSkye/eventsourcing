@@ -123,17 +123,17 @@ Stores guarantee that no event becomes visible behind a position already returne
 
 ---
 
-## CorrelationReader
+## CorrelationLoader
 
 ```go
-type CorrelationReader interface {
+type CorrelationLoader interface {
     LoadCorrelation(ctx context.Context, id string) (*Iterator[*Envelope], error)
 }
 ```
 
 Loads a correlation chain: every event, across all streams, whose `Envelope.CorrelationID` is `id`, in ascending `GlobalPosition` order. Use it to debug or audit everything one command set off. Implemented by the memory, Postgres and SQLite stores.
 
-An `id` no event carries yields an empty iterator. The empty `id` returns an error wrapping `ErrEmptyCorrelationID`, since every event saved without a correlation ID shares it. `eventsourcingtest.CorrelationReaderAcceptanceTest` checks an implementation against the contract.
+An `id` no event carries yields an empty iterator. The empty `id` returns an error wrapping `ErrEmptyCorrelationID`, since every event saved without a correlation ID shares it. `eventsourcingtest.CorrelationLoaderAcceptanceTest` checks an implementation against the contract.
 
 ---
 
