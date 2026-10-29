@@ -107,6 +107,9 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Added
 
+- `kurrentdb.WithLogger` sets the logger the KurrentDB store reports
+  each retried append to, at warn level. It defaults to
+  `slog.Default()`.
 - The `dashboard` package serves a page that shows every projection's
   progress live: how far each segment is, how far behind, how fast it
   catches up, why a stalled segment stalled, and every instance running
@@ -136,6 +139,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- The KurrentDB store's `Save` did not retry a write that reached a
+  follower instead of the leader, though its doc said it retried
+  during a leader election: the client reports that without a gRPC
+  status, which was all `Save` checked. It now retries it, on the
+  leader the follower named. Each retry used to be printed to stdout
+  with `fmt.Printf`; it is now logged, see `WithLogger`.
 - A projection under `SkipAlways`, or `SkipWhenLive` while live,
   dead-lettered the events its handler was on when the runner stopped,
   if the handler returned its context's error, and parked their stream
