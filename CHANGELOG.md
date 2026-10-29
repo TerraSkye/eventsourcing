@@ -92,6 +92,11 @@ release may break the API; every break is listed under **Breaking**.
   `eventsourcing.event_handler.errors`. Their Go variables are
   `EventHandlerOperations`, `EventHandlerDuration` and
   `EventHandlerErrors`. `AttrSubscriberName` is removed.
+- The `eventsourcing.events.appended` and `eventsourcing.events.loaded`
+  metrics no longer carry `eventsourcing.stream.id`. Labelled by stream,
+  they made one time series per stream, which grows without bound.
+  Queries that group or filter these metrics by stream ID must drop it;
+  the store spans still carry the stream ID.
 
 ### Added
 
@@ -102,6 +107,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- A projection under `SkipAlways`, or `SkipWhenLive` while live,
+  dead-lettered the events its handler was on when the runner stopped,
+  if the handler returned its context's error, and parked their stream
+  until `ReplayStream`. Those events are now left for the next run.
 - The memory store's `LoadStreamFrom` returned the stored envelopes
   themselves, so a caller changing one changed the store's copy, and
   `ReadAll` copied only the envelope, sharing the event and its

@@ -803,3 +803,51 @@ func (s *takeoverStore) SaveStatus(ctx context.Context, l projection.Lease, st p
 	s.holdSeg1(ctx, l)
 	return s.Store.SaveStatus(ctx, l, st)
 }
+
+// TestRunner_ShutdownDoesNotDeadLetter covers a handler that returns its
+// ctx's error when the runner stops under SkipAlways: the events it was
+// handling are left for the next run, not dead-lettered, and their stream
+// is not parked.
+func TestRunner_ShutdownDoesNotDeadLetter(t *testing.T) {
+	es := &testStore{}
+	for range 3 {
+		if _, err := es.Save(t.Context(), []eventsourcing.Envelope{
+			{EventID: uuid.New(), StreamID: "s1", Event: &taskCreated{ID: "s1"}},
+		}, eventsourcing.Any{}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+	ps := memory.NewProjectionStore()
+	started := make(chan struct{})
+	var once sync.Once
+	h := eventsourcing.NewEventHandlerFunc(func(ctx context.Context, _ eventsourcing.Event) error {
+		once.Do(func() { close(started) })
+		<-ctx.Done() // blocked on I/O that honours ctx
+		return ctx.Err()
+	})
+	r := projection.NewRunner(projection.Definition{
+		Name:         "test",
+		Handler:      h,
+		EventTypes:   []string{"projection_test.TaskCreated"},
+		OnError:      projection.SkipAlways,
+		PollInterval: 10 * time.Millisecond,
+	}, es, ps)
+	stop := runRunner(t, r)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never ran")
+	}
+	stop()
+
+	dl, err := ps.LoadDeadLetters(context.Background(), "test", 0)
+	if err != nil {
+		t.Fatalf("LoadDeadLetters: %v", err)
+	}
+	if len(dl) != 0 {
+		t.Errorf("shutdown dead-lettered %d events, want 0: %v", len(dl), dl)
+	}
+	if n := r.Skipped(); n != 0 {
+		t.Errorf("Skipped() = %d after shutdown, want 0", n)
+	}
+}

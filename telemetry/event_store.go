@@ -114,7 +114,7 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		metric.WithAttributes(AttrOperation.String("save")),
 	)
 	EventStoreSaves.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("save")))
-	EventsAppended.Add(ctx, int64(len(events)), metric.WithAttributes(AttrStreamID.String(streamID)))
+	EventsAppended.Add(ctx, int64(len(events)))
 
 	if err != nil {
 		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("save")))
@@ -172,7 +172,7 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 				return nil, io.EOF
 			}
 
-			EventsLoaded.Add(spanCtx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+			EventsLoaded.Add(spanCtx, 1)
 			return src.Value(), nil
 		},
 		func(err error) {
@@ -230,7 +230,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 			}
 
 			eventCount++
-			EventsLoaded.Add(spanCtx, 1, metric.WithAttributes(AttrStreamID.String(id)))
+			EventsLoaded.Add(spanCtx, 1)
 			return src.Value(), nil
 		},
 		func(err error) {
