@@ -83,6 +83,11 @@ release may break the API; every break is listed under **Breaking**.
   `eventsourcing.event_handler.errors`. Their Go variables are
   `EventHandlerOperations`, `EventHandlerDuration` and
   `EventHandlerErrors`. `AttrSubscriberName` is removed.
+- The `eventsourcing.events.appended` and `eventsourcing.events.loaded`
+  metrics no longer carry `eventsourcing.stream.id`. Labelled by stream,
+  they made one time series per stream, which grows without bound.
+  Queries that group or filter these metrics by stream ID must drop it;
+  the store spans still carry the stream ID.
 
 ### Added
 

@@ -318,3 +318,47 @@ func envelopes(n int) []*eventsourcing.Envelope {
 	}
 	return out
 }
+
+// TestEventStore_CountersHaveNoStreamID verifies that EventsAppended and
+// EventsLoaded are not labelled with the stream ID: one time series per
+// stream would grow without bound.
+func TestEventStore_CountersHaveNoStreamID(t *testing.T) {
+	ctx := context.Background()
+	rec := durationRecorder
+	const appended, loaded = "eventsourcing.events.appended", "eventsourcing.events.loaded"
+	fromAppended, fromLoaded := len(rec.recordsFor(appended)), len(rec.recordsFor(loaded))
+
+	stub := &stubStore{events: []*eventsourcing.Envelope{{StreamID: "agg-1", Event: stubEvent{}, Version: 1}}}
+	store := WithEventStoreTelemetry(stub)
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{{StreamID: "agg-1", Event: stubEvent{}}}, eventsourcing.Any{}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	for name, load := range map[string]func() (*eventsourcing.Iterator[*eventsourcing.Envelope], error){
+		"LoadStream": func() (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return store.LoadStream(ctx, "agg-1")
+		},
+		"LoadStreamFrom": func() (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+			return store.LoadStreamFrom(ctx, "agg-1", eventsourcing.Any{})
+		},
+	} {
+		it, err := load()
+		if err != nil {
+			t.Fatalf("%s() error = %v", name, err)
+		}
+		for it.Next() {
+		}
+		if err := it.Close(); err != nil {
+			t.Fatalf("%s() Close() error = %v", name, err)
+		}
+	}
+
+	got := append(rec.recordsFor(appended)[fromAppended:], rec.recordsFor(loaded)[fromLoaded:]...)
+	if len(got) != 3 {
+		t.Fatalf("recorded %d counter increments, want 3 (one save, two loads)", len(got))
+	}
+	for _, r := range got {
+		if v, ok := r.attrs.Value(AttrStreamID); ok {
+			t.Errorf("%s recorded with %s = %q, want no stream ID", r.name, AttrStreamID, v.AsString())
+		}
+	}
+}
