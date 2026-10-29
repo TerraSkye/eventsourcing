@@ -417,6 +417,11 @@ func (r *Runner) applyBatch(ctx context.Context, seg int, events []*eventsourcin
 // event that fails can be stalled on or skipped individually.
 func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsourcing.Envelope, batchCP Checkpoint, batchStatus Status) error {
 	for _, env := range events {
+		// A handler that fails because the runner is stopping has not
+		// failed on the event: leave it for the next run, not a dead letter.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		cp := batchCP
 		cp.Position = env.GlobalPosition
 		status := batchStatus
@@ -436,6 +441,8 @@ func (r *Runner) applyOneByOne(ctx context.Context, seg int, events []*eventsour
 		switch {
 		case err == nil:
 			// Applied on its own; a flaky handler may succeed on retry.
+		case ctx.Err() != nil:
+			return ctx.Err()
 		case errors.As(err, &he) && r.shouldSkip(batchStatus.Phase, env.GlobalPosition <= cp.ReplayUntil):
 			if err = r.skipEvent(ctx, seg, env, he.err, cp, status); err != nil {
 				return err
