@@ -72,6 +72,8 @@ func newFixture(t *testing.T, withReset bool) *fixture {
 }
 
 type snapshot struct {
+	Events      bool `json:"events"`
+	Chains      bool `json:"chains"`
 	Projections []struct {
 		Name     string `json:"name"`
 		State    string `json:"state"`

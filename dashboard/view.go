@@ -36,6 +36,8 @@ var stateRank = map[string]int{
 type snapshot struct {
 	Title       string           `json:"title"`
 	Reset       bool             `json:"reset"`
+	Events      bool             `json:"events"` // the page offers the events view
+	Chains      bool             `json:"chains"` // events link to their correlation chain
 	Projections []projectionView `json:"projections"`
 }
 

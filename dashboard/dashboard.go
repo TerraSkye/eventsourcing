@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/projection"
 )
 
@@ -34,7 +35,9 @@ type Dashboard struct {
 	interval time.Duration
 	claimTTL time.Duration
 	title    string
-	hosts    []string // host names allowed besides localhost and IP addresses
+	hosts    []string                        // host names allowed besides localhost and IP addresses
+	events   eventsourcing.GlobalReader      // nil: no events view
+	chains   eventsourcing.CorrelationLoader // nil: no correlation chains
 
 	mux *http.ServeMux
 	hub *hub
@@ -93,6 +96,21 @@ func WithAllowedHosts(hosts ...string) Option {
 	}
 }
 
+// WithEvents adds an events view that browses the global log reader reads,
+// newest first, filtered by event type and stream prefix. If reader also
+// implements [eventsourcing.CorrelationLoader], each event links to its
+// correlation chain: every event it belongs with, across all streams, drawn
+// as a tree of what caused what.
+//
+// The view shows every event's payload and metadata to anyone who can open
+// the dashboard.
+func WithEvents(reader eventsourcing.GlobalReader) Option {
+	return func(d *Dashboard) {
+		d.events = reader
+		d.chains, _ = reader.(eventsourcing.CorrelationLoader)
+	}
+}
+
 // WithTitle sets the page's title. Default "Projections".
 func WithTitle(title string) Option {
 	return func(d *Dashboard) { d.title = title }
@@ -128,6 +146,8 @@ func New(store projection.Store, opts ...Option) *Dashboard {
 	d.mux.HandleFunc("GET /events", d.serveEvents)
 	d.mux.HandleFunc("GET /api/snapshot", d.serveSnapshot)
 	d.mux.HandleFunc("POST /api/projections/{name}/rebuild", d.serveRebuild)
+	d.mux.HandleFunc("GET /api/events", d.serveEventList)
+	d.mux.HandleFunc("GET /api/correlations/{id}", d.serveChain)
 	return d
 }
 

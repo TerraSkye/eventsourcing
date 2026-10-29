@@ -152,6 +152,7 @@ func main() {
 	d := dashboard.New(store,
 		dashboard.WithProjections(list.name(), byOwner.name()),
 		dashboard.WithReset(),
+		dashboard.WithEvents(events),
 		dashboard.WithTitle("Task service"),
 	)
 	srv := &http.Server{Addr: *addr, Handler: d}
@@ -171,16 +172,20 @@ func main() {
 }
 
 // appendTasks appends about n events: tasks created for a random owner
-// and, two in three, completed.
+// and, two in three, completed. A task's events form one correlation
+// chain, the completion caused by the creation, so the events view has
+// chains to show.
 func appendTasks(ctx context.Context, events eventsourcing.EventStore, n int) {
 	for i := 0; i < n && ctx.Err() == nil; {
 		id := uuid.NewString()
+		created := uuid.New()
 		envs := []eventsourcing.Envelope{
-			{EventID: uuid.New(), StreamID: id, Version: 1, OccurredAt: time.Now(),
+			{EventID: created, StreamID: id, Version: 1, OccurredAt: time.Now(), CorrelationID: created.String(),
 				Event: &TaskCreated{TaskID: id, Owner: owners[rand.IntN(len(owners))]}},
 		}
 		if rand.IntN(3) != 0 {
 			envs = append(envs, eventsourcing.Envelope{EventID: uuid.New(), StreamID: id, Version: 2, OccurredAt: time.Now(),
+				CorrelationID: created.String(), CausationID: created.String(),
 				Event: &TaskCompleted{TaskID: id}})
 		}
 		if _, err := events.Save(ctx, envs, eventsourcing.NoStream{}); err != nil {

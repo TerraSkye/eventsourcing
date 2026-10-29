@@ -118,6 +118,11 @@ release may break the API; every break is listed under **Breaking**.
   answers only requests for localhost or an IP address, and for the host
   names given with `WithAllowedHosts`. `go run ./examples/dashboard` starts
   a demo.
+- `dashboard.WithEvents` adds an events view to the dashboard: the
+  global log, newest first, filtered by event type and stream prefix,
+  with each event's payload and metadata. On a store that implements
+  `CorrelationLoader`, an event opens its correlation chain as a tree of
+  what caused what, across streams.
 - `CorrelationLoader`, implemented by the memory, Postgres and SQLite
   stores, loads a correlation chain: every event, across all streams,
   with one `CorrelationID`, in `GlobalPosition` order. It is for

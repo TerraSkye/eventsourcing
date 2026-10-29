@@ -132,6 +132,60 @@
   .toast { background: var(--ink); color: var(--paper); padding: 0.75rem 1rem; border-radius: 6px; }
   .toast.error { background: var(--stalled); color: #fff; }
 
+  /* Tabs, shown once the dashboard offers more than projections. */
+  nav.tabs { display: flex; gap: 1.5rem; margin-top: 1rem; }
+  nav.tabs a { color: var(--muted); text-decoration: none; padding: 0.25rem 0; border-bottom: 2px solid transparent; }
+  nav.tabs a:hover { color: var(--ink); }
+  nav.tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 560; }
+
+  /* The events view: a filter bar over the log, newest first. */
+  form.filters { display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; align-items: end; padding: 1.5rem 0 1rem; }
+  form.filters label { display: grid; gap: 0.25rem; font-size: 0.8125rem; color: var(--muted); }
+  input {
+    font: inherit; font-size: 0.9375rem; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 0.375rem 0.625rem; min-width: 12rem;
+  }
+  form.filters .gap { flex: 1; }
+  .log-wrap { overflow-x: auto; }
+  table.log { width: 100%; }
+  table.log tbody tr.row { cursor: pointer; }
+  table.log tbody tr.row:hover td { background: var(--surface); }
+  table.log tbody tr.row[aria-expanded="true"] td { background: var(--surface); border-bottom-color: transparent; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8125rem; }
+  td.wrap { overflow-wrap: anywhere; }
+  tr.detail td { background: var(--surface); padding: 0.25rem 1rem 1rem; }
+  .detail-grid { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1rem; margin: 0.5rem 0 0.75rem; font-size: 0.875rem; }
+  .detail-grid dt { font-size: 0.875rem; }
+  .detail-grid dd { font-size: 0.875rem; font-weight: 400; overflow-wrap: anywhere; }
+  pre {
+    margin: 0.25rem 0 0.75rem; padding: 0.75rem; overflow-x: auto; max-height: 24rem;
+    background: var(--paper); border: 1px solid var(--rule); border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8125rem; line-height: 1.45;
+  }
+  .label { font-size: 0.8125rem; color: var(--muted); }
+  a { color: var(--focus); }
+  .pager { display: flex; align-items: center; gap: 1rem; padding: 1rem 0; color: var(--muted); font-size: 0.875rem; }
+
+  /* The chain view: the causation tree of one correlation chain. */
+  .chain-head { padding: 1.5rem 0 0.5rem; }
+  .chain-head h2 { overflow-wrap: anywhere; }
+  .chain-head p { margin: 0.25rem 0 0; color: var(--muted); }
+  ul.tree, ul.tree ul { list-style: none; margin: 0; padding: 0; }
+  ul.tree ul { margin-left: 0.6875rem; padding-left: 1.25rem; border-left: 1px solid var(--rule); }
+  ul.tree li { padding: 0.125rem 0; }
+  .node {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1rem; width: 100%;
+    text-align: left; border: 1px solid transparent; border-radius: 6px; padding: 0.375rem 0.625rem;
+  }
+  .node:hover { border-color: var(--rule); background: var(--surface); }
+  .node[aria-expanded="true"] { border-color: var(--rule); background: var(--surface); }
+  .node.focus { border-color: var(--focus); }
+  .node .type { font-weight: 560; }
+  .node .stream { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+  .node .at { color: var(--muted); font-size: 0.8125rem; margin-left: auto; }
+  .node-body { padding: 0.25rem 0.625rem 0.5rem; }
+  .orphan { color: var(--catching); font-size: 0.8125rem; }
+
   @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
   @media (max-width: 40rem) { main { padding-top: 1.5rem; } dl.numbers { gap: 0.5rem 1.5rem; } }
 </style>
@@ -142,7 +196,35 @@
     <h1 id="title">Projections</h1>
     <span class="connection" id="connection" data-state="connecting" role="status">Connecting</span>
   </header>
-  <div id="list"></div>
+  <nav class="tabs" id="tabs" hidden>
+    <a href="#projections" data-view="projections">Projections</a>
+    <a href="#events" data-view="events">Events</a>
+  </nav>
+  <div id="list" data-view="projections"></div>
+  <div id="events-view" data-view="events" hidden>
+    <form class="filters" id="filters">
+      <label>Event type <input name="type" list="types" placeholder="Any" autocomplete="off"></label>
+      <label>Stream ID starts with <input name="stream" placeholder="Any" autocomplete="off"></label>
+      <button type="submit">Filter</button>
+      <span class="gap"></span>
+      <label id="chain-open">Correlation ID <input name="chain" placeholder="Open a chain" autocomplete="off"></label>
+    </form>
+    <datalist id="types"></datalist>
+    <div class="log-wrap">
+      <table class="log">
+        <thead><tr>
+          <th class="num">Position</th><th>Occurred</th><th>Type</th><th>Stream</th><th class="num">Version</th>
+        </tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button type="button" id="newest">Newest</button>
+      <button type="button" id="older">Older</button>
+      <span id="pager-note"></span>
+    </div>
+  </div>
+  <div id="chain-view" data-view="chain" hidden></div>
 </main>
 
 <dialog id="confirm" aria-labelledby="confirm-title">
@@ -342,6 +424,7 @@
   function render(snap) {
     document.title = snap.title;
     document.getElementById("title").textContent = snap.title;
+    configure(snap);
     if (!snap.projections.length) {
       list.replaceChildren(el("div", { class: "empty" },
         el("strong", {}, "No projections to show"),
@@ -398,6 +481,221 @@
     const t = el("div", { class: isError ? "toast error" : "toast", role: isError ? "alert" : "status" }, text);
     document.getElementById("toasts").append(t);
     setTimeout(() => t.remove(), isError ? 8000 : 4000);
+  }
+
+  // --- Events and chains ---
+
+  const tabs = document.getElementById("tabs");
+  const views = document.querySelectorAll("main > [data-view]");
+  const filters = document.getElementById("filters");
+  const log = document.getElementById("log");
+  const olderButton = document.getElementById("older");
+  const pagerNote = document.getElementById("pager-note");
+  const chainView = document.getElementById("chain-view");
+  const time = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
+  const config = { events: false, chains: false, known: false };
+  const seenTypes = new Set();
+  let olderCursor = 0;
+
+  // configure learns from the first snapshot which views the dashboard
+  // offers, and shows the one the address asks for.
+  function configure(snap) {
+    if (config.known && config.events === snap.events && config.chains === snap.chains) return;
+    Object.assign(config, { events: snap.events, chains: snap.chains, known: true });
+    tabs.hidden = !config.events;
+    document.getElementById("chain-open").hidden = !config.chains;
+    route();
+  }
+
+  function route() {
+    // Decode parts, not the whole hash: a correlation ID may hold any
+    // character, the separators included.
+    const hash = location.hash.slice(1);
+    let view = "projections";
+    if (config.events && hash.startsWith("events")) view = "events";
+    if (config.chains && hash.startsWith("chain/")) view = "chain";
+    for (const v of views) v.hidden = v.dataset.view !== view;
+    for (const a of tabs.querySelectorAll("a")) {
+      const current = a.dataset.view === view || (view === "chain" && a.dataset.view === "events");
+      if (current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    }
+    if (view === "events") {
+      const params = new URLSearchParams(hash.slice("events".length + 1));
+      filters.elements.type.value = params.get("type") || "";
+      filters.elements.stream.value = params.get("stream") || "";
+      loadEvents(0, false);
+    }
+    if (view === "chain") {
+      const [id, eventID] = hash.slice("chain/".length).split("@");
+      loadChain(decodeURIComponent(id), eventID && decodeURIComponent(eventID));
+    }
+  }
+  window.addEventListener("hashchange", route);
+
+  filters.addEventListener("submit", e => {
+    e.preventDefault();
+    const chain = filters.elements.chain.value.trim();
+    if (chain) {
+      filters.elements.chain.value = "";
+      location.hash = chainHash(chain);
+      return;
+    }
+    const params = new URLSearchParams();
+    for (const name of ["type", "stream"]) {
+      const v = filters.elements[name].value.trim();
+      if (v) params.set(name, v);
+    }
+    const query = params.toString();
+    const target = query ? `events?${query}` : "events";
+    if (location.hash.slice(1) === target) route(); else location.hash = target;
+  });
+  document.getElementById("newest").addEventListener("click", () => loadEvents(0, false));
+  olderButton.addEventListener("click", () => loadEvents(olderCursor, true));
+
+  function chainHash(id, eventID) {
+    return "chain/" + encodeURIComponent(id) + (eventID ? "@" + eventID : "");
+  }
+
+  async function getJSON(url) {
+    const res = await fetch(url);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `The dashboard answered with status ${res.status}.`);
+    return body;
+  }
+
+  // loadEvents shows the newest page before position before (0: the head),
+  // replacing the table, or appending to it when more is set.
+  async function loadEvents(before, more) {
+    const params = new URLSearchParams();
+    if (before) params.set("before", before);
+    for (const name of ["type", "stream"]) {
+      const v = filters.elements[name].value.trim();
+      if (v) params.set(name, v);
+    }
+    olderButton.disabled = true;
+    pagerNote.textContent = "Loading…";
+    let page;
+    try {
+      page = await getJSON(`api/events?${params}`);
+    } catch (err) {
+      pagerNote.textContent = err.message;
+      return;
+    }
+    const rows = page.events.flatMap(eventRows);
+    if (more) log.append(...rows); else log.replaceChildren(...rows);
+    for (const ev of page.events) seenTypes.add(ev.type);
+    document.getElementById("types").replaceChildren(...[...seenTypes].sort().map(t => el("option", { value: t })));
+
+    olderCursor = page.older;
+    olderButton.disabled = !page.older;
+    const shown = log.querySelectorAll("tr.row").length;
+    if (!shown) pagerNote.textContent = page.head ? "No events match." : "The log is empty.";
+    else if (page.scanned) pagerNote.textContent = `${num.format(shown)} shown. Looked back to position ${num.format(page.scanned)}; Older looks further.`;
+    else pagerNote.textContent = `${num.format(shown)} shown, head of the log at ${num.format(page.head)}.`;
+  }
+
+  // eventRows returns an event's table row and the row that opens under it.
+  function eventRows(ev) {
+    const row = el("tr", { class: "row", tabindex: "0", "aria-expanded": "false" },
+      el("td", { class: "num" }, num.format(ev.position)),
+      el("td", {}, time.format(new Date(ev.occurredAt))),
+      el("td", { class: "wrap" }, ev.type),
+      el("td", { class: "mono wrap" }, ev.streamId),
+      el("td", { class: "num" }, num.format(ev.version)));
+    const detail = el("tr", { class: "detail" }, el("td", { colspan: "5" }, eventBody(ev)));
+    detail.hidden = true;
+    const toggle = () => {
+      detail.hidden = !detail.hidden;
+      row.setAttribute("aria-expanded", String(!detail.hidden));
+    };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    return [row, detail];
+  }
+
+  // eventBody shows an event's identifiers, metadata and payload.
+  function eventBody(ev, inChain) {
+    const fields = [["Event ID", ev.eventId]];
+    if (ev.correlationId) {
+      const value = config.chains && !inChain
+        ? el("a", { href: "#" + chainHash(ev.correlationId, ev.eventId) }, ev.correlationId)
+        : ev.correlationId;
+      fields.push(["Correlation ID", value]);
+    }
+    if (ev.causationId) fields.push(["Caused by", ev.causationId]);
+    if (inChain) fields.push(["Stream", `${ev.streamId} @ ${ev.version}`], ["Position", num.format(ev.position)], ["Occurred", time.format(new Date(ev.occurredAt))]);
+    const grid = el("dl", { class: "detail-grid" }, ...fields.flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono" }, v)]));
+    const parts = [grid, el("div", { class: "label" }, "Payload"), el("pre", {}, JSON.stringify(ev.payload, null, 2))];
+    if (ev.metadata && Object.keys(ev.metadata).length) {
+      parts.push(el("div", { class: "label" }, "Metadata"), el("pre", {}, JSON.stringify(ev.metadata, null, 2)));
+    }
+    return el("div", {}, ...parts);
+  }
+
+  // loadChain shows one correlation chain as the tree of what caused what,
+  // with focusID, the event the reader came from, opened.
+  async function loadChain(id, focusID) {
+    chainView.replaceChildren(el("p", { class: "label" }, "Loading…"));
+    let page;
+    try {
+      page = await getJSON(`api/correlations/${encodeURIComponent(id)}`);
+    } catch (err) {
+      chainView.replaceChildren(el("div", { class: "problem" }, el("p", {}, err.message)));
+      return;
+    }
+    const events = page.events;
+    const back = el("a", { href: "#events" }, "Back to events");
+    if (!events.length) {
+      chainView.replaceChildren(el("div", { class: "chain-head" }, back, el("h2", {}, id), el("p", {}, "No event carries this correlation ID.")));
+      return;
+    }
+
+    // An event's parent is the event whose ID is its CausationID. One with
+    // no CausationID started the chain; one whose cause is not in it was
+    // caused by an event the store no longer has, or another chain's.
+    const byID = new Map(events.map(ev => [ev.eventId, { ev, children: [] }]));
+    const roots = [];
+    for (const node of byID.values()) {
+      const parent = node.ev.causationId && byID.get(node.ev.causationId);
+      if (parent) parent.children.push(node); else roots.push(node);
+    }
+
+    const first = new Date(events[0].occurredAt);
+    const last = new Date(events[events.length - 1].occurredAt);
+    const streams = new Set(events.map(ev => ev.streamId)).size;
+    const span = duration((last - first) / 1000);
+    const summary = `${num.format(events.length)} ${events.length === 1 ? "event" : "events"} in ${streams} ${streams === 1 ? "stream" : "streams"}, starting ${time.format(first)}` + (span ? `, over ${span}` : "") + ".";
+
+    let focused = null;
+    function branch(node) {
+      const ev = node.ev;
+      const offset = (new Date(ev.occurredAt) - first) / 1000;
+      const head = el("button", { type: "button", class: "node", "aria-expanded": "false" },
+        el("span", { class: "type" }, ev.type),
+        el("span", { class: "stream mono" }, `${ev.streamId} @ ${ev.version}`),
+        el("span", { class: "at" }, offset > 0 ? `+${offset < 1 ? `${Math.round(offset * 1000)} ms` : duration(offset)}` : `#${num.format(ev.position)}`));
+      const body = el("div", { class: "node-body" }, eventBody(ev, true));
+      body.hidden = true;
+      head.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        head.setAttribute("aria-expanded", String(!body.hidden));
+      });
+      const li = el("li", {}, head);
+      if (ev.causationId && !byID.has(ev.causationId)) li.append(el("div", { class: "orphan" }, `Caused by ${ev.causationId}, which is not in this chain.`));
+      li.append(body);
+      if (ev.eventId === focusID) {
+        head.classList.add("focus");
+        head.click();
+        focused = head;
+      }
+      if (node.children.length) li.append(el("ul", {}, ...node.children.map(branch)));
+      return li;
+    }
+
+    chainView.replaceChildren(
+      el("div", { class: "chain-head" }, back, el("h2", { class: "mono" }, id), el("p", {}, summary)),
+      el("ul", { class: "tree" }, ...roots.map(branch)));
+    if (focused) focused.scrollIntoView({ block: "center" });
   }
 
   // Live updates. EventSource reconnects by itself after a lost connection.
