@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = (*EventStore)(nil)
-	_ eventsourcing.GlobalReader = (*EventStore)(nil)
+	_ eventsourcing.EventStore        = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader      = (*EventStore)(nil)
+	_ eventsourcing.CorrelationReader = (*EventStore)(nil)
 )
 
 // defaultReadLimit is the page size ReadAll uses when ReadOptions.Limit is
@@ -236,6 +237,20 @@ func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 		}
 		return eventsourcing.NewSliceIterator(ctx, envs), nil
 	}
+}
+
+// LoadCorrelation implements [eventsourcing.CorrelationReader], using the
+// index on correlation_id. Like [EventStore.LoadStream], it reads the
+// events in full before it returns.
+func (s *EventStore) LoadCorrelation(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	if id == "" {
+		return nil, fmt.Errorf("load correlation: %w", eventsourcing.ErrEmptyCorrelationID)
+	}
+	envs, err := s.query(ctx, selectEvents+" WHERE correlation_id = ? ORDER BY id", id)
+	if err != nil {
+		return nil, fmt.Errorf("load correlation %q: %w", id, err)
+	}
+	return eventsourcing.NewSliceIterator(ctx, envs), nil
 }
 
 // ReadAll implements [eventsourcing.GlobalReader]. Filters run in SQL, on exact

@@ -51,6 +51,15 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 	}
 }
 
+func TestCorrelationReaderAcceptance(t *testing.T) {
+	for _, d := range databases {
+		t.Run(d.name, func(t *testing.T) {
+			store := sqlite.NewEventStore(openDB(t, d.path(t)))
+			eventsourcingtest.CorrelationReaderAcceptanceTest(t, store, store)
+		})
+	}
+}
+
 func TestOpen_SchemaIsIdempotent(t *testing.T) {
 	db := openDB(t, ":memory:")
 	if _, err := db.ExecContext(t.Context(), sqlite.Schema); err != nil {

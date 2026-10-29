@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	_ eventsourcing.EventStore   = (*EventStore)(nil)
-	_ eventsourcing.GlobalReader = (*EventStore)(nil)
+	_ eventsourcing.EventStore        = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader      = (*EventStore)(nil)
+	_ eventsourcing.CorrelationReader = (*EventStore)(nil)
 )
 
 // EventStore is an in-memory [eventsourcing.EventStore] intended for tests
@@ -293,6 +294,38 @@ func (m *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 	}, nil)
 
 	return iter, nil
+}
+
+// LoadCorrelation implements [eventsourcing.CorrelationReader]. It scans
+// the global log for the chain's events under the read lock, then decodes
+// them as the caller iterates.
+func (m *EventStore) LoadCorrelation(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	if id == "" {
+		return nil, fmt.Errorf("load correlation: %w", eventsourcing.ErrEmptyCorrelationID)
+	}
+
+	m.mu.RLock()
+	var chain []*record
+	for _, rec := range m.global {
+		if rec.env.CorrelationID == id {
+			chain = append(chain, rec)
+		}
+	}
+	m.mu.RUnlock()
+
+	var offset int
+	return eventsourcing.NewIteratorFunc(ctx, func(context.Context) (*eventsourcing.Envelope, error) {
+		if offset >= len(chain) {
+			return nil, io.EOF
+		}
+		rec := chain[offset]
+		offset++
+		env, err := rec.envelope()
+		if err != nil {
+			return nil, fmt.Errorf("load correlation %q: %w", id, err)
+		}
+		return env, nil
+	}, nil), nil
 }
 
 // Close discards all stored events. After Close, Save returns an error
