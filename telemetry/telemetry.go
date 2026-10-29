@@ -15,9 +15,12 @@ const (
 // Semantic attribute keys used on the spans and metrics produced by this
 // package, following OpenTelemetry naming conventions.
 const (
-	// AttrDBSystem identifies the database system, following the OpenTelemetry
-	// semantic conventions.
-	AttrDBSystem = attribute.Key("db.system")
+	// AttrDBSystemName identifies the database system behind an event
+	// store, following the OpenTelemetry semantic conventions, such as
+	// "postgresql" or "sqlite". Set it with [WithAttributes] on
+	// [WithEventStoreTelemetry]; the store's spans and metrics then carry
+	// it. Unset, they carry none.
+	AttrDBSystemName = attribute.Key("db.system.name")
 
 	// Command attributes
 	AttrCommandType = attribute.Key("eventsourcing.command.type")
@@ -30,7 +33,7 @@ const (
 	// EventData attributes
 	AttrEventType      = attribute.Key("eventsourcing.event.type")
 	AttrEventID        = attribute.Key("eventsourcing.event.id")
-	AttrEventCount     = attribute.Key("eventsourcing.events.count")
+	AttrEventCount     = attribute.Key("eventsourcing.event.count")
 	AttrEventGlobalPos = attribute.Key("eventsourcing.event.global_position")
 	AttrEventStreamPos = attribute.Key("eventsourcing.event.stream_position")
 
@@ -40,22 +43,17 @@ const (
 	AttrCausationID   = attribute.Key("eventsourcing.causation.id")
 
 	// Query attributes
-	AttrQueryType   = attribute.Key("eventsourcing.query.type")
-	AttrQueryID     = attribute.Key("eventsourcing.query.id")
-	AttrResultType  = attribute.Key("eventsourcing.query.result_type")
-	AttrResultCount = attribute.Key("eventsourcing.query.result_count")
+	AttrQueryType = attribute.Key("eventsourcing.query.type")
+	AttrQueryID   = attribute.Key("eventsourcing.query.id")
 
-	// Event handler attributes
-	AttrHandlerName = attribute.Key("eventsourcing.handler.name")
+	// AttrResult labels an outcome: "success" or "failure", and also
+	// "rejected" for a command, "skipped" for an event handler and
+	// "claim_lost" for a projection batch.
+	AttrResult = attribute.Key("eventsourcing.result")
 
-	// Result attribute for outcome labelling on counters
-	AttrResult = attribute.Key("eventsourcing.result") // "success" | "failure"; also "rejected" for commands and "claim_lost" for projection batches
-
-	// Error attributes
-	AttrErrorType    = attribute.Key("eventsourcing.error.type")
+	// AttrErrorMessage carries the cause of a business rule violation on a
+	// command span.
 	AttrErrorMessage = attribute.Key("eventsourcing.error.message")
-	AttrRetryCount   = attribute.Key("eventsourcing.retry.count")
-	AttrRetryMax     = attribute.Key("eventsourcing.retry.max")
 
 	// Projection attributes
 	AttrProjectionName     = attribute.Key("eventsourcing.projection.name")
@@ -64,11 +62,9 @@ const (
 	AttrProjectionPhase    = attribute.Key("eventsourcing.projection.phase")
 	AttrClaimResult        = attribute.Key("eventsourcing.projection.claim.result") // "acquired" | "held" | "error"
 
-	// Operation attributes
-	AttrOperation    = attribute.Key("eventsourcing.operation")
-	AttrConflictType = attribute.Key("eventsourcing.conflict.type")
-	AttrShardID      = attribute.Key("eventsourcing.shard.id")
-	AttrQueueDepth   = attribute.Key("eventsourcing.queue.depth")
+	// AttrOperation names the event store operation: "save", "load" or
+	// "read_all".
+	AttrOperation = attribute.Key("eventsourcing.operation")
 )
 
 // meter and tracer are the shared OpenTelemetry instruments used by every
@@ -86,134 +82,92 @@ var (
 var (
 	// Command metrics
 
-	// CommandsCount counts commands handled, labelled by [AttrResult]:
-	// "success", "rejected" for a [eventsourcing.BusinessRuleViolationError],
-	// or "failure".
-	CommandsCount, _ = meter.Int64Counter(
-		"eventsourcing.commands.count",
-		metric.WithDescription("Total number of commands handled, labelled by eventsourcing.result"),
-		metric.WithUnit("{command}"),
-	)
-
-	// CommandsDuration records command handling duration, in seconds.
-	CommandsDuration, _ = meter.Float64Histogram(
-		"eventsourcing.commands.duration",
-		metric.WithDescription("Command handling duration"),
+	// CommandDuration records command handling duration, in seconds,
+	// labelled by [AttrCommandType] and [AttrResult]: "success",
+	// "rejected" for a [eventsourcing.BusinessRuleViolationError], or
+	// "failure". Its count is the number of commands handled.
+	CommandDuration, _ = meter.Float64Histogram(
+		"eventsourcing.command.duration",
+		metric.WithDescription("Command handling duration, labelled by eventsourcing.result"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 	)
 
-	// CommandsProcessing tracks the number of commands currently being
-	// processed.
-	CommandsProcessing, _ = meter.Int64UpDownCounter(
-		"eventsourcing.command.processing",
-		metric.WithDescription("Number of commands currently being processed"),
+	// CommandActive tracks the number of commands being handled.
+	CommandActive, _ = meter.Int64UpDownCounter(
+		"eventsourcing.command.active",
+		metric.WithDescription("Number of commands being handled"),
 		metric.WithUnit("{command}"),
 	)
 
-	// EventData metrics
-
-	// EventsAppended counts events appended to streams. It carries no
-	// stream ID, since one series per stream would grow without bound; the
-	// store spans carry it instead.
-	EventsAppended, _ = meter.Int64Counter(
-		"eventsourcing.events.appended",
-		metric.WithDescription("Number of events appended to streams"),
-		metric.WithUnit("{event}"),
-	)
-
-	// EventsLoaded counts events loaded from streams, with no stream ID
-	// for the same reason as [EventsAppended].
-	EventsLoaded, _ = meter.Int64Counter(
-		"eventsourcing.events.loaded",
-		metric.WithDescription("Number of events loaded from streams"),
-		metric.WithUnit("{event}"),
-	)
-
-	// Event handler metrics
-
-	// EventHandlerOperations counts events passed to an event handler.
-	EventHandlerOperations, _ = meter.Int64Counter(
-		"eventsourcing.event_handler.operations",
-		metric.WithDescription("Number of events passed to an event handler"),
-		metric.WithUnit("{event}"),
-	)
-
-	// EventHandlerErrors counts errors an event handler returned, other
-	// than a skipped event.
-	EventHandlerErrors, _ = meter.Int64Counter(
-		"eventsourcing.event_handler.errors",
-		metric.WithDescription("Number of errors returned by an event handler"),
-		metric.WithUnit("{error}"),
-	)
-
-	// EventHandlerDuration records how long an event handler took, in
-	// seconds.
-	EventHandlerDuration, _ = meter.Float64Histogram(
-		"eventsourcing.event_handler.duration",
-		metric.WithDescription("Event handler duration"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
+	// CommandConflicts counts commands that failed with a
+	// [eventsourcing.StreamRevisionConflictError].
+	CommandConflicts, _ = meter.Int64Counter(
+		"eventsourcing.command.conflicts",
+		metric.WithDescription("Number of commands that failed with a concurrency conflict"),
+		metric.WithUnit("{conflict}"),
 	)
 
 	// Query metrics
 
-	// QueriesCount counts queries handled, labelled by [AttrResult]
-	// ("success" or "failure").
-	QueriesCount, _ = meter.Int64Counter(
-		"eventsourcing.queries.count",
-		metric.WithDescription("Total number of queries handled, labelled by eventsourcing.result"),
-		metric.WithUnit("{query}"),
-	)
-
-	// QueriesDuration records query handling duration, in seconds.
-	QueriesDuration, _ = meter.Float64Histogram(
-		"eventsourcing.queries.duration",
-		metric.WithDescription("Query handling duration"),
+	// QueryDuration records query handling duration, in seconds, labelled
+	// by [AttrQueryType] and [AttrResult] ("success" or "failure"). Its
+	// count is the number of queries handled.
+	QueryDuration, _ = meter.Float64Histogram(
+		"eventsourcing.query.duration",
+		metric.WithDescription("Query handling duration, labelled by eventsourcing.result"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
-	// QueriesProcessing tracks the number of queries currently being
-	// processed.
-	QueriesProcessing, _ = meter.Int64UpDownCounter(
-		"eventsourcing.query.processing",
-		metric.WithDescription("Number of queries currently being processed"),
+	// QueryActive tracks the number of queries being handled.
+	QueryActive, _ = meter.Int64UpDownCounter(
+		"eventsourcing.query.active",
+		metric.WithDescription("Number of queries being handled"),
 		metric.WithUnit("{query}"),
 	)
 
-	// EventStore metrics
+	// Event handler metrics
 
-	// EventStoreSaves counts EventStore save operations.
-	EventStoreSaves, _ = meter.Int64Counter(
-		"eventsourcing.eventstore.saves",
-		metric.WithDescription("Number of save operations"),
-		metric.WithUnit("{operation}"),
+	// EventHandlerDuration records how long an event handler took, in
+	// seconds, labelled by [AttrEventType] and [AttrResult]: "success",
+	// "skipped" for a [eventsourcing.SkippedEventError], or "failure". Its
+	// count is the number of events handled.
+	EventHandlerDuration, _ = meter.Float64Histogram(
+		"eventsourcing.event_handler.duration",
+		metric.WithDescription("Event handler duration, labelled by eventsourcing.result"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
-	// EventStoreDuration records EventStore operation duration, in seconds.
+	// Event store metrics
+
+	// EventStoreDuration records event store operation duration, in
+	// seconds, labelled by [AttrOperation], [AttrResult] and, when set,
+	// [AttrDBSystemName]. Its count is the number of operations.
 	EventStoreDuration, _ = meter.Float64Histogram(
-		"eventsourcing.eventstore.duration",
-		metric.WithDescription("Event store operation duration"),
+		"eventsourcing.event_store.duration",
+		metric.WithDescription("Event store operation duration, labelled by eventsourcing.operation and eventsourcing.result"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5),
 	)
 
-	// EventStoreErrors counts EventStore errors.
-	EventStoreErrors, _ = meter.Int64Counter(
-		"eventsourcing.eventstore.errors",
-		metric.WithDescription("Number of event store errors"),
-		metric.WithUnit("{error}"),
+	// EventStoreAppended counts events an event store appended. It carries
+	// no stream ID, since one series per stream would grow without bound;
+	// the store spans carry it instead.
+	EventStoreAppended, _ = meter.Int64Counter(
+		"eventsourcing.event_store.appended.events",
+		metric.WithDescription("Number of events appended"),
+		metric.WithUnit("{event}"),
 	)
 
-	// System metrics
-
-	// ConcurrencyConflicts counts detected
-	// [eventsourcing.StreamRevisionConflictError] occurrences.
-	ConcurrencyConflicts, _ = meter.Int64Counter(
-		"eventsourcing.concurrency.conflicts",
-		metric.WithDescription("Number of concurrency conflicts"),
-		metric.WithUnit("{conflict}"),
+	// EventStoreLoaded counts events an event store loaded, from streams
+	// or the global log, with no stream ID for the same reason as
+	// [EventStoreAppended].
+	EventStoreLoaded, _ = meter.Int64Counter(
+		"eventsourcing.event_store.loaded.events",
+		metric.WithDescription("Number of events loaded"),
+		metric.WithUnit("{event}"),
 	)
 
 	// Projection metrics

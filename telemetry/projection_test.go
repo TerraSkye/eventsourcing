@@ -131,14 +131,14 @@ func TestProjectionTelemetry_Runner(t *testing.T) {
 	}
 
 	want := map[string]float64{
-		"eventsourcing.projection.lag":               0,
-		"eventsourcing.projection.position":          3,
-		"eventsourcing.projection.events.skipped":    0,
-		"eventsourcing.projection.phase/starting":    0,
-		"eventsourcing.projection.phase/standby":     0,
-		"eventsourcing.projection.phase/catching_up": 0,
-		"eventsourcing.projection.phase/live":        1,
-		"eventsourcing.projection.phase/stalled":     0,
+		"eventsourcing.projection.lag":                  0,
+		"eventsourcing.projection.position":             3,
+		"eventsourcing.projection.dead_lettered.events": 0,
+		"eventsourcing.projection.phase/starting":       0,
+		"eventsourcing.projection.phase/standby":        0,
+		"eventsourcing.projection.phase/catching_up":    0,
+		"eventsourcing.projection.phase/live":           1,
+		"eventsourcing.projection.phase/stalled":        0,
 	}
 	for k, v := range want {
 		if got, ok := observed[k]; !ok || got != v {
@@ -297,8 +297,9 @@ func TestWithProjectionStoreTelemetry_DeadLetterStore(t *testing.T) {
 	}
 }
 
-// TestWithEventTelemetry_RecordsErrors checks a failing handler is counted
-// in EventHandlerErrors, tagged with the projection when it runs in a batch.
+// TestWithEventTelemetry_RecordsErrors checks a failing handler is recorded
+// in EventHandlerDuration with result "failure", tagged with the projection
+// when it runs in a batch.
 func TestWithEventTelemetry_RecordsErrors(t *testing.T) {
 	name := newProjectionName()
 	boom := errors.New("boom")
@@ -310,8 +311,9 @@ func TestWithEventTelemetry_RecordsErrors(t *testing.T) {
 		t.Fatalf("Handle() = %v, want %v", err, boom)
 	}
 
-	if errs := forProjection(durationRecorder.recordsFor("eventsourcing.event_handler.errors"), name); len(errs) != 1 {
-		t.Errorf("event handler errors for the projection = %d, want 1", len(errs))
+	recs := forProjection(durationRecorder.recordsFor("eventsourcing.event_handler.duration"), name)
+	if len(recs) != 1 || attrString(recs[0].attrs, AttrResult) != "failure" {
+		t.Errorf("event handler durations for the projection = %v, want one with result failure", recs)
 	}
 }
 
@@ -335,7 +337,7 @@ func TestEventStore_ReadAllEmptyPageNotTraced(t *testing.T) {
 	if _, err := reader.ReadAll(t.Context(), 0, eventsourcing.ReadOptions{}); err != nil {
 		t.Fatalf("ReadAll(after 0): %v", err)
 	}
-	if got := spanNameRecorder.since(before); !slices.Equal(got, []string{"read_all eventstore"}) {
-		t.Errorf("spans for a read with events = %v, want [read_all eventstore]", got)
+	if got := spanNameRecorder.since(before); !slices.Equal(got, []string{"read all events"}) {
+		t.Errorf("spans for a read with events = %v, want [read all events]", got)
 	}
 }

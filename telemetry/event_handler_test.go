@@ -89,3 +89,24 @@ func TestWithEventTelemetry_LinksOnlyToAProducer(t *testing.T) {
 		})
 	}
 }
+
+// TestWithEventTelemetry_SkippedResult covers a handler that declined the
+// event: recorded with result "skipped", apart from a success or a failure.
+func TestWithEventTelemetry_SkippedResult(t *testing.T) {
+	const instrument = "eventsourcing.event_handler.duration"
+	handler := WithEventTelemetry(eventsourcing.NewEventHandlerFunc(func(_ context.Context, event eventsourcing.Event) error {
+		return &eventsourcing.SkippedEventError{Event: event}
+	}))
+
+	from := len(durationRecorder.recordsFor(instrument))
+	if err := handler.Handle(context.Background(), stubEvent{}); err == nil {
+		t.Fatal("expected the skip to be returned")
+	}
+	got := durationRecorder.recordsFor(instrument)[from:]
+	if len(got) != 1 {
+		t.Fatalf("recorded %d %s values, want 1", len(got), instrument)
+	}
+	if r := attrString(got[0].attrs, AttrResult); r != "skipped" {
+		t.Errorf("%s = %q, want skipped", AttrResult, r)
+	}
+}

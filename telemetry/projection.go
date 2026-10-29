@@ -47,18 +47,19 @@ var (
 		metric.WithUnit("1"),
 	)
 
-	// ProjectionEventsSkipped counts events a projection skipped under a
-	// non-stalling error policy; see [projection.Runner.Skipped].
-	ProjectionEventsSkipped, _ = meter.Int64ObservableCounter(
-		"eventsourcing.projection.events.skipped",
-		metric.WithDescription("Events a projection skipped because its handler failed"),
+	// ProjectionDeadLettered counts events a projection dead-lettered: its
+	// handler failed on them under a non-stalling error policy, and the
+	// runner moved past them; see [projection.Runner.Skipped].
+	ProjectionDeadLettered, _ = meter.Int64ObservableCounter(
+		"eventsourcing.projection.dead_lettered.events",
+		metric.WithDescription("Events a projection dead-lettered because its handler failed"),
 		metric.WithUnit("{event}"),
 	)
 )
 
 // ObserveProjection reports r's status as metrics, labelled by
 // [AttrProjectionName]: [ProjectionLag], [ProjectionPosition],
-// [ProjectionPhase] and [ProjectionEventsSkipped]. The values come from
+// [ProjectionPhase] and [ProjectionDeadLettered]. The values come from
 // [projection.Runner.Status], as seen by this instance, and are read each
 // time the metrics are collected.
 //
@@ -76,9 +77,9 @@ func ObserveProjection(r *projection.Runner) (metric.Registration, error) {
 			}
 			o.ObserveInt64(ProjectionPhase, current, metric.WithAttributes(name, AttrProjectionPhase.String(p.String())))
 		}
-		o.ObserveInt64(ProjectionEventsSkipped, r.Skipped(), metric.WithAttributes(name))
+		o.ObserveInt64(ProjectionDeadLettered, r.Skipped(), metric.WithAttributes(name))
 		return nil
-	}, ProjectionLag, ProjectionPosition, ProjectionPhase, ProjectionEventsSkipped)
+	}, ProjectionLag, ProjectionPosition, ProjectionPhase, ProjectionDeadLettered)
 }
 
 // toInt64 converts a GlobalPosition to an int64 metric value, saturating

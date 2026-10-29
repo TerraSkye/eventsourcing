@@ -32,31 +32,40 @@ type EventStore struct {
 }
 
 // baseAttrs returns the span attributes common to every operation: the
-// configured db.system attribute (defaulting to "eventsourcing") followed by
-// any other attributes from cfg.
+// attributes from cfg, such as [AttrDBSystemName].
 func (t EventStore) baseAttrs() []attribute.KeyValue {
-	dbSystem := "eventsourcing"
+	return append([]attribute.KeyValue(nil), t.cfg.Attributes...)
+}
+
+// metricAttrs returns the attributes [EventStoreDuration] is recorded with
+// for operation op that returned err, plus [AttrDBSystemName] when cfg sets
+// it, so stores of different systems can be told apart.
+func (t EventStore) metricAttrs(op string, err error) metric.MeasurementOption {
+	outcome := "success"
+	if err != nil {
+		outcome = "failure"
+	}
+	attrs := []attribute.KeyValue{AttrOperation.String(op), AttrResult.String(outcome)}
+	return metric.WithAttributes(append(attrs, t.dbSystem()...)...)
+}
+
+// dbSystem returns the [AttrDBSystemName] attribute from cfg, if it sets one.
+func (t EventStore) dbSystem() []attribute.KeyValue {
 	for _, kv := range t.cfg.Attributes {
-		if string(kv.Key) == string(AttrDBSystem) {
-			dbSystem = kv.Value.AsString()
+		if kv.Key == AttrDBSystemName {
+			return []attribute.KeyValue{kv}
 		}
 	}
-	attrs := []attribute.KeyValue{AttrDBSystem.String(dbSystem)}
-	for _, kv := range t.cfg.Attributes {
-		if string(kv.Key) != string(AttrDBSystem) {
-			attrs = append(attrs, kv)
-		}
-	}
-	return attrs
+	return nil
 }
 
 // Save appends events to the underlying [eventsourcing.EventStore] inside a
 // client span tagged with the stream ID, the requested revision, and the
 // events' correlation and causation IDs. Before saving, it stamps each
 // event's Metadata with injected trace-propagation headers, so a later
-// event handler can link back to this trace. It records [EventStoreDuration], [EventStoreSaves], and
-// [EventsAppended] for every call, and [EventStoreErrors] if the underlying
-// store returns an error.
+// event handler can link back to this trace. It records [EventStoreDuration]
+// for every call, labelled by [AttrResult], and counts the events in
+// [EventStoreAppended] when the save succeeds.
 func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	var streamID string
 	for _, event := range events {
@@ -76,7 +85,7 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		)
 	}
 
-	spanName := "append eventstore"
+	spanName := "append events"
 	if t.cfg.Operation != "" {
 		spanName = t.cfg.Operation
 	}
@@ -110,14 +119,11 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	result, err := t.next.Save(ctx, events, revision)
 	duration := time.Since(start)
 
-	EventStoreDuration.Record(ctx, duration.Seconds(),
-		metric.WithAttributes(AttrOperation.String("save")),
-	)
-	EventStoreSaves.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("save")))
-	EventsAppended.Add(ctx, int64(len(events)))
+	EventStoreDuration.Record(ctx, duration.Seconds(), t.metricAttrs("save", err))
 
-	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("save")))
+	if err == nil {
+		EventStoreAppended.Add(ctx, int64(len(events)), metric.WithAttributes(t.dbSystem()...))
+	} else {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
@@ -127,19 +133,21 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 
 // LoadStream loads the stream id from the underlying
 // [eventsourcing.EventStore]. If the initial call fails, it records
-// [EventStoreErrors] and returns immediately. Otherwise it returns an
-// iterator that, on its first advance, starts a client span tagged with the
-// stream ID; each yielded event increments [EventsLoaded].
+// [EventStoreDuration] with result "failure" and returns immediately.
+// Otherwise it returns an iterator that, on its first advance, starts a
+// client span tagged with the stream ID; each yielded event increments
+// [EventStoreLoaded].
 //
 // The returned iterator owns the underlying one: closing it — by reading to
 // the end, by failing, or by an explicit Close — closes the underlying
-// iterator, ends the span, and records [EventStoreDuration], or
-// [EventStoreErrors] if the load failed. A caller that stops early is
+// iterator, ends the span, and records [EventStoreDuration], labelled by
+// whether the load failed. A caller that stops early is
 // therefore instrumented like any other, provided it closes the iterator.
 func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	calledAt := time.Now()
 	src, err := t.next.LoadStream(ctx, id)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
+		EventStoreDuration.Record(ctx, time.Since(calledAt).Seconds(), t.metricAttrs("load", err))
 		return src, err
 	}
 
@@ -159,7 +167,7 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 				)
 				// Keep the span's context for the metrics recorded below, so
 				// they are attributed to the span rather than to ctx alone.
-				spanCtx, span = tracer.Start(ctx, "load eventstore",
+				spanCtx, span = tracer.Start(ctx, "load events",
 					trace.WithSpanKind(trace.SpanKindClient),
 					trace.WithAttributes(spanAttrs...),
 				)
@@ -172,7 +180,7 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 				return nil, io.EOF
 			}
 
-			EventsLoaded.Add(spanCtx, 1)
+			EventStoreLoaded.Add(spanCtx, 1, metric.WithAttributes(t.dbSystem()...))
 			return src.Value(), nil
 		},
 		func(err error) {
@@ -181,12 +189,10 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 				// there is no load to report.
 				return
 			}
+			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
 			if err != nil {
-				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
-			} else {
-				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
 			}
 			span.End()
 		}), nil
@@ -197,9 +203,10 @@ func (t EventStore) LoadStream(ctx context.Context, id string) (*eventsourcing.I
 // additionally tagging the span with the requested version and, once the
 // iterator closes, with the number of events yielded.
 func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	calledAt := time.Now()
 	src, err := t.next.LoadStreamFrom(ctx, id, version)
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("load")))
+		EventStoreDuration.Record(ctx, time.Since(calledAt).Seconds(), t.metricAttrs("load", err))
 		return src, err
 	}
 
@@ -219,7 +226,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 					AttrStreamID.String(id),
 					AttrStreamVersion.Int64(version.ToRawInt64()),
 				)
-				spanCtx, span = tracer.Start(ctx, "load eventstore",
+				spanCtx, span = tracer.Start(ctx, "load events",
 					trace.WithSpanKind(trace.SpanKindClient),
 					trace.WithAttributes(spanAttrs...),
 				)
@@ -230,7 +237,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 			}
 
 			eventCount++
-			EventsLoaded.Add(spanCtx, 1)
+			EventStoreLoaded.Add(spanCtx, 1, metric.WithAttributes(t.dbSystem()...))
 			return src.Value(), nil
 		},
 		func(err error) {
@@ -238,12 +245,10 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 				return
 			}
 			span.SetAttributes(AttrEventCount.Int64(eventCount))
+			EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), t.metricAttrs("load", err))
 			if err != nil {
-				EventStoreErrors.Add(spanCtx, 1, metric.WithAttributes(AttrOperation.String("load")))
 				span.RecordError(err)
 				span.SetStatus(codes.Error, err.Error())
-			} else {
-				EventStoreDuration.Record(spanCtx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("load")))
 			}
 			span.End()
 		}), nil
@@ -259,8 +264,8 @@ type telemetryGlobalStore struct {
 }
 
 // ReadAll reads a page of the global log from the wrapped store and
-// records [EventStoreDuration] and [EventsLoaded], and [EventStoreErrors]
-// on failure.
+// records [EventStoreDuration], labelled by [AttrResult], and
+// [EventStoreLoaded].
 //
 // A read that returns events or fails is recorded as a client span, tagged
 // with the after position and the number of events returned. A read that
@@ -271,15 +276,15 @@ type telemetryGlobalStore struct {
 func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts eventsourcing.ReadOptions) (eventsourcing.ReadResult, error) {
 	startedAt := time.Now()
 	res, err := t.reader.ReadAll(ctx, after, opts)
-	EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), metric.WithAttributes(AttrOperation.String("read_all")))
+	EventStoreDuration.Record(ctx, time.Since(startedAt).Seconds(), t.metricAttrs("read_all", err))
 	if err == nil {
-		EventsLoaded.Add(ctx, int64(len(res.Events)))
+		EventStoreLoaded.Add(ctx, int64(len(res.Events)), metric.WithAttributes(t.dbSystem()...))
 		if len(res.Events) == 0 {
 			return res, nil
 		}
 	}
 
-	_, span := tracer.Start(ctx, "read_all eventstore",
+	_, span := tracer.Start(ctx, "read all events",
 		trace.WithTimestamp(startedAt),
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(append(t.baseAttrs(),
@@ -290,7 +295,6 @@ func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts ev
 	)
 	defer span.End()
 	if err != nil {
-		EventStoreErrors.Add(ctx, 1, metric.WithAttributes(AttrOperation.String("read_all")))
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
@@ -311,8 +315,9 @@ func (t EventStore) Close() error {
 
 // WithEventStoreTelemetry wraps next in an [EventStore], instrumenting
 // every save and load with OpenTelemetry tracing and metrics as described on
-// [EventStore]. Options such as [WithAttributes] and [WithOperation]
-// customize the spans produced.
+// [EventStore]. [WithAttributes] adds attributes to every span; set
+// [AttrDBSystemName] with it to label the store's metrics too.
+// [WithOperation] and [WithOperationGetter] rename the "append events" span.
 //
 // If next also implements [eventsourcing.GlobalReader], so does the returned
 // store, and its ReadAll is traced as well; otherwise the returned store is

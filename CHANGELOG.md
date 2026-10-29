@@ -9,6 +9,46 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `telemetry` names its metrics, spans and attributes one way,
+  following the OpenTelemetry naming conventions: singular namespaces,
+  no `.count` counters next to a duration, and `{verb} {object}` span
+  names. Every duration histogram carries `eventsourcing.result`, and
+  its count replaces the counters that were removed. Update dashboards
+  and alerts:
+
+  | Before | After |
+  |---|---|
+  | `eventsourcing.commands.count` (`CommandsCount`) | count of `eventsourcing.command.duration`, by `eventsourcing.result` |
+  | `eventsourcing.commands.duration` (`CommandsDuration`) | `eventsourcing.command.duration` (`CommandDuration`) |
+  | `eventsourcing.command.processing` (`CommandsProcessing`) | `eventsourcing.command.active` (`CommandActive`) |
+  | `eventsourcing.concurrency.conflicts` (`ConcurrencyConflicts`) | `eventsourcing.command.conflicts` (`CommandConflicts`) |
+  | `eventsourcing.queries.count` (`QueriesCount`) | count of `eventsourcing.query.duration`, by `eventsourcing.result` |
+  | `eventsourcing.queries.duration` (`QueriesDuration`) | `eventsourcing.query.duration` (`QueryDuration`) |
+  | `eventsourcing.query.processing` (`QueriesProcessing`) | `eventsourcing.query.active` (`QueryActive`) |
+  | `eventsourcing.event_handler.operations` (`EventHandlerOperations`) | count of `eventsourcing.event_handler.duration` |
+  | `eventsourcing.event_handler.errors` (`EventHandlerErrors`) | `eventsourcing.event_handler.duration{eventsourcing.result="failure"}`; a skipped event is `"skipped"` |
+  | `eventsourcing.eventstore.duration` | `eventsourcing.event_store.duration`, by `eventsourcing.operation` and `eventsourcing.result` |
+  | `eventsourcing.eventstore.saves` (`EventStoreSaves`) | count of `eventsourcing.event_store.duration{eventsourcing.operation="save"}` |
+  | `eventsourcing.eventstore.errors` (`EventStoreErrors`) | `eventsourcing.event_store.duration{eventsourcing.result="failure"}` |
+  | `eventsourcing.events.appended` (`EventsAppended`) | `eventsourcing.event_store.appended.events` (`EventStoreAppended`), only for saves that succeeded |
+  | `eventsourcing.events.loaded` (`EventsLoaded`) | `eventsourcing.event_store.loaded.events` (`EventStoreLoaded`) |
+  | `eventsourcing.projection.events.skipped` (`ProjectionEventsSkipped`) | `eventsourcing.projection.dead_lettered.events` (`ProjectionDeadLettered`) |
+
+  Spans: `command.handle X` (from `CommandTelemetry`) and `handle
+  command` (from `WithCommandTelemetry`) are both `handle X`, where X
+  is the command type; `query.handle *pkg.Q` and `handle query` are
+  both `handle pkg.Q`, and `eventsourcing.query.type` drops the `*` as
+  well. The event store's `append eventstore`, `load eventstore` and
+  `read_all eventstore` are `append events`, `load events` and `read
+  all events`.
+
+  Attributes: `AttrDBSystem` (`db.system`, `"eventsourcing"` by default)
+  is `AttrDBSystemName` (`db.system.name`), set only when passed with
+  `WithAttributes`; the store's metrics carry it too.
+  `eventsourcing.events.count` is `eventsourcing.event.count`. The
+  unused `AttrHandlerName`, `AttrErrorType`, `AttrRetryCount`,
+  `AttrRetryMax`, `AttrConflictType`, `AttrShardID`, `AttrQueueDepth`,
+  `AttrResultType` and `AttrResultCount` are removed.
 - `RegisterEventByType` and `RegisterEventByName` panic when the factory
   returns a value instead of a pointer. Stored events are decoded into
   what the factory returns, and JSON can only decode into a pointer, so
