@@ -49,8 +49,7 @@ var (
 
 	// ProjectionDeadLettered counts events a projection dead-lettered: its
 	// handler failed on them under a non-stalling error policy, and the
-	// runner moved past them. It reports [projection.Runner.Skipped], which
-	// counts the same events under the policies' name, "skip".
+	// runner moved past them. It reports [projection.Runner.DeadLettered].
 	ProjectionDeadLettered, _ = meter.Int64ObservableCounter(
 		"eventsourcing.projection.dead_lettered.events",
 		metric.WithDescription("Events a projection dead-lettered because its handler failed"),
@@ -78,7 +77,7 @@ func ObserveProjection(r *projection.Runner) (metric.Registration, error) {
 			}
 			o.ObserveInt64(ProjectionPhase, current, metric.WithAttributes(name, AttrProjectionPhase.String(p.String())))
 		}
-		o.ObserveInt64(ProjectionDeadLettered, r.Skipped(), metric.WithAttributes(name))
+		o.ObserveInt64(ProjectionDeadLettered, r.DeadLettered(), metric.WithAttributes(name))
 		return nil
 	}, ProjectionLag, ProjectionPosition, ProjectionPhase, ProjectionDeadLettered)
 }
