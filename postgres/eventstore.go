@@ -19,8 +19,9 @@ import (
 const pgUniqueViolation = "23505"
 
 var (
-	_ eventsourcing.EventStore   = (*EventStore)(nil)
-	_ eventsourcing.GlobalReader = (*EventStore)(nil)
+	_ eventsourcing.EventStore        = (*EventStore)(nil)
+	_ eventsourcing.GlobalReader      = (*EventStore)(nil)
+	_ eventsourcing.CorrelationLoader = (*EventStore)(nil)
 )
 
 // appendLockKey is the two-key advisory lock every Save takes before it
@@ -279,6 +280,22 @@ func (s *EventStore) LoadStreamFrom(ctx context.Context, id string, version even
 			FROM events WHERE stream_id = $1 AND stream_position > $2 ORDER BY stream_position ASC`,
 			id, fromPos)
 	}
+}
+
+// LoadCorrelation implements [eventsourcing.CorrelationLoader], using the
+// index on correlation_id. Like [EventStore.LoadStream], the iterator holds
+// a pooled connection until it ends or is closed.
+func (s *EventStore) LoadCorrelation(ctx context.Context, id string) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
+	if id == "" {
+		return nil, fmt.Errorf("load correlation: %w", eventsourcing.ErrEmptyCorrelationID)
+	}
+	it, err := s.queryRows(ctx, `
+		SELECT id, event_id, stream_id, stream_position, event_type, payload, metadata, occurred_at, correlation_id, causation_id
+		FROM events WHERE correlation_id = $1 ORDER BY id ASC`, id)
+	if err != nil {
+		return nil, fmt.Errorf("load correlation %q: %w", id, err)
+	}
+	return it, nil
 }
 
 // ReadAll implements [eventsourcing.GlobalReader]. Filters run in SQL, on exact

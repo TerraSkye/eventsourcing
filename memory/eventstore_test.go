@@ -865,6 +865,13 @@ func TestGlobalReaderAcceptance(t *testing.T) {
 	eventsourcingtest.GlobalReaderAcceptanceTest(t, store, store)
 }
 
+func TestCorrelationLoaderAcceptance(t *testing.T) {
+	store := memory.NewEventStore()
+	t.Cleanup(func() { store.Close() })
+
+	eventsourcingtest.CorrelationLoaderAcceptanceTest(t, store, store)
+}
+
 // Save copied each envelope into the store before assigning its
 // GlobalPosition, and assigned it to the caller's slice instead, so every
 // stored event read back with GlobalPosition 0.
