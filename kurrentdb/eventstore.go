@@ -190,7 +190,8 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, err
 	}
 
-	expBackoff := e.newBackoff()
+	// Bound to ctx, so a wait between attempts ends when ctx does.
+	expBackoff := backoff.WithContext(e.newBackoff(), ctx)
 
 	result, err := backoff.RetryNotifyWithData(func() (*kurrentdb.WriteResult, error) {
 		result, err := e.client.AppendToStream(ctx, streamID, kurrentdb.AppendToStreamOptions{
@@ -200,6 +201,12 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		if err != nil {
 			// Check if this is a retryable error
 			if isRetryableError(err) {
+				// Once ctx is done every attempt fails the same way, with a
+				// DeadlineExceeded the client reports as retryable: stop,
+				// and say it was ctx.
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, backoff.Permanent(fmt.Errorf("%w: %w", ctxErr, err))
+				}
 				// Return error without wrapping - this signals backoff to retry
 				return nil, err
 			}
