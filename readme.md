@@ -258,7 +258,7 @@ The Go doc comments are the primary reference and spell out the contracts each i
 This is pre-1.0 software under active development by a single maintainer. It is well tested and documented, but:
 
 - A minor release may break the API. Every break is listed under **Breaking** in the [changelog](CHANGELOG.md), with the old and new names side by side.
-- Nested modules (`sqlite`, `postgres`, `kurrentdb`, `telemetry`) are tagged alongside the root (`sqlite/v0.2.0` with `v0.2.0`) and require the matching root version.
+- Nested modules (`sqlite`, `postgres`, `kurrentdb`, `telemetry`) are tagged alongside the root (`sqlite/v0.2.0` with `v0.2.0`) and require the matching root version. [RELEASING.md](RELEASING.md) describes how.
 - Pin a version and read the changelog before upgrading.
 
 ## Development
