@@ -88,7 +88,7 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 						AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 						AttrErrorMessage.String(causeMessage),
 					))
-					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("failure")))
+					CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(cmd.CommandType()), AttrResult.String("rejected")))
 					return result, err
 				}
 				span.SetStatus(codes.Error, err.Error())
@@ -114,8 +114,9 @@ func CommandTelemetry(options ...Option) eventsourcing.CommandHandlerMiddleware 
 // [CommandsProcessing] (in-flight commands), [CommandsDuration], and
 // [CommandsCount] labelled by [AttrResult]. A returned
 // [eventsourcing.StreamRevisionConflictError] is additionally counted in
-// [ConcurrencyConflicts]; a returned [eventsourcing.BusinessRuleViolationError]
-// is recorded on the span as an expected outcome rather than a span error.
+// [ConcurrencyConflicts] and fails the span; a returned
+// [eventsourcing.BusinessRuleViolationError] is an expected outcome rather
+// than a span error, counted with result "rejected".
 //
 //	handler := WithCommandTelemetry(myCommandHandler)
 //	result, err := handler(ctx, myCommand)
@@ -187,7 +188,8 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 			var conflict *eventsourcing.StreamRevisionConflictError
 			if errors.As(err, &conflict) {
 				ConcurrencyConflicts.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType)))
-				// Span is still considered successful (operation executed)
+				// A conflict left after any retries is a failure: it falls
+				// through to the error status below.
 				span.AddEvent("concurrency_conflict", trace.WithAttributes(
 					AttrStreamID.String(result.StreamID),
 				))
@@ -208,7 +210,7 @@ func WithCommandTelemetry[C eventsourcing.Command](next eventsourcing.CommandHan
 					AttrStreamVersion.Int64(int64(result.NextExpectedVersion)),
 					AttrErrorMessage.String(causeMessage),
 				))
-				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("failure")))
+				CommandsCount.Add(ctx, 1, metric.WithAttributes(AttrCommandType.String(commandType), AttrResult.String("rejected")))
 				return result, err
 			}
 

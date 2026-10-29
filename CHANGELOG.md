@@ -139,6 +139,12 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Changed
 
+- `telemetry` counts a command rejected with a
+  `BusinessRuleViolationError` in `eventsourcing.commands.count` with
+  `eventsourcing.result="rejected"`, not `"failure"`, so a dashboard
+  can tell rejected input from a failing system. Its span was already
+  OK. An event handler span no longer carries an empty link when the
+  event was saved without a trace.
 - `logging.WithCommandLogging` and `CommandLogging` log a command
   rejected with a `BusinessRuleViolationError` at info level, as
   "command rejected", instead of at error level as "command failed".
