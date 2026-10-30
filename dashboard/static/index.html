@@ -185,6 +185,9 @@
   .node .at { color: var(--muted); font-size: 0.8125rem; margin-left: auto; }
   .node-body { padding: 0.25rem 0.625rem 0.5rem; }
   .orphan { color: var(--catching); font-size: 0.8125rem; }
+  .command { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.5rem; padding: 0.375rem 0.625rem 0.125rem; }
+  .command .kind { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .command .type { font-weight: 560; }
 
   @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
   @media (max-width: 40rem) { main { padding-top: 1.5rem; } dl.numbers { gap: 0.5rem 1.5rem; } }
@@ -688,13 +691,39 @@
         head.click();
         focused = head;
       }
-      if (node.children.length) li.append(el("ul", {}, ...node.children.map(branch)));
+      if (node.children.length) li.append(el("ul", {}, ...branches(node.children)));
       return li;
+    }
+
+    // branches lists nodes under the command that appended them: a run of
+    // nodes whose metadata carries the same command_id, as a command
+    // handler records it, goes under one row naming the command. A node
+    // appended without one is listed on its own.
+    function branches(nodes) {
+      const items = [];
+      for (let i = 0; i < nodes.length;) {
+        const meta = nodes[i].ev.metadata || {};
+        let j = i + 1;
+        if (meta.command_id) {
+          while (j < nodes.length && (nodes[j].ev.metadata || {}).command_id === meta.command_id) j++;
+        }
+        if (meta.command_type) {
+          items.push(el("li", {},
+            el("div", { class: "command", title: meta.command_id ? `Command ${meta.command_id}` : "" },
+              el("span", { class: "kind" }, "Command"),
+              el("span", { class: "type" }, meta.command_type)),
+            el("ul", {}, ...nodes.slice(i, j).map(branch))));
+        } else {
+          items.push(...nodes.slice(i, j).map(branch));
+        }
+        i = j;
+      }
+      return items;
     }
 
     chainView.replaceChildren(
       el("div", { class: "chain-head" }, back, el("h2", { class: "mono" }, id), el("p", {}, summary)),
-      el("ul", { class: "tree" }, ...roots.map(branch)));
+      el("ul", { class: "tree" }, ...branches(roots)));
     if (focused) focused.scrollIntoView({ block: "center" });
   }
 
