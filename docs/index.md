@@ -31,15 +31,18 @@ Practical recipes for specific tasks.
 - [Handle concurrency conflicts with optimistic locking](./how-to/handle-concurrency.md)
 - [Add metadata to events](./how-to/add-event-metadata.md)
 - [Customise stream names (multi-tenancy)](./how-to/custom-stream-names.md)
+- [Retry when you cannot tell whether an append landed](./how-to/retry-an-unknown-outcome.md)
 - [The aggregate variant — when to use it and when not to](./how-to/share-state-with-aggregate.md)
 
 **Events**
 - [Register events for serialization](./how-to/register-events.md)
 - [Version events when the schema changes](./how-to/version-events.md)
+- [Read an event's old shape with UnmarshalJSON](./how-to/reshape-events-with-unmarshaljson.md)
 
 **Queries**
 - [Build a projection](./how-to/cached-projection.md)
 - [Rebuild a projection without downtime](./how-to/rebuild-without-downtime.md)
+- [Move from the event bus to a projection runner](./how-to/move-off-the-event-bus.md)
 
 **Infrastructure**
 - [Use KurrentDB as the event store](./how-to/use-kurrentdb.md)
@@ -60,6 +63,7 @@ Complete API documentation.
 - [CommandBus](./reference/command-bus.md) — `NewCommandBus`, `Register`, `Dispatch`
 - [Stream states](./reference/stream-states.md) — `Any`, `NoStream`, `StreamExists`, `Revision`
 - [Event registry](./reference/event-registry.md) — `RegisterEvent`, `NewEventByName`
+- [Serialization](./reference/serialization.md) — the JSON contract every store follows
 - [Iterator](./reference/iterator.md) — `Iterator[T]`, `NewIteratorFunc`
 - [Context helpers](./reference/context.md) — envelope propagation through context
 - [Errors](./reference/errors.md) — error types and sentinel values
@@ -80,3 +84,5 @@ Background reading to understand the design and concepts.
 - [The decide/evolve pattern](./explanation/decide-evolve.md) — how commands become events
 - [Concurrency and optimistic locking](./explanation/concurrency.md)
 - [Vertical slice architecture](./explanation/vertical-slice-architecture.md) — recommended project layout
+- [Personal data and events](./explanation/personal-data.md) — why personal data stays out of the log
+- [What the library does not do](./explanation/non-goals.md) — non-goals, and the doors left open

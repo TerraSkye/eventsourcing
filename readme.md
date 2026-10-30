@@ -132,7 +132,7 @@ eventsourcing.NewCommandHandler(store, initial, evolve, decide,
 		return backoff.WithMaxRetries(&backoff.ZeroBackOff{}, 3)
 	}),
 	eventsourcing.WithMetadataExtractor(func(ctx context.Context) map[string]any {
-		return map[string]any{"user_id": userFromContext(ctx)}
+		return map[string]any{"user_id": userFromContext(ctx)} // an ID: no names or emails in events
 	}),
 	eventsourcing.WithStreamNamer(func(ctx context.Context, cmd eventsourcing.Command) string {
 		return tenantFromContext(ctx) + "-" + cmd.AggregateID()
@@ -247,11 +247,15 @@ go run .
 The [docs site](https://terraskye.github.io/eventsourcing/) follows the Diátaxis layout:
 
 - **Tutorials** — build the todolist API from the first command to background processing.
-- **How-to guides** — concurrency, metadata, multi-tenant stream names, event versioning, middleware, testing, rebuilding projections without downtime, KurrentDB.
-- **Explanation** — event sourcing, CQRS, decide/evolve, concurrency, vertical slice architecture.
+- **How-to guides** — concurrency, retries after an unknown outcome, metadata, multi-tenant stream names, event versioning and reading old event shapes, middleware, testing, rebuilding projections without downtime, moving off the event bus, KurrentDB.
+- **Explanation** — event sourcing, CQRS, decide/evolve, concurrency, vertical slice architecture, personal data, and what the library does not do.
 - **Reference** — every interface, option and backend.
 
 The Go doc comments are the primary reference and spell out the contracts each interface must uphold — including, for `GlobalReader`, why Postgres positions can become visible out of order and how the store prevents it.
+
+## What it does not do
+
+No pluggable codecs or binary encodings (events are JSON, through `EncodeEvent` / `DecodeEvent`), no upcaster chain (version event types, or read an old shape with `UnmarshalJSON`), no crypto-shredding (keep personal data out of events and refer to people by ID), and no event bus (run a `projection.Runner`). Each choice, and the door it leaves open, is on the [non-goals page](https://terraskye.github.io/eventsourcing/explanation/non-goals/).
 
 ## Status and versioning
 

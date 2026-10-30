@@ -8,7 +8,7 @@ Events in the store are immutable facts — they cannot be changed after being w
 
 A common mistake is to try to "upcast" old events on read — silently transforming them into the new shape before they reach application code. This approach has a hidden cost: **it forces a single interpretation of the migration onto every consumer**. A projector that needs to distinguish whether an event was written before or after the schema change cannot do so.
 
-The approach used here is simpler and more flexible: **introduce a new event type for each schema change and let each consumer handle the versions it cares about.**
+The approach used here is simpler and more flexible: **introduce a new event type when an event's meaning changes, and let each consumer handle the versions it cares about.** When only the JSON changes and the meaning does not (a field renamed, a default for an added field), the type can read its old shape itself; see [How to read an event's old shape with UnmarshalJSON](./reshape-events-with-unmarshaljson.md).
 
 ## Introducing a new event version
 
@@ -56,8 +56,8 @@ See [register events for serialization](./register-events.md) for background.
 Your aggregate's `evolve` function handles whichever versions affect state. If the old and new versions both carry information relevant to the aggregate's state, handle both:
 
 ```go
-func evolve(state TaskState, event eventsourcing.Event) TaskState {
-    switch e := event.(type) {
+func evolve(state TaskState, envelope *eventsourcing.Envelope) TaskState {
+    switch e := envelope.Event.(type) {
     case *events.TaskCreated:
         state.TaskID = e.TaskID
         state.Title  = e.Title
@@ -117,10 +117,11 @@ This is a rename, not a schema change — use it only when the struct fields hav
 
 | Situation | Approach |
 |---|---|
-| Added a new optional field | New event version (`V2`), handle both in consumers |
-| Added a new required field | New event version (`V2`), old version treated as "data not available" |
-| Renamed a field | New event version (`V2`) — never rename fields on existing types |
+| Added an optional field | Add it; old events decode with its zero value, or a default set in [`UnmarshalJSON`](./reshape-events-with-unmarshaljson.md) |
+| Added a required field | New event version (`V2`), old version treated as "data not available" |
+| Renamed a field, split or combined fields, respelled a value | Change the struct and read the old shape in [`UnmarshalJSON`](./reshape-events-with-unmarshaljson.md) |
+| Changed what the event means | New event version (`V2`) |
 | Renamed the Go type only (no field changes) | `RegisterEventByName` to map old stored name to new type |
-| Removed a field | New event version (`V2`), drop the field from the new struct |
+| Removed a field | Remove it; decoding ignores the old field in stored events |
 
-Never modify the fields of an existing event struct. Old events in the store were serialized with the old schema; changing the struct silently breaks deserialization for those events.
+Change an existing event struct only in ways its stored events still decode into. Old events in the store were serialized with the old schema; a renamed field that nothing reads under its old name silently comes back empty. Keep a test that decodes an old payload.
