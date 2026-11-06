@@ -14,6 +14,7 @@ import (
 	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/automation/automationtest"
+	"github.com/terraskye/eventsourcing/memory"
 )
 
 // memTodoList is an in-memory todo list whose items are string IDs.
@@ -159,6 +160,7 @@ func TestRun_ProcessesTheTodoList(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:         "ship-orders",
 		Projection:   newDep("orders-to-ship", true),
+		Store:        memory.NewAutomationStore(),
 		TodoList:     list,
 		Work:         completing(list, nil),
 		BatchSize:    2,
@@ -184,6 +186,7 @@ func TestRun_WorkStartsWithNoChain(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:       "ship-orders",
 		Projection: newDep("orders-to-ship", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work:       completing(list, &chain),
 		Logger:     quiet,
@@ -207,6 +210,7 @@ func TestRun_WaitsForEveryDependency(t *testing.T) {
 		Name:         "ship-orders",
 		Projection:   todo,
 		WaitFor:      []automation.Dependency{other},
+		Store:        memory.NewAutomationStore(),
 		TodoList:     countingList{list, &claims},
 		Work:         completing(list, nil),
 		PollInterval: 10 * time.Millisecond,
@@ -236,6 +240,7 @@ func TestRun_ChecksLivenessBeforeEveryClaim(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:         "ship-orders",
 		Projection:   todo,
+		Store:        memory.NewAutomationStore(),
 		TodoList:     countingList{list, &claims},
 		Work:         completing(list, nil),
 		PollInterval: 10 * time.Millisecond,
@@ -261,6 +266,7 @@ func TestRun_FailedWorkIsRetriedAfterItsLease(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:       "ship-orders",
 		Projection: newDep("orders-to-ship", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work: func(ctx context.Context, id string) error {
 			if attempts.Add(1) == 1 {
@@ -285,6 +291,7 @@ func TestRun_ClaimErrorStalls(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:         "ship-orders",
 		Projection:   newDep("orders-to-ship", true),
+		Store:        memory.NewAutomationStore(),
 		TodoList:     failingList{},
 		Work:         func(context.Context, string) error { return nil },
 		PollInterval: 10 * time.Millisecond,
@@ -306,6 +313,7 @@ func TestRun_WatcherNudges(t *testing.T) {
 	a := automation.NewRunner(automation.Definition[string]{
 		Name:         "ship-orders",
 		Projection:   todo,
+		Store:        memory.NewAutomationStore(),
 		TodoList:     list,
 		Work:         completing(list, nil),
 		PollInterval: time.Hour,
@@ -533,6 +541,7 @@ func TestRunOnce_DrainsThenReturns(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[string]{
 		Name:       "ship-orders",
 		Projection: newDep("orders-to-ship", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work:       completing(list, nil),
 		BatchSize:  2,
@@ -557,6 +566,7 @@ func TestRunOnce_SchedulerErrorEndsTheRun(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[string]{
 		Name:       "ship-orders",
 		Projection: newDep("orders-to-ship", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   failingList{},
 		Work:       func(context.Context, string) error { return nil },
 		Logger:     quiet,
@@ -583,6 +593,7 @@ func TestOrderingKey_OrdersChainsAndRunsThemInParallel(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[job]{
 		Name:        "sync",
 		Projection:  newDep("todo", true),
+		Store:       memory.NewAutomationStore(),
 		TodoList:    list,
 		Work:        func(ctx context.Context, j job) error { defer list.Complete(ctx, j); return work(ctx, j) },
 		OrderingKey: func(j job) string { return j.Serial },
@@ -626,6 +637,7 @@ func TestFailedItem_ParksItsChain(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[job]{
 		Name:       "sync",
 		Projection: newDep("todo", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work: func(ctx context.Context, j job) error {
 			mu.Lock()
@@ -661,7 +673,7 @@ func TestDeferred_PausesClaims(t *testing.T) {
 	list := newTodoList()
 	list.Add(t.Context(), "a")
 	list.Add(t.Context(), "b")
-	store := automation.NewLocalStore()
+	store := memory.NewAutomationStore()
 	var claims atomic.Int32
 	var deferred atomic.Bool
 	def := automation.Definition[string]{
@@ -712,6 +724,7 @@ func TestLeaseExpiry_BoundsWork(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[string]{
 		Name:       "ship-orders",
 		Projection: newDep("orders-to-ship", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work: func(ctx context.Context, id string) error {
 			<-ctx.Done() // slower than the lease
@@ -741,7 +754,7 @@ func TestSegmented_OneOwnerPerKey(t *testing.T) {
 			list.Add(job{ID: k + "/" + string(rune('0'+i)), Key: k, Group: strings.SplitN(k, ":", 2)[0], Serial: k})
 		}
 	}
-	store := automation.NewLocalStore()
+	store := memory.NewAutomationStore()
 	var (
 		mu       sync.Mutex
 		inFlight = map[string]string{} // key → instance working it
@@ -808,6 +821,7 @@ func TestSegmented_DeferredPausesOnlyThatKey(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[job]{
 		Name:       "sync",
 		Projection: newDep("todo", true),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work: func(ctx context.Context, j job) error {
 			if j.Key == "slow" && deferred.CompareAndSwap(false, true) {
@@ -851,6 +865,8 @@ func TestNewRunner_Panics(t *testing.T) {
 		"list and scheduler":       {Name: "x", Projection: dep, Work: work, TodoList: list, Scheduler: nopScheduler[string]{}},
 		"no projection":            {Name: "x", Work: work, TodoList: list},
 		"no work":                  {Name: "x", Projection: dep, TodoList: list},
+		"list without store":       {Name: "x", Projection: dep, Work: work, TodoList: list},
+		"scheduler and store":      {Name: "x", Projection: dep, Work: work, Scheduler: nopScheduler[string]{}, Store: memory.NewAutomationStore()},
 	}
 	for name, d := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -875,7 +891,7 @@ func TestSegmented_ConcurrentDeferrals(t *testing.T) {
 		key := "tenant-" + string(rune('a'+i))
 		list.Add(job{ID: key + "/1", Key: key})
 	}
-	store := automation.NewLocalStore()
+	store := memory.NewAutomationStore()
 	ready := make(chan struct{})
 	var arrived atomic.Int32
 	r := automation.NewRunner(automation.Definition[job]{
@@ -1025,7 +1041,7 @@ func TestSegmented_SlowSegmentDoesNotHoldOthers(t *testing.T) {
 	r := automation.NewRunner(automation.Definition[job]{
 		Name:       "sync",
 		Projection: newDep("todo", true),
-		Store:      automation.NewLocalStore(),
+		Store:      memory.NewAutomationStore(),
 		TodoList:   list,
 		Work: func(ctx context.Context, j job) error {
 			if j.Key == "slow" {

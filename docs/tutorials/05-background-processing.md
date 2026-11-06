@@ -254,6 +254,8 @@ func (a *ArchiveTasks) Work(ctx context.Context, taskID uuid.UUID) error {
 
 The automation only claims while its projection is **live**. While the projection catches up after a start, the list still holds tasks whose `TaskArchived` it has not read yet; claiming then would archive them twice. The runner from Part 4 tells the automation when it is live, and nudges it whenever the todo list changes.
 
+`NewRunner` also needs a `Store`, which keeps which instance holds which segment, and pauses. Like the projection store, it is chosen in `main` (Step 4): `memory.NewAutomationStore()` for one process, `sqlite.NewAutomationStore(db)` or `postgres.NewAutomationStore(pool)` when instances share a database.
+
 That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the package documentation.
 
 ## Step 4: Wire it up
@@ -268,7 +270,9 @@ commandBus := eventsourcing.NewCommandBus(20, 1)
 defer commandBus.Stop()
 eventsourcing.Register(commandBus, archivetask.NewHandler(store))
 
-archiveTasks := automation.NewRunner(archivetasks.New(archiveList, archiveTodo, commandBus).Definition())
+archive := archivetasks.New(archiveList, archiveTodo, commandBus).Definition()
+archive.Store = memory.NewAutomationStore()
+archiveTasks := automation.NewRunner(archive)
 
 go func() {
     if err := archiveTodo.Run(ctx); err != nil && ctx.Err() == nil {
