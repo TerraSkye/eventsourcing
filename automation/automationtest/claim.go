@@ -1,5 +1,5 @@
 // Package automationtest provides [ClaimAcceptanceTest], the contract a
-// todo list's [automation.ClaimFunc] is checked against. Run it from the
+// todo list's Claim ([automation.TodoList]) is checked against. Run it from the
 // todo list's own tests:
 //
 //	func TestClaimAcceptance(t *testing.T) {
@@ -12,6 +12,7 @@ package automationtest
 import (
 	"context"
 	"fmt"
+	"github.com/terraskye/eventsourcing/automation"
 	"slices"
 	"sort"
 	"sync"
@@ -32,7 +33,7 @@ const (
 // TodoList is a todo list as the suite drives it, with items identified by
 // string IDs. An adapter around the real todo list implements it: Add and
 // Complete stand in for the projection writing the read model, Claim is the
-// [automation.ClaimFunc] under test, returning the claimed items' IDs.
+// [automation.TodoList] Claim under test, returning the claimed items' IDs.
 type TodoList interface {
 	// Add puts a pending item with the given ID on the list.
 	Add(ctx context.Context, id string) error
@@ -40,12 +41,13 @@ type TodoList interface {
 	// Complete removes the item, as the event that records its work does.
 	Complete(ctx context.Context, id string) error
 
-	// Claim leases up to max pending items for lease and returns their
-	// IDs.
-	Claim(ctx context.Context, max int, lease time.Duration) ([]string, error)
+	// Claim leases up to req.MaxPerKey pending items for req.Lease and
+	// returns their IDs. The suite drives an unsegmented list, so
+	// req.Segments is always empty.
+	Claim(ctx context.Context, req automation.ClaimRequest) ([]string, error)
 }
 
-// ClaimAcceptanceTest runs the [automation.ClaimFunc] contract against the
+// ClaimAcceptanceTest runs the [automation.TodoList] Claim contract against the
 // todo lists newList returns, one empty list per subtest. A few subtests
 // wait for a lease to expire, so the suite takes a few seconds.
 func ClaimAcceptanceTest(t *testing.T, newList func(t *testing.T) TodoList) {
@@ -153,7 +155,7 @@ func claimConcurrentDisjoint(t *testing.T, l TodoList) {
 		go func() {
 			defer wg.Done()
 			for {
-				got, err := l.Claim(t.Context(), 3, longLease)
+				got, err := l.Claim(t.Context(), automation.ClaimRequest{MaxPerKey: 3, Lease: longLease})
 				if err != nil {
 					errs[c] = err
 					return
@@ -209,9 +211,9 @@ func add(t *testing.T, l TodoList, ids ...string) {
 
 func claim(t *testing.T, l TodoList, max int, lease time.Duration) []string {
 	t.Helper()
-	got, err := l.Claim(t.Context(), max, lease)
+	ids, err := l.Claim(context.Background(), automation.ClaimRequest{MaxPerKey: max, Lease: lease})
 	if err != nil {
-		t.Fatalf("Claim(%d, %s): %v", max, lease, err)
+		t.Fatalf("claim: %v", err)
 	}
-	return got
+	return ids
 }

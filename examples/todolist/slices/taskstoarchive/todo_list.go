@@ -4,6 +4,7 @@ package taskstoarchive
 
 import (
 	"context"
+	"github.com/terraskye/eventsourcing/automation"
 	"sort"
 	"sync"
 	"time"
@@ -53,7 +54,7 @@ func (l *TasksToArchive) handle(ctx context.Context, event eventsourcing.Event) 
 
 // Claim leases up to max due tasks, so that a second claim skips them until
 // the lease runs out.
-func (l *TasksToArchive) Claim(ctx context.Context, max int, lease time.Duration) ([]uuid.UUID, error) {
+func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest) ([]uuid.UUID, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -64,11 +65,11 @@ func (l *TasksToArchive) Claim(ctx context.Context, max int, lease time.Duration
 		}
 	}
 	sort.Slice(due, func(i, j int) bool { return due[i].String() < due[j].String() })
-	if len(due) > max {
-		due = due[:max]
+	if len(due) > req.MaxPerKey {
+		due = due[:req.MaxPerKey]
 	}
 	for _, id := range due {
-		l.items[id].claimedUntil = now.Add(lease)
+		l.items[id].claimedUntil = now.Add(req.Lease)
 	}
 	return due, nil
 }

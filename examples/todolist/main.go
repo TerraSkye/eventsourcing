@@ -95,8 +95,8 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 
 	archive := archivetasks.NewAutomation(archiveList, archiveTodo, archivetask.NewHandler(store))
 	archive.Logger = logger
-	archive.Interval = checkEvery
-	archiveTasks := automation.New(archive)
+	archive.PollInterval = checkEvery
+	archiveTasks := automation.NewRunner(archive)
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())

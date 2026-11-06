@@ -42,7 +42,7 @@ func (l *memTodoList) Complete(_ context.Context, id string) error {
 	return nil
 }
 
-func (l *memTodoList) Claim(_ context.Context, max int, lease time.Duration) ([]string, error) {
+func (l *memTodoList) Claim(_ context.Context, req automation.ClaimRequest) ([]string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -53,11 +53,11 @@ func (l *memTodoList) Claim(_ context.Context, max int, lease time.Duration) ([]
 		}
 	}
 	sort.Strings(ids)
-	if len(ids) > max {
-		ids = ids[:max]
+	if len(ids) > req.MaxPerKey {
+		ids = ids[:req.MaxPerKey]
 	}
 	for _, id := range ids {
-		l.leased[id] = now.Add(lease)
+		l.leased[id] = now.Add(req.Lease)
 	}
 	return ids, nil
 }
@@ -156,18 +156,14 @@ func TestRun_ProcessesTheTodoList(t *testing.T) {
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
 		list.Add(t.Context(), id)
 	}
-	var chain atomic.Value
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: newDep("orders-to-ship", true),
-		Claim:    list.Claim,
-		Work:     completing(list, &chain),
-		Chain: func(id string) (string, string) {
-			return "chain-" + id, "event-" + id
-		},
-		BatchSize: 2,
-		Interval:  10 * time.Millisecond,
-		Logger:    quiet,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		TodoList:     list,
+		Work:         completing(list, nil),
+		BatchSize:    2,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
 	})
 	start(t, a)
 
@@ -176,10 +172,28 @@ func TestRun_ProcessesTheTodoList(t *testing.T) {
 	if st := a.Status(); st.Processed != 5 || st.Failed != 0 {
 		t.Fatalf("Status() = %+v, want 5 processed and none failed", st)
 	}
-	got, _ := chain.Load().(string)
-	id, _, _ := strings.Cut(got, "=")
-	if want := id + "=chain-" + id + "/event-" + id; got != want {
-		t.Fatalf("work ran with chain %q, want %q, the item's own from Definition.Chain", got, want)
+}
+
+// TestRun_WorkStartsWithNoChain covers that each item's work starts with
+// no correlation or causation, whatever chain the context the runner was
+// started with carries, so that items do not share a chain by accident.
+func TestRun_WorkStartsWithNoChain(t *testing.T) {
+	list := newTodoList()
+	list.Add(t.Context(), "a")
+	var chain atomic.Value
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		TodoList:   list,
+		Work:       completing(list, &chain),
+		Logger:     quiet,
+	})
+	ctx := eventsourcing.WithCausationID(eventsourcing.WithCorrelationID(t.Context(), "outer"), "outer-event")
+	if _, err := a.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got, _ := chain.Load().(string); got != "a=/" {
+		t.Fatalf("work ran with chain %q, want none", got)
 	}
 }
 
@@ -189,17 +203,14 @@ func TestRun_WaitsForEveryDependency(t *testing.T) {
 	todo := newDep("orders-to-ship", true)
 	other := newDep("customers", false)
 	var claims atomic.Int32
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: todo,
-		WaitFor:  []automation.Dependency{other},
-		Claim: func(ctx context.Context, max int, lease time.Duration) ([]string, error) {
-			claims.Add(1)
-			return list.Claim(ctx, max, lease)
-		},
-		Work:     completing(list, nil),
-		Interval: 10 * time.Millisecond,
-		Logger:   quiet,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   todo,
+		WaitFor:      []automation.Dependency{other},
+		TodoList:     countingList{list, &claims},
+		Work:         completing(list, nil),
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
 	})
 	start(t, a)
 
@@ -222,16 +233,13 @@ func TestRun_ChecksLivenessBeforeEveryClaim(t *testing.T) {
 	list := newTodoList()
 	todo := newDep("orders-to-ship", true)
 	var claims atomic.Int32
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: todo,
-		Claim: func(ctx context.Context, max int, lease time.Duration) ([]string, error) {
-			claims.Add(1)
-			return list.Claim(ctx, max, lease)
-		},
-		Work:     completing(list, nil),
-		Interval: 10 * time.Millisecond,
-		Logger:   quiet,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   todo,
+		TodoList:     countingList{list, &claims},
+		Work:         completing(list, nil),
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
 	})
 	start(t, a)
 	eventually(t, "a first claim", func() bool { return claims.Load() > 0 })
@@ -250,19 +258,19 @@ func TestRun_FailedWorkIsRetriedAfterItsLease(t *testing.T) {
 	list := newTodoList()
 	list.Add(t.Context(), "a")
 	var attempts atomic.Int32
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: newDep("orders-to-ship", true),
-		Claim:    list.Claim,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		TodoList:   list,
 		Work: func(ctx context.Context, id string) error {
 			if attempts.Add(1) == 1 {
 				return errors.New("carrier unavailable")
 			}
 			return list.Complete(ctx, id)
 		},
-		Lease:    50 * time.Millisecond,
-		Interval: 10 * time.Millisecond,
-		Logger:   quiet,
+		Lease:        50 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
 	})
 	start(t, a)
 
@@ -274,15 +282,13 @@ func TestRun_FailedWorkIsRetriedAfterItsLease(t *testing.T) {
 }
 
 func TestRun_ClaimErrorStalls(t *testing.T) {
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: newDep("orders-to-ship", true),
-		Claim: func(context.Context, int, time.Duration) ([]string, error) {
-			return nil, errors.New("database down")
-		},
-		Work:     func(context.Context, string) error { return nil },
-		Interval: 10 * time.Millisecond,
-		Logger:   quiet,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		TodoList:     failingList{},
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
 	})
 	start(t, a)
 
@@ -297,13 +303,13 @@ func TestRun_ClaimErrorStalls(t *testing.T) {
 func TestRun_WatcherNudges(t *testing.T) {
 	list := newTodoList()
 	todo := newDep("orders-to-ship", true)
-	a := automation.New(automation.Definition[string]{
-		Name:     "ship-orders",
-		TodoList: todo,
-		Claim:    list.Claim,
-		Work:     completing(list, nil),
-		Interval: time.Hour,
-		Logger:   quiet,
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   todo,
+		TodoList:     list,
+		Work:         completing(list, nil),
+		PollInterval: time.Hour,
+		Logger:       quiet,
 	})
 	start(t, a)
 	eventually(t, "the Idle phase", func() bool { return a.Status().Phase == automation.Idle })
@@ -317,10 +323,10 @@ func TestNew_Panics(t *testing.T) {
 	list := newTodoList()
 	work := func(context.Context, string) error { return nil }
 	tests := map[string]automation.Definition[string]{
-		"no name":      {TodoList: newDep("x", true), Claim: list.Claim, Work: work},
-		"no todo list": {Name: "a", Claim: list.Claim, Work: work},
-		"no claim":     {Name: "a", TodoList: newDep("x", true), Work: work},
-		"no work":      {Name: "a", TodoList: newDep("x", true), Claim: list.Claim},
+		"no name":       {Projection: newDep("x", true), TodoList: list, Work: work},
+		"no projection": {Name: "a", TodoList: list, Work: work},
+		"no todo list":  {Name: "a", Projection: newDep("x", true), Work: work},
+		"no work":       {Name: "a", Projection: newDep("x", true), TodoList: list},
 	}
 	for name, d := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -329,7 +335,666 @@ func TestNew_Panics(t *testing.T) {
 					t.Fatal("New did not panic")
 				}
 			}()
-			automation.New(d)
+			automation.NewRunner(d)
 		})
 	}
 }
+
+// countingList wraps a todo list and counts its claims.
+type countingList struct {
+	*memTodoList
+	claims *atomic.Int32
+}
+
+func (l countingList) Claim(ctx context.Context, req automation.ClaimRequest) ([]string, error) {
+	l.claims.Add(1)
+	return l.memTodoList.Claim(ctx, req)
+}
+
+// failingList is a todo list whose database is down.
+type failingList struct{}
+
+func (failingList) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+	return nil, errors.New("database down")
+}
+
+// job is an item of a keyed todo list: it belongs to a segment (an
+// integration) and to a chain (an order) within it.
+type job struct {
+	ID, Key, Group, Serial string
+}
+
+// keyedList is an in-memory todo list with segment keys, the shape the
+// default scheduler needs when Keys is set.
+type keyedList struct {
+	mu    sync.Mutex
+	seq   int
+	items map[string]*keyedItem
+}
+
+type keyedItem struct {
+	job   job
+	seq   int
+	lease time.Time
+	done  bool
+}
+
+func newKeyedList() *keyedList { return &keyedList{items: map[string]*keyedItem{}} }
+
+func (l *keyedList) Add(j job) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.seq++
+	l.items[j.ID] = &keyedItem{job: j, seq: l.seq}
+}
+
+func (l *keyedList) Complete(_ context.Context, j job) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if it := l.items[j.ID]; it != nil {
+		it.done = true
+	}
+	return nil
+}
+
+// Segments reports every segment with an unleased pending item: the list
+// is segmented by Query.
+func (l *keyedList) Segments() automation.Segmenter { return automation.Query(l.pendingSegments) }
+
+// ClaimSegments is Claim grouped by key, in claim order.
+func (l *keyedList) ClaimSegments(ctx context.Context, req automation.ClaimRequest) ([]automation.Claimed[job], error) {
+	items, err := l.Claim(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	index := map[string]int{}
+	var out []automation.Claimed[job]
+	for _, j := range items {
+		i, ok := index[j.Key]
+		if !ok {
+			i = len(out)
+			index[j.Key] = i
+			out = append(out, automation.Claimed[job]{Segment: j.Key})
+		}
+		out[i].Items = append(out[i].Items, j)
+	}
+	return out, nil
+}
+
+func (l *keyedList) pendingSegments(context.Context) ([]automation.Segment, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	seen := map[string]bool{}
+	var keys []automation.Segment
+	for _, it := range l.items {
+		if it.done || it.lease.After(now) || seen[it.job.Key] {
+			continue
+		}
+		seen[it.job.Key] = true
+		keys = append(keys, automation.Segment{Key: it.job.Key, Group: it.job.Group})
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
+	return keys, nil
+}
+
+// Claim leases up to req.MaxPerKey pending items per key in req.Keys, in
+// insertion order; all keys when req.Keys is empty.
+func (l *keyedList) Claim(_ context.Context, req automation.ClaimRequest) ([]job, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	want := map[string]bool{}
+	for _, k := range req.Segments {
+		want[k] = true
+	}
+	var pending []*keyedItem
+	for _, it := range l.items {
+		if it.done || it.lease.After(now) || (len(want) > 0 && !want[it.job.Key]) {
+			continue
+		}
+		pending = append(pending, it)
+	}
+	sort.Slice(pending, func(i, j int) bool { return pending[i].seq < pending[j].seq })
+	perKey := map[string]int{}
+	var out []job
+	for _, it := range pending {
+		if perKey[it.job.Key] >= req.MaxPerKey {
+			continue
+		}
+		perKey[it.job.Key]++
+		it.lease = now.Add(req.Lease)
+		out = append(out, it.job)
+	}
+	return out, nil
+}
+
+func (l *keyedList) pending() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, it := range l.items {
+		if !it.done {
+			n++
+		}
+	}
+	return n
+}
+
+// recorder notes when each item's work started and ended, and the most
+// items in flight at once, per chain and overall.
+type recorder struct {
+	mu       sync.Mutex
+	started  []string
+	inFlight map[string]int
+	maxAll   int
+	all      int
+	overlaps []string // chains that had two items in flight at once
+}
+
+func newRecorder() *recorder { return &recorder{inFlight: map[string]int{}} }
+
+func (r *recorder) work(hold time.Duration) automation.WorkFunc[job] {
+	return func(ctx context.Context, j job) error {
+		r.mu.Lock()
+		r.started = append(r.started, j.ID)
+		r.inFlight[j.Serial]++
+		if r.inFlight[j.Serial] > 1 {
+			r.overlaps = append(r.overlaps, j.Serial)
+		}
+		r.all++
+		if r.all > r.maxAll {
+			r.maxAll = r.all
+		}
+		r.mu.Unlock()
+		select {
+		case <-time.After(hold):
+		case <-ctx.Done():
+		}
+		r.mu.Lock()
+		r.inFlight[j.Serial]--
+		r.all--
+		r.mu.Unlock()
+		return nil
+	}
+}
+
+func (r *recorder) order() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.started...)
+}
+
+func TestRunOnce_DrainsThenReturns(t *testing.T) {
+	list := newTodoList()
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		list.Add(t.Context(), id)
+	}
+	r := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		TodoList:   list,
+		Work:       completing(list, nil),
+		BatchSize:  2,
+		Logger:     quiet,
+	})
+	sum, err := r.RunOnce(t.Context())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if sum.Processed != 5 || sum.Failed != 0 || sum.Deferred != 0 {
+		t.Fatalf("summary = %+v, want 5 processed", sum)
+	}
+	if n := list.pending(); n != 0 {
+		t.Fatalf("%d items left pending", n)
+	}
+	if got := r.Status(); got.Phase != automation.Idle || got.Processed != 5 {
+		t.Fatalf("status = %+v, want idle with 5 processed", got)
+	}
+}
+
+func TestRunOnce_SchedulerErrorEndsTheRun(t *testing.T) {
+	r := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		TodoList:   failingList{},
+		Work:       func(context.Context, string) error { return nil },
+		Logger:     quiet,
+	})
+	_, err := r.RunOnce(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "database down") {
+		t.Fatalf("err = %v, want the claim's error", err)
+	}
+	if got := r.Status().Phase; got != automation.Stalled {
+		t.Fatalf("phase = %v, want stalled", got)
+	}
+}
+
+// TestOrderingKey_OrdersChainsAndRunsThemInParallel covers the dispatch
+// rules: items of one chain run one at a time in claim order, different
+// chains fill Concurrency.
+func TestOrderingKey_OrdersChainsAndRunsThemInParallel(t *testing.T) {
+	list := newKeyedList()
+	for _, id := range []string{"a1", "b1", "a2", "b2", "a3", "b3"} {
+		list.Add(job{ID: id, Serial: id[:1]})
+	}
+	rec := newRecorder()
+	work := rec.work(15 * time.Millisecond)
+	r := automation.NewRunner(automation.Definition[job]{
+		Name:        "sync",
+		Projection:  newDep("todo", true),
+		TodoList:    list,
+		Work:        func(ctx context.Context, j job) error { defer list.Complete(ctx, j); return work(ctx, j) },
+		OrderingKey: func(j job) string { return j.Serial },
+		Concurrency: 4,
+		BatchSize:   10,
+		Logger:      quiet,
+	})
+	if _, err := r.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if len(rec.overlaps) > 0 {
+		t.Fatalf("chains %v had two items in flight at once", rec.overlaps)
+	}
+	if rec.maxAll < 2 {
+		t.Fatalf("at most %d items in flight; chains did not run in parallel", rec.maxAll)
+	}
+	order := rec.order()
+	pos := map[string]int{}
+	for i, id := range order {
+		pos[id] = i
+	}
+	for _, chain := range [][]string{{"a1", "a2", "a3"}, {"b1", "b2", "b3"}} {
+		for i := 1; i < len(chain); i++ {
+			if pos[chain[i]] < pos[chain[i-1]] {
+				t.Fatalf("%s started before %s: order %v", chain[i], chain[i-1], order)
+			}
+		}
+	}
+}
+
+// TestFailedItem_ParksItsChain covers that a failed item stops later items
+// of the same chain for the rest of the batch, while other chains go on.
+func TestFailedItem_ParksItsChain(t *testing.T) {
+	list := newKeyedList()
+	list.Add(job{ID: "a1", Serial: "a"})
+	list.Add(job{ID: "a2", Serial: "a"})
+	list.Add(job{ID: "b1", Serial: "b"})
+	var ran []string
+	var mu sync.Mutex
+	r := automation.NewRunner(automation.Definition[job]{
+		Name:       "sync",
+		Projection: newDep("todo", true),
+		TodoList:   list,
+		Work: func(ctx context.Context, j job) error {
+			mu.Lock()
+			ran = append(ran, j.ID)
+			mu.Unlock()
+			if j.ID == "a1" {
+				return errors.New("provider error")
+			}
+			return list.Complete(ctx, j)
+		},
+		OrderingKey: func(j job) string { return j.Serial },
+		Concurrency: 2,
+		Lease:       time.Hour, // a1 and a2 stay leased: the run drains
+		Logger:      quiet,
+	})
+	sum, err := r.RunOnce(t.Context())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if sum.Processed != 1 || sum.Failed != 1 {
+		t.Fatalf("summary = %+v, want 1 processed, 1 failed", sum)
+	}
+	sort.Strings(ran)
+	if strings.Join(ran, ",") != "a1,b1" {
+		t.Fatalf("ran %v, want a1 (failed) and b1 only; a2 must wait for a1's lease", ran)
+	}
+}
+
+// TestDeferred_PausesClaims covers that Deferred pauses the whole
+// unsegmented automation, on every instance sharing the store, without
+// counting a failure.
+func TestDeferred_PausesClaims(t *testing.T) {
+	list := newTodoList()
+	list.Add(t.Context(), "a")
+	list.Add(t.Context(), "b")
+	store := automation.NewLocalStore()
+	var claims atomic.Int32
+	var deferred atomic.Bool
+	def := automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		Store:      store,
+		TodoList:   countingList{list, &claims},
+		Work: func(ctx context.Context, id string) error {
+			if deferred.CompareAndSwap(false, true) {
+				return automation.Deferred(time.Now().Add(150 * time.Millisecond))
+			}
+			return list.Complete(ctx, id)
+		},
+		BatchSize:    1,
+		Lease:        50 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	}
+	a := automation.NewRunner(def)
+	b := automation.NewRunner(def) // a second instance, same store
+	start(t, a)
+	start(t, b)
+
+	eventually(t, "the deferral", func() bool { return a.Status().Deferred+b.Status().Deferred == 1 })
+	before := claims.Load()
+	time.Sleep(80 * time.Millisecond)
+	if got := claims.Load(); got != before {
+		t.Fatalf("%d claims during the pause, want none on either instance", got-before)
+	}
+	if d, _ := store.DeferredFor(t.Context(), "ship-orders", ""); d <= 0 {
+		t.Fatal("store does not report the pause")
+	}
+	eventually(t, "the list to drain after the pause", func() bool { return list.pending() == 0 })
+	if f := a.Status().Failed + b.Status().Failed; f != 0 {
+		t.Fatalf("%d failures counted; a deferral is not a failure", f)
+	}
+}
+
+// TestLeaseExpiry_BoundsWork covers that Work's context ends with the item
+// lease and that an item whose lease ran out while it waited in the batch
+// is skipped.
+func TestLeaseExpiry_BoundsWork(t *testing.T) {
+	list := newTodoList()
+	for _, id := range []string{"a", "b", "c"} {
+		list.Add(t.Context(), id)
+	}
+	var deadlines atomic.Int32
+	r := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		TodoList:   list,
+		Work: func(ctx context.Context, id string) error {
+			<-ctx.Done() // slower than the lease
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				deadlines.Add(1)
+			}
+			return ctx.Err()
+		},
+		BatchSize:    3,
+		Lease:        30 * time.Millisecond,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, r)
+	eventually(t, "a deadline on Work's context", func() bool { return deadlines.Load() >= 1 })
+	eventually(t, "the skipped items", func() bool {
+		return strings.Contains(r.Status().LastError, "lease expired before work started")
+	})
+}
+
+// TestSegmented_OneOwnerPerKey covers two instances sharing a store:
+// every item is processed, and no key is ever worked by both at once.
+func TestSegmented_OneOwnerPerKey(t *testing.T) {
+	list := newKeyedList()
+	for _, k := range []string{"acme:shopify", "acme:stripe", "zed:shopify", "zed:stripe"} {
+		for i := range 5 {
+			list.Add(job{ID: k + "/" + string(rune('0'+i)), Key: k, Group: strings.SplitN(k, ":", 2)[0], Serial: k})
+		}
+	}
+	store := automation.NewLocalStore()
+	var (
+		mu       sync.Mutex
+		inFlight = map[string]string{} // key → instance working it
+		clashes  []string
+		byInst   = map[string]int{}
+	)
+	def := func(inst string) automation.Definition[job] {
+		return automation.Definition[job]{
+			Name:       "sync",
+			Projection: newDep("todo", true),
+			Store:      store,
+			TodoList:   list,
+			Work: func(ctx context.Context, j job) error {
+				mu.Lock()
+				if other, busy := inFlight[j.Key]; busy && other != inst {
+					clashes = append(clashes, j.Key)
+				}
+				inFlight[j.Key] = inst
+				byInst[inst]++
+				mu.Unlock()
+				time.Sleep(3 * time.Millisecond)
+				mu.Lock()
+				delete(inFlight, j.Key)
+				mu.Unlock()
+				return list.Complete(ctx, j)
+			},
+			MaxSegments:  1,
+			BatchSize:    2,
+			PollInterval: 5 * time.Millisecond,
+			Logger:       quiet,
+		}
+	}
+	a := automation.NewRunner(def("a"))
+	b := automation.NewRunner(def("b"))
+	start(t, a)
+	start(t, b)
+	eventually(t, "every item processed", func() bool { return list.pending() == 0 })
+	// Work completes an item before it returns, and the runner counts it
+	// after; wait for the counts to catch up.
+	eventually(t, "every item counted", func() bool { return a.Status().Processed+b.Status().Processed >= 20 })
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(clashes) > 0 {
+		t.Fatalf("keys worked by both instances at once: %v", clashes)
+	}
+	if byInst["a"]+byInst["b"] != 20 {
+		t.Fatalf("processed %v, want 20 in total", byInst)
+	}
+	if got := a.Status().Processed + b.Status().Processed; got != 20 {
+		t.Fatalf("status counts %d, want 20", got)
+	}
+}
+
+// TestSegmented_DeferredPausesOnlyThatKey covers that a 429 from one
+// integration pauses that segment and no other.
+func TestSegmented_DeferredPausesOnlyThatKey(t *testing.T) {
+	list := newKeyedList()
+	for i := range 3 {
+		list.Add(job{ID: "slow/" + string(rune('0'+i)), Key: "slow"})
+		list.Add(job{ID: "fast/" + string(rune('0'+i)), Key: "fast"})
+	}
+	var deferred atomic.Bool
+	r := automation.NewRunner(automation.Definition[job]{
+		Name:       "sync",
+		Projection: newDep("todo", true),
+		TodoList:   list,
+		Work: func(ctx context.Context, j job) error {
+			if j.Key == "slow" && deferred.CompareAndSwap(false, true) {
+				return automation.Deferred(time.Now().Add(200 * time.Millisecond))
+			}
+			return list.Complete(ctx, j)
+		},
+		Lease:        50 * time.Millisecond,
+		PollInterval: 5 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, r)
+
+	eventually(t, "fast items processed while slow is paused", func() bool {
+		list.mu.Lock()
+		defer list.mu.Unlock()
+		fastLeft, slowLeft := 0, 0
+		for _, it := range list.items {
+			if !it.done {
+				if it.job.Key == "fast" {
+					fastLeft++
+				} else {
+					slowLeft++
+				}
+			}
+		}
+		return fastLeft == 0 && slowLeft == 3
+	})
+	eventually(t, "slow items processed after the pause", func() bool { return list.pending() == 0 })
+	if s := r.Status(); s.Deferred != 1 || s.Failed != 0 {
+		t.Fatalf("status = %+v, want one deferral and no failure", s)
+	}
+}
+
+func TestNewRunner_Panics(t *testing.T) {
+	dep := newDep("todo", true)
+	work := func(context.Context, string) error { return nil }
+	list := newTodoList()
+	cases := map[string]automation.Definition[string]{
+		"no list and no scheduler": {Name: "x", Projection: dep, Work: work},
+		"list and scheduler":       {Name: "x", Projection: dep, Work: work, TodoList: list, Scheduler: nopScheduler[string]{}},
+		"no projection":            {Name: "x", Work: work, TodoList: list},
+		"no work":                  {Name: "x", Projection: dep, TodoList: list},
+	}
+	for name, d := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewRunner did not panic")
+				}
+			}()
+			automation.NewRunner(d)
+		})
+	}
+}
+
+// TestSegmented_ConcurrentDeferrals covers several segments deferring at
+// the same moment, as when every tenant's integration answers 429: their
+// batches run in parallel, so the scheduler hears of the deferrals from
+// several goroutines at once. Run it with -race.
+func TestSegmented_ConcurrentDeferrals(t *testing.T) {
+	const segments = 8
+	list := newKeyedList()
+	for i := range segments {
+		key := "tenant-" + string(rune('a'+i))
+		list.Add(job{ID: key + "/1", Key: key})
+	}
+	store := automation.NewLocalStore()
+	ready := make(chan struct{})
+	var arrived atomic.Int32
+	r := automation.NewRunner(automation.Definition[job]{
+		Name:       "sync",
+		Projection: newDep("todo", true),
+		Store:      store,
+		TodoList:   list,
+		Work: func(ctx context.Context, j job) error {
+			// Hold every batch until all have started, so that the
+			// deferrals are reported together.
+			if arrived.Add(1) == segments {
+				close(ready)
+			}
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return automation.Deferred(time.Now().Add(time.Hour))
+		},
+		Lease:        time.Second,
+		PollInterval: 5 * time.Millisecond,
+		MaxSegments:  segments,
+		Logger:       quiet,
+	})
+	sum, err := r.RunOnce(t.Context())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if sum.Deferred != segments {
+		t.Fatalf("summary = %+v, want %d deferrals", sum, segments)
+	}
+	for i := range segments {
+		key := "tenant-" + string(rune('a'+i))
+		if d, _ := store.DeferredFor(t.Context(), "sync", key); d < 50*time.Minute {
+			t.Fatalf("segment %s paused for %s, want about an hour", key, d)
+		}
+	}
+}
+
+// nopScheduler is a Scheduler that never has work, for wiring tests and
+// as the smallest example of the seam.
+type nopScheduler[T any] struct{}
+
+func (nopScheduler[T]) Next(context.Context) ([]automation.Batch[T], error) { return nil, nil }
+func (nopScheduler[T]) Done(context.Context, automation.Item[T], automation.Outcome) error {
+	return nil
+}
+func (nopScheduler[T]) Close(context.Context) error { return nil }
+
+// TestCustomScheduler covers that a Scheduler replaces the default
+// claiming entirely: the runner works what it hands out and reports back.
+func TestCustomScheduler(t *testing.T) {
+	s := &scriptedScheduler{batches: [][]automation.Batch[string]{
+		{{Key: "k1", Items: []automation.Item[string]{{Key: "k1", Value: "a"}, {Key: "k1", Value: "b"}}}},
+		{{Key: "k2", Items: []automation.Item[string]{{Key: "k2", Value: "c"}}}},
+	}}
+	var worked []string
+	var mu sync.Mutex
+	r := automation.NewRunner(automation.Definition[string]{
+		Name:       "custom",
+		Projection: newDep("todo", true),
+		Scheduler:  s,
+		Work: func(_ context.Context, v string) error {
+			mu.Lock()
+			worked = append(worked, v)
+			mu.Unlock()
+			if v == "b" {
+				return errors.New("nope")
+			}
+			return nil
+		},
+		Logger: quiet,
+	})
+	sum, err := r.RunOnce(t.Context())
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if sum.Processed != 2 || sum.Failed != 1 {
+		t.Fatalf("summary = %+v, want 2 processed, 1 failed", sum)
+	}
+	sort.Strings(worked)
+	if strings.Join(worked, ",") != "a,b,c" {
+		t.Fatalf("worked %v", worked)
+	}
+	if !s.closed {
+		t.Fatal("scheduler was not closed")
+	}
+	if len(s.outcomes) != 3 || s.outcomes["b"].Kind != automation.Failed {
+		t.Fatalf("outcomes = %+v, want three with b failed", s.outcomes)
+	}
+}
+
+type scriptedScheduler struct {
+	mu       sync.Mutex
+	batches  [][]automation.Batch[string]
+	outcomes map[string]automation.Outcome
+	closed   bool
+}
+
+func (s *scriptedScheduler) Next(context.Context) ([]automation.Batch[string], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.batches) == 0 {
+		return nil, nil
+	}
+	b := s.batches[0]
+	s.batches = s.batches[1:]
+	return b, nil
+}
+
+func (s *scriptedScheduler) Done(_ context.Context, it automation.Item[string], out automation.Outcome) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outcomes == nil {
+		s.outcomes = map[string]automation.Outcome{}
+	}
+	s.outcomes[it.Value] = out
+	return nil
+}
+
+func (s *scriptedScheduler) Close(context.Context) error { s.closed = true; return nil }

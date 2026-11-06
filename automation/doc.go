@@ -56,11 +56,11 @@
 //	todoList := projection.NewRunner(shipping.NewProjection(),
 //		eventStore, postgres.NewProjectionStore(pool))
 //
-//	ship := automation.New(automation.Definition[shipping.ShippingTodo]{
-//		Name:     "ship-orders",
-//		TodoList: todoList,
-//		Claim:    ordersToShip.Claim,
-//		Work:     shipping.ShipOrder(commandBus, carrier),
+//	ship := automation.NewRunner(automation.Definition[shipping.ShippingTodo]{
+//		Name:       "ship-orders",
+//		TodoList:   ordersToShip,
+//		Projection: todoList,
+//		Work:       shipping.ShipOrder(commandBus, carrier),
 //	})
 //
 //	go todoList.Run(ctx)
@@ -103,14 +103,61 @@
 // work that may hang should set its own deadline well below
 // [Definition.Lease].
 //
-// The events Work's commands record join the chain of the event that put
-// the item on the todo list when [Definition.Chain] says which that was;
-// otherwise each item's work starts a new chain. See
-// eventsourcing.Envelope.CorrelationID.
+// Work starts with no chain, so the commands it sends start a new one.
+// To continue the chain of the event the item comes from, keep that
+// event's CorrelationID and EventID on the todo-list row and set them in
+// Work, before sending the command:
+//
+//	ctx = eventsourcing.WithCorrelationID(ctx, item.CorrelationID)
+//	ctx = eventsourcing.WithCausationID(ctx, item.EventID)
+//
+// See eventsourcing.Envelope.CorrelationID.
+//
+// # Segments, concurrency and order
+//
+// By default every instance of an automation claims from the whole todo
+// list and runs its items one at a time: competing consumers, enough for
+// work with no limits of its own. The list and the definition can add
+// structure when the work has some:
+//
+//   - A list that implements [Segmented] is divided by a column the
+//     projection writes: a shard number ([Shards], with [ShardKey]) or a
+//     business key such as a tenant ([Query]). Each segment is leased to
+//     one instance at a time through a [Store], so "at most K calls at
+//     once to this provider" holds across every instance, and a [Deferred]
+//     return from Work (a 429) pauses that segment, and only that segment,
+//     for every instance. Segments with a Group round-robin across groups
+//     before segments, so a tenant with forty segments and a tenant with
+//     one get the same number of turns. The list claims every held
+//     segment in one call and hands the items back grouped by segment.
+//   - [Definition.Concurrency] is how many items of one segment run at
+//     once.
+//   - [Definition.OrderingKey] groups items that must run one at a time in
+//     claim order, an order or an aggregate; different ordering keys fill
+//     Concurrency. A failed item parks its ordering key for the rest of the
+//     batch, so a later item of the same chain cannot overtake it.
+//
+// Scheduling is pluggable: [Definition.Scheduler] replaces the claiming
+// and leasing with another source of keyed work, a broker or a queue,
+// while the runner keeps dispatch, deadlines and outcomes. See
+// [Scheduler].
+//
+// Leases narrow the window in which two instances work the same item;
+// they do not close it. A call already sent to an external system when
+// a lease is lost can still land after another instance has retried it.
+// Idempotency on the outgoing call is the user's job; "leased" is not
+// "exactly-once".
+//
+// # Running on a timer
+//
+// [Runner.Run] works until its context ends. [Runner.RunOnce] works until
+// nothing is eligible, gives every segment back, and returns a
+// [Summary]: the entry point for an automation that a cron job or a timer
+// starts, say once a night.
 //
 // # Waking up
 //
-// An automation claims work at every [Definition.Interval], and
+// An automation checks for work at every [Definition.PollInterval], and
 // immediately when nudged. When its dependencies implement
 // [Watcher], as a [projection.Runner] does, the automation is
 // nudged whenever the todo list commits new events or becomes live, so
@@ -118,9 +165,9 @@
 //
 // # Status
 //
-// [Automation.Status] reports a [Phase] (Waiting, Idle, Working, Stalled)
-// and counts, in the same shape as a projection's status. A failing check
-// or claim stalls the automation with the same backoff as a projection,
+// [Runner.Status] reports a [Phase] (Waiting, Idle, Working, Stalled)
+// and counts for this instance, in the same shape as a projection's
+// status. A failing check or scheduler call stalls the automation with the same backoff as a projection,
 // 0.5s growing to 30s, and it never gives up; a failing work call is
 // counted, logged, and retried once its item's lease expires.
 package automation

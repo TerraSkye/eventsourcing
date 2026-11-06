@@ -18,9 +18,9 @@ func NewAutomation(
 	archive eventsourcing.CommandHandler[archivetask.ArchiveTask],
 ) automation.Definition[uuid.UUID] {
 	return automation.Definition[uuid.UUID]{
-		Name:     "archive-tasks",
-		TodoList: todoList,
-		Claim:    list.Claim,
+		Name:       "archive-tasks",
+		TodoList:   list,
+		Projection: todoList,
 		Work: func(ctx context.Context, taskID uuid.UUID) error {
 			_, err := archive(ctx, archivetask.ArchiveTask{TaskID: taskID})
 			return err
