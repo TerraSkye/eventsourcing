@@ -92,8 +92,9 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 
 	eventsourcing.Register(commandBus, completetask.NewHandler(store))
 	eventsourcing.Register(commandBus, createtask.NewHandler(store))
+	eventsourcing.Register(commandBus, archivetask.NewHandler(store))
 
-	archive := archivetasks.NewAutomation(archiveList, archiveTodo, archivetask.NewHandler(store))
+	archive := archivetasks.New(archiveList, archiveTodo, commandBus).Definition()
 	archive.Logger = logger
 	archive.PollInterval = checkEvery
 	archiveTasks := automation.NewRunner(archive)
