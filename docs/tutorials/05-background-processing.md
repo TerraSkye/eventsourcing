@@ -145,23 +145,32 @@ func NewTasksToArchive(delay time.Duration) *TasksToArchive {
     return &TasksToArchive{delay: delay, items: map[uuid.UUID]*item{}}
 }
 
+// NewProjection returns the projection that keeps list: a completed task
+// joins the list, due its delay after completion; an archived one leaves
+// it. Each event type has its own handler, routed by the group.
 func NewProjection(list *TasksToArchive) projection.Definition {
+    group := eventsourcing.NewEventGroupProcessor(
+        eventsourcing.OnEvent(list.onCompleted),
+        eventsourcing.OnEvent(list.onArchived),
+    )
     return projection.Definition{
         Name:       "tasks-to-archive",
-        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
-        EventTypes: []string{"TaskCompleted", "TaskArchived"},
+        Handler:    group,
+        EventTypes: group.StreamFilter(),
     }
 }
 
-func (l *TasksToArchive) handle(ctx context.Context, event eventsourcing.Event) error {
+func (l *TasksToArchive) onCompleted(_ context.Context, e *events.TaskCompleted) error {
     l.mu.Lock()
     defer l.mu.Unlock()
-    switch e := event.(type) {
-    case *events.TaskCompleted:
-        l.items[e.TaskID] = &item{due: e.CompletedAt.Add(l.delay)}
-    case *events.TaskArchived:
-        delete(l.items, e.TaskID)
-    }
+    l.items[e.TaskID] = &item{due: e.CompletedAt.Add(l.delay)}
+    return nil
+}
+
+func (l *TasksToArchive) onArchived(_ context.Context, e *events.TaskArchived) error {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    delete(l.items, e.TaskID)
     return nil
 }
 
