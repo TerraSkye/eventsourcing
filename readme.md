@@ -226,6 +226,7 @@ import "github.com/terraskye/eventsourcing/telemetry"
 bus.Use(telemetry.CommandTelemetry())
 store := telemetry.WithEventStoreTelemetry(sqlite.NewEventStore(db))
 telemetry.ObserveProjection(runner) // lag, position and phase as gauges, dead-lettered events as a counter
+telemetry.ObserveAutomation(automationRunner) // phase as a gauge, items worked as a counter
 ```
 
 Spans carry `eventsourcing.command.type`, `eventsourcing.aggregate.id`, `eventsourcing.stream.id`, `eventsourcing.event.type`, `eventsourcing.event.global_position` and friends; metrics cover durations, in-flight counts, failures, concurrency conflicts, and events appended and loaded. Full list in [Add OpenTelemetry](https://terraskye.github.io/eventsourcing/how-to/add-opentelemetry/).

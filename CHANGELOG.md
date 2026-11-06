@@ -79,6 +79,11 @@ release may break the API; every break is listed under **Breaking**.
   segments back, as `projection.Store.LoadStatuses` does for projections.
   The SQL stores keep these in the new `automation_controls` and
   `automation_instances` tables.
+- `telemetry`: `WithWorkTelemetry` traces and times an automation's work
+  per item, `WithAutomationStoreTelemetry` counts segment acquisitions,
+  grants and lost leases and traces pausing, and `ObserveAutomation`
+  reports a runner's phase and items worked, as `ObserveProjection` does
+  for projections.
 
 ## [0.5.0] - 2026-10-29
 

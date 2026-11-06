@@ -51,8 +51,8 @@ const (
 
 	// AttrResult labels an outcome: "success" or "failure", and also
 	// "rejected" for a command, "skipped" for an event handler,
-	// "claim_lost" for a projection batch, and "acquired" or "held" for a
-	// projection claim.
+	// "claim_lost" for a projection batch, "acquired" or "held" for a
+	// projection claim, and "deferred" for automation work.
 	AttrResult = attribute.Key("eventsourcing.result")
 
 	// AttrErrorType classifies a failure, following the OpenTelemetry
@@ -74,6 +74,12 @@ const (
 	AttrProjectionSegment  = attribute.Key("eventsourcing.projection.segment")
 	AttrProjectionPosition = attribute.Key("eventsourcing.projection.position")
 	AttrProjectionPhase    = attribute.Key("eventsourcing.projection.phase")
+
+	// Automation attributes. A segment key only goes on spans: one series
+	// per segment, such as one per tenant, would grow without bound.
+	AttrAutomationName    = attribute.Key("eventsourcing.automation.name")
+	AttrAutomationPhase   = attribute.Key("eventsourcing.automation.phase")
+	AttrAutomationSegment = attribute.Key("eventsourcing.automation.segment")
 
 	// AttrEventStoreOperation names the event store operation: "append",
 	// "load" or "read_all".
@@ -225,6 +231,58 @@ var (
 		"eventsourcing.projection.instance.count",
 		metric.WithDescription("Live instances of a projection, as its last heartbeat listed them"),
 		metric.WithUnit("{instance}"),
+	)
+
+	// Automation metrics
+
+	// AutomationWorkDuration records how long an automation's work took for
+	// one item, in seconds, labelled by [AttrAutomationName] and
+	// [AttrResult]: "success", "deferred" for an automation.Deferred
+	// return, or "failure" with [AttrErrorType]. Its count is the number of
+	// items worked. See [WithWorkTelemetry].
+	AutomationWorkDuration, _ = meter.Float64Histogram(
+		"eventsourcing.automation.work.duration",
+		metric.WithDescription("Duration of an automation's work for one item, labelled by eventsourcing.result"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+	)
+
+	// AutomationAcquisitions counts an automation's calls to acquire
+	// segments, made on every poll, labelled by [AttrAutomationName] and
+	// [AttrResult] ("success" or "failure"). While they fail, the instance
+	// gets no new segments.
+	AutomationAcquisitions, _ = meter.Int64Counter(
+		"eventsourcing.automation.acquisitions",
+		metric.WithDescription("Calls to acquire automation segments, labelled by eventsourcing.result"),
+		metric.WithUnit("{acquisition}"),
+	)
+
+	// AutomationSegmentGrants counts the segments granted to an instance of
+	// an automation, labelled by [AttrAutomationName].
+	AutomationSegmentGrants, _ = meter.Int64Counter(
+		"eventsourcing.automation.segment.grants",
+		metric.WithDescription("Automation segments granted to an instance"),
+		metric.WithUnit("{segment}"),
+	)
+
+	// AutomationSegmentWaiting records the segments of an automation that
+	// have work and are waiting for an owner, as of an instance's last
+	// acquisition, labelled by [AttrAutomationName]. Every instance reports
+	// it, so aggregate it with max rather than sum. A value that stays
+	// above zero means the instances hold too few segments to keep up.
+	AutomationSegmentWaiting, _ = meter.Int64Gauge(
+		"eventsourcing.automation.segment.waiting",
+		metric.WithDescription("Automation segments waiting for an owner, as of an instance's last acquisition"),
+		metric.WithUnit("{segment}"),
+	)
+
+	// AutomationSegmentLost counts segment leases an instance lost: a
+	// renew or release found the segment held by another instance, or its
+	// lease expired. Labelled by [AttrAutomationName].
+	AutomationSegmentLost, _ = meter.Int64Counter(
+		"eventsourcing.automation.segment.lost",
+		metric.WithDescription("Automation segment leases an instance lost"),
+		metric.WithUnit("{segment}"),
 	)
 
 	// ProjectionSegmentHeld records the number of segments of a projection

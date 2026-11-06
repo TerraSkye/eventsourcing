@@ -117,6 +117,46 @@ projection makes on every poll, are counted in metrics but get no span.
 Alert on `phase{eventsourcing.projection.phase="stalled"} == 1`, on lag
 that keeps growing, and on `heartbeats{eventsourcing.result="failure"}`.
 
+## Instrument an automation
+
+Wrap the work and the automation store, and observe the runner:
+
+```go
+def := archivetasks.New(list, todo, commandBus).Definition()
+def.Work = telemetry.WithWorkTelemetry(def.Name, def.Work)
+def.Store = telemetry.WithAutomationStoreTelemetry(postgres.NewAutomationStore(pool))
+r := automation.NewRunner(def)
+
+reg, err := telemetry.ObserveAutomation(r)
+if err != nil {
+    return err
+}
+defer reg.Unregister()
+```
+
+Each item runs in a `process item` span, tagged with
+`eventsourcing.automation.name`. When the work dispatches a command through a bus with
+`telemetry.CommandTelemetry`, the command's span is its child. A deferral
+adds a `segment deferred` event to the span; pausing and resuming from
+the dashboard are `pause automation` and `resume automation` spans. Segment
+keys go on spans only, never on metrics, since one series per tenant would
+grow without bound.
+
+| Metric | Type | What it reports |
+|---|---|---|
+| `eventsourcing.automation.phase` | gauge | 1 for the current phase, per `eventsourcing.automation.phase`, on this instance |
+| `eventsourcing.automation.items` | counter | Items worked on this instance, by `eventsourcing.result` (`success`, `failure`, `deferred`) |
+| `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `failure` with `error.type`) |
+| `eventsourcing.automation.acquisitions` | counter | Calls to acquire segments, by `eventsourcing.result`; while they fail the instance gets no new segments |
+| `eventsourcing.automation.segment.grants` | counter | Segments granted to this instance |
+| `eventsourcing.automation.segment.waiting` | gauge | Segments with work and no owner. Every instance reports it: aggregate with max |
+| `eventsourcing.automation.segment.lost` | counter | Segment leases this instance lost to expiry or another instance |
+
+Alert on `phase{eventsourcing.automation.phase="stalled"} == 1`, on
+`segment.waiting` that stays above zero (the instances hold too few
+segments to keep up), and on a rising `segment.lost`, which means work
+outlives its leases.
+
 ## Add custom attributes
 
 Use `WithAttributes` for static attributes, or `WithAttributeGetter` for dynamic ones extracted from context:
@@ -166,3 +206,6 @@ telemetry.WithOperationGetter(func(ctx context.Context, operation string) string
 | `telemetry.EventTelemetry` | `EventHandler`, as middleware |
 | `telemetry.WithProjectionStoreTelemetry` | `projection.Store` |
 | `telemetry.ObserveProjection` | `projection.Runner`: reports its lag, position, phase and dead-lettered events |
+| `telemetry.WithWorkTelemetry` | `automation.WorkFunc[T]` |
+| `telemetry.WithAutomationStoreTelemetry` | `automation.Store` |
+| `telemetry.ObserveAutomation` | `automation.Runner`: reports its phase and the items it worked |
