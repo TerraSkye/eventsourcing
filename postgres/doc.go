@@ -1,5 +1,6 @@
 // Package postgres keeps events and projections in PostgreSQL: an event
-// store and a projection store that share one database.
+// store, a projection store and an automation store that share one
+// database.
 //
 // Apply [Schema] before use. [EventStore] appends and reads the events
 // table, and [ProjectionStore] keeps projection checkpoints next to the

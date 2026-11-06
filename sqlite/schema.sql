@@ -95,3 +95,22 @@ CREATE TABLE IF NOT EXISTS projection_replay_segments (
     error   TEXT,
     PRIMARY KEY (replay, segment)
 );
+
+-- Automations: one row per segment of each automation (automation.Store).
+-- owner and epoch fence the current lease, which runs until lease_until;
+-- paused_until holds a Deferred pause. first_seen and last_served order
+-- the fair hand-out across group_key and segment_key. Times are Unix
+-- milliseconds; 0 means unset, and last_served is NULL until the segment
+-- is first served.
+CREATE TABLE IF NOT EXISTS automation_segments (
+    name         TEXT    NOT NULL,
+    segment_key  TEXT    NOT NULL,
+    group_key    TEXT    NOT NULL DEFAULT '',
+    owner        TEXT    NOT NULL DEFAULT '',
+    epoch        INTEGER NOT NULL DEFAULT 0,
+    lease_until  INTEGER NOT NULL DEFAULT 0,
+    paused_until INTEGER NOT NULL DEFAULT 0,
+    first_seen   INTEGER NOT NULL,
+    last_served  INTEGER,
+    PRIMARY KEY (name, segment_key)
+);

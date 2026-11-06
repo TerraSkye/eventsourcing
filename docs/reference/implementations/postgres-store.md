@@ -10,7 +10,7 @@ github.com/terraskye/eventsourcing/postgres
 
 ## Schema
 
-Apply `postgres.Schema` before use. It creates the tables of the event store and the projection store; the same SQL ships as `postgres/schema.sql`. It has the tables as this release uses them and adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between. The events table:
+Apply `postgres.Schema` before use. It creates the tables of the event store, the projection store and the automation store; the same SQL ships as `postgres/schema.sql`. It has the tables as this release uses them and adds no column to a table an earlier release created: when upgrading, run the `ALTER TABLE` statements the changelog lists for each release in between. The events table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS events (
@@ -60,6 +60,14 @@ defer store.Close()
 - `LoadStream` requires the stream to exist (`StreamExists` semantics).
 - `ReadAll` and `Head` (`GlobalReader`) use the global `id` column (`GlobalPosition` on the envelope). Because appends commit one at a time in id order, no id becomes visible before a lower one, so a reader that checkpoints a position never skips an event from a slower concurrent writer. Filters run in SQL; stream prefixes match literally.
 - Iterators are lazy: rows are fetched as you iterate and a pool connection is held until the iterator is exhausted or errors. Always drain or abandon iterators promptly.
+
+## Automation store
+
+```go
+func NewAutomationStore(pool *pgxpool.Pool) *AutomationStore
+```
+
+`AutomationStore` implements `automation.Store` on the `automation_segments` table, so the instances of an automation that share the database divide its segments between them: one owner per segment at a time, fenced by owner and epoch, with pauses from `automation.Deferred` seen by every instance. `Acquire` locks the candidate rows in key order, so instances acquiring at once wait for each other rather than deadlock. Time is the database's clock, so the instances' clocks need not agree.
 
 ## Limitations
 
