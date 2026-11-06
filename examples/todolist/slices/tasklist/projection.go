@@ -9,33 +9,41 @@ import (
 )
 
 // NewProjection returns the projection that keeps list up to date (Part 4).
-// Archived tasks leave the list.
+// Each event type has its own handler; the group routes every event to the
+// one for its type, and its StreamFilter tells the runner which event
+// types to read. Archived tasks leave the list.
 func NewProjection(list *TaskList) projection.Definition {
+	group := eventsourcing.NewEventGroupProcessor(
+		eventsourcing.OnEvent(list.onCreated),
+		eventsourcing.OnEvent(list.onCompleted),
+		eventsourcing.OnEvent(list.onArchived),
+	)
 	return projection.Definition{
 		Name:       "task-list",
-		Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
-		EventTypes: []string{"TaskCreated", "TaskCompleted", "TaskArchived"},
+		Handler:    group,
+		EventTypes: group.StreamFilter(),
 	}
 }
 
-// handle applies one event to the task list. The runner calls it for every
-// event in EventTypes, in the order they were stored.
-func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
+func (l *TaskList) onCreated(_ context.Context, e *events.TaskCreated) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.tasks[e.TaskID.String()] = &Task{ID: e.TaskID.String(), Title: e.Title}
+	return nil
+}
 
-	switch e := event.(type) {
-	case *events.TaskCreated:
-		l.tasks[e.TaskID.String()] = &Task{
-			ID:    e.TaskID.String(),
-			Title: e.Title,
-		}
-	case *events.TaskCompleted:
-		if t, ok := l.tasks[e.TaskID.String()]; ok {
-			t.Completed = true
-		}
-	case *events.TaskArchived:
-		delete(l.tasks, e.TaskID.String())
+func (l *TaskList) onCompleted(_ context.Context, e *events.TaskCompleted) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.tasks[e.TaskID.String()]; ok {
+		t.Completed = true
 	}
+	return nil
+}
+
+func (l *TaskList) onArchived(_ context.Context, e *events.TaskArchived) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.tasks, e.TaskID.String())
 	return nil
 }
