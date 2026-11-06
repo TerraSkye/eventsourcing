@@ -39,6 +39,10 @@ type snapshot struct {
 	Events      bool             `json:"events"` // the page offers the events view
 	Chains      bool             `json:"chains"` // events link to their correlation chain
 	Projections []projectionView `json:"projections"`
+
+	// ShowAutomations is set when the page offers the automations view.
+	ShowAutomations bool             `json:"showAutomations"`
+	Automations     []automationView `json:"automations"`
 }
 
 // projectionView is one projection as the page shows it.
