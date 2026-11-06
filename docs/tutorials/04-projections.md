@@ -86,37 +86,38 @@ import (
 
 // NewProjection returns the projection that keeps list up to date.
 func NewProjection(list *TaskList) projection.Definition {
+    group := eventsourcing.NewEventGroupProcessor(
+        eventsourcing.OnEvent(list.onCreated),
+        eventsourcing.OnEvent(list.onCompleted),
+    )
     return projection.Definition{
         Name:       "task-list",
-        Handler:    eventsourcing.NewEventHandlerFunc(list.handle),
-        EventTypes: []string{"TaskCreated", "TaskCompleted"},
+        Handler:    group,
+        EventTypes: group.StreamFilter(),
     }
 }
 
-// handle applies one event to the task list. The runner calls it for every
-// event in EventTypes, in the order they were stored.
-func (l *TaskList) handle(_ context.Context, event eventsourcing.Event) error {
+func (l *TaskList) onCreated(_ context.Context, e *events.TaskCreated) error {
     l.mu.Lock()
     defer l.mu.Unlock()
+    l.tasks[e.TaskID.String()] = &Task{ID: e.TaskID.String(), Title: e.Title}
+    return nil
+}
 
-    switch e := event.(type) {
-    case *events.TaskCreated:
-        l.tasks[e.TaskID.String()] = &Task{
-            ID:    e.TaskID.String(),
-            Title: e.Title,
-        }
-    case *events.TaskCompleted:
-        if t, ok := l.tasks[e.TaskID.String()]; ok {
-            t.Completed = true
-        }
+func (l *TaskList) onCompleted(_ context.Context, e *events.TaskCompleted) error {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    if t, ok := l.tasks[e.TaskID.String()]; ok {
+        t.Completed = true
     }
     return nil
 }
 ```
 
 - `Name` identifies the projection's checkpoint, so it must be unique and stay the same between releases.
-- `Handler` is called for every event the runner reads. `NewEventHandlerFunc` turns a function into an `eventsourcing.EventHandler`.
-- `EventTypes` lists the event types `handle` switches on. The runner reads only those, so keep it in step with the `case`s; that is why both live in this one file.
+- `Handler` is called for every event the runner reads. The group routes each event to the handler for its type: `OnEvent` takes a function over one event type, so each handler gets the typed event and nothing else.
+- `EventTypes` tells the runner which event types to read. `group.StreamFilter()` derives them from the handlers, so they cannot drift apart. It relies on the events being registered with `eventsourcing.RegisterEvent`, as Part 1 did; an unregistered type is left out.
+- Each handler is a method on the list, so a test can feed it events through `Handler.Handle` and read the list back, without a runner or a store.
 
 ## Step 4: Write the query handler
 
