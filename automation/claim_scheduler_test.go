@@ -44,6 +44,7 @@ func TestClaimScheduler_RotatesUnderContention(t *testing.T) {
 		for _, it := range batches[0].Items {
 			s.Done(ctx, it, Outcome{Kind: Done})
 		}
+		s.Drained(ctx, batches[0].Key)
 		c.tick(11 * time.Second) // past the term
 	}
 	if got := strings.Join(served, ","); got != "a,b,a,b" {
@@ -86,6 +87,7 @@ func TestClaimScheduler_KeepsAnUncontendedSegment(t *testing.T) {
 			t.Fatalf("round %d: epoch %d, want %d; the uncontended key was re-acquired", i, e, epoch)
 		}
 		epoch = e
+		s.Drained(ctx, "a")
 		c.tick(11 * time.Second)
 	}
 }
@@ -213,6 +215,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if store.Owner("sync", "3") == "" {
 		t.Fatal("shard 3 with work was released")
 	}
+	s.Drained(ctx, "3")
 	list.reqs = nil
 	c.tick(time.Second)
 	if _, err := s.Next(ctx); err != nil {
@@ -221,6 +224,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 1 || list.reqs[0].Segments[0] != "3" {
 		t.Fatalf("second poll claimed %v, want only shard 3 while the others are paused", list.reqs)
 	}
+	s.Drained(ctx, "3")
 
 	// After the interval the empty shards are candidates again.
 	c.tick(10 * time.Second)
@@ -230,5 +234,117 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	}
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 4 {
 		t.Fatalf("third poll claimed %+v, want all 4 shards again", list.reqs)
+	}
+}
+
+// TestClaimScheduler_DeferralReleasesAtDrained covers a deferral while its
+// batch runs: the segment stays ours, is not claimed for again, and is
+// given back only when the batch drains, paused until the later of the
+// deferral and the end of the batch's item leases.
+func TestClaimScheduler_DeferralReleasesAtDrained(t *testing.T) {
+	for name, c := range map[string]struct {
+		deferFor, wantPause time.Duration
+	}{
+		"lease ends later":    {deferFor: 10 * time.Second, wantPause: time.Minute},
+		"deferral ends later": {deferFor: 5 * time.Minute, wantPause: 5 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			clk := newClock()
+			store := NewLocalStore()
+			store.Now = clk.now
+			s := newClaimScheduler(Definition[string]{
+				Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
+				Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
+			})
+			s.now = clk.now
+
+			batches, err := s.Next(ctx)
+			if err != nil || len(batches) != 1 {
+				t.Fatalf("Next = %d batches, %v; want one", len(batches), err)
+			}
+			if err := s.Done(ctx, batches[0].Items[0], Outcome{Kind: DeferredOutcome, Until: clk.now().Add(c.deferFor)}); err != nil {
+				t.Fatal(err)
+			}
+			if store.Owner("sync", "a") == "" {
+				t.Fatal("the segment was given back before its batch drained")
+			}
+			if again, err := s.Next(ctx); err != nil || len(again) != 0 {
+				t.Fatalf("Next while the batch runs = %d batches, %v; want none", len(again), err)
+			}
+
+			if err := s.Drained(ctx, "a"); err != nil {
+				t.Fatal(err)
+			}
+			if store.Owner("sync", "a") != "" {
+				t.Fatal("the deferred segment is still held after its batch drained")
+			}
+			if d, _ := store.DeferredFor(ctx, "sync", "a"); d != c.wantPause {
+				t.Fatalf("paused for %s, want %s", d, c.wantPause)
+			}
+		})
+	}
+}
+
+// TestClaimScheduler_LostSegmentKeepsItsDeferral covers a segment whose
+// lease is lost while a deferral waits for its batch to drain: the pause
+// is written anyway, so the instance that takes the segment over honours
+// it.
+func TestClaimScheduler_LostSegmentKeepsItsDeferral(t *testing.T) {
+	ctx := context.Background()
+	clk := newClock()
+	store := NewLocalStore()
+	store.Now = clk.now
+	s := newClaimScheduler(Definition[string]{
+		Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
+	})
+	s.now = clk.now
+
+	batches, err := s.Next(ctx)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next = %d batches, %v; want one", len(batches), err)
+	}
+	if err := s.Done(ctx, batches[0].Items[0], Outcome{Kind: DeferredOutcome, Until: clk.now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	clk.tick(s.ttl + time.Second) // the batch hangs past the segment lease
+	if _, err := s.Next(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := store.DeferredFor(ctx, "sync", "a"); d < 50*time.Minute {
+		t.Fatalf("after the lease was lost the segment is paused for %s, want the deferral", d)
+	}
+	if err := s.Drained(ctx, "a"); err != nil {
+		t.Fatalf("Drained of a lost segment: %v", err)
+	}
+}
+
+// itemsList is an unsegmented list that always has one more item.
+type itemsList struct{}
+
+func (itemsList) Claim(context.Context, ClaimRequest) ([]string, error) {
+	return []string{"item"}, nil
+}
+
+// TestClaimScheduler_UnsegmentedOneBatchAtATime covers that a plain list
+// gets no second batch while the first one runs.
+func TestClaimScheduler_UnsegmentedOneBatchAtATime(t *testing.T) {
+	ctx := context.Background()
+	s := newClaimScheduler(Definition[string]{
+		Name: "plain", TodoList: itemsList{}, Store: NewLocalStore(), Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1,
+	})
+	if b, _ := s.Next(ctx); len(b) != 1 {
+		t.Fatalf("first Next = %d batches, want one", len(b))
+	}
+	if b, _ := s.Next(ctx); len(b) != 0 {
+		t.Fatalf("Next while the batch runs = %d batches, want none", len(b))
+	}
+	if err := s.Drained(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := s.Next(ctx); len(b) != 1 {
+		t.Fatalf("Next after Drained = %d batches, want one", len(b))
 	}
 }

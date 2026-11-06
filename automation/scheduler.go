@@ -207,6 +207,11 @@ type Outcome struct {
 // segment contract itself: at most one owner per segment at a time, and
 // [Definition.Concurrency] items per segment.
 //
+// Each batch runs on its own: the runner calls Next again while earlier
+// batches are still running, so that a slow segment does not hold up the
+// others. Next, Done and Drained are therefore called from several
+// goroutines at once, and an implementation must be safe for that.
+//
 // This interface may still change in minor releases before v1.0: it is
 // published so that alternative schedulers can be written, and declared
 // stable once a second implementation has fit it.
@@ -214,11 +219,19 @@ type Scheduler[T any] interface {
 	// Next returns the items this instance may work now, grouped by
 	// segment, or nothing when there is no eligible work. It must not
 	// block waiting for work to appear; the runner waits between calls.
+	// It must not return a batch for a segment whose previous batch has
+	// not drained yet.
 	Next(ctx context.Context) ([]Batch[T], error)
 
 	// Done reports an item's outcome. For [DeferredOutcome] the scheduler
 	// pauses the item's segment until Outcome.Until for every instance.
 	Done(ctx context.Context, item Item[T], out Outcome) error
+
+	// Drained reports that the batch Next returned for segment key ("" for
+	// an unsegmented list) has finished: every item that was started has
+	// had its Done, and the rest of the batch will not be started. The
+	// segment may have work again from now on.
+	Drained(ctx context.Context, key string) error
 
 	// Close releases whatever the scheduler holds: segments, pins,
 	// connections. The runner calls it once Run or RunOnce returns.
