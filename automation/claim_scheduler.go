@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // claimScheduler is the default [Scheduler]: it claims from the
@@ -58,7 +56,8 @@ type heldSegment struct {
 	deferUntil time.Time
 }
 
-func newClaimScheduler[T any](d Definition[T]) *claimScheduler[T] {
+// newClaimScheduler returns the scheduler for d, leasing segments as owner.
+func newClaimScheduler[T any](d Definition[T], owner string) *claimScheduler[T] {
 	s := &claimScheduler[T]{
 		name:         d.Name,
 		list:         d.TodoList,
@@ -71,7 +70,7 @@ func newClaimScheduler[T any](d Definition[T]) *claimScheduler[T] {
 		term:         DefaultSegmentTerm,
 		pollInterval: d.PollInterval,
 		now:          time.Now,
-		owner:        uuid.NewString(),
+		owner:        owner,
 		held:         map[string]*heldSegment{},
 	}
 	if seg, ok := any(d.TodoList).(Segmented[T]); ok {

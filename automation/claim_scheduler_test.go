@@ -128,6 +128,22 @@ func (s *fakeStore) DeferredFor(_ context.Context, name, key string) (time.Durat
 	return r.pausedTill.Sub(s.c.now()), nil
 }
 
+// The pause and status methods are not used by the scheduler.
+func (s *fakeStore) SetPaused(context.Context, string, bool) error { return nil }
+func (s *fakeStore) Paused(context.Context, string) (bool, error)  { return false, nil }
+func (s *fakeStore) SaveStatus(context.Context, string, Status, time.Duration) error {
+	return nil
+}
+func (s *fakeStore) LoadStatuses(context.Context, string) ([]Status, error) { return nil, nil }
+func (s *fakeStore) LoadSegments(context.Context, string) ([]SegmentState, error) {
+	return nil, nil
+}
+
+// newTestScheduler returns the scheduler for d, as instance "test-owner".
+func newTestScheduler(d Definition[string]) *claimScheduler[string] {
+	return newClaimScheduler(d, "test-owner")
+}
+
 // owner returns who holds key, or "" when nobody does.
 func (s *fakeStore) owner(name, key string) string {
 	r := s.rows[name+"/"+key]
@@ -147,7 +163,7 @@ func TestClaimScheduler_RotatesUnderContention(t *testing.T) {
 	store := newFakeStore(c)
 
 	// Two segments with endless work; the scheduler may hold one.
-	s := newClaimScheduler(Definition[string]{
+	s := newTestScheduler(Definition[string]{
 		Name:        "sync",
 		TodoList:    endlessList{"a", "b"},
 		Store:       store,
@@ -192,7 +208,7 @@ func TestClaimScheduler_KeepsAnUncontendedSegment(t *testing.T) {
 	ctx := context.Background()
 	c := newClock()
 	store := newFakeStore(c)
-	s := newClaimScheduler(Definition[string]{
+	s := newTestScheduler(Definition[string]{
 		Name:        "sync",
 		TodoList:    endlessList{"a"},
 		Store:       store,
@@ -290,7 +306,7 @@ func TestClaimScheduler_DetectsCapabilities(t *testing.T) {
 	for name, c := range cases {
 		d := base
 		d.TodoList = c.list
-		if got := newClaimScheduler(d).capabilities(); got != c.want {
+		if got := newTestScheduler(d).capabilities(); got != c.want {
 			t.Errorf("%s: capabilities = %q, want %q", name, got, c.want)
 		}
 	}
@@ -305,7 +321,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	c := newClock()
 	store := newFakeStore(c)
 	list := &shardedList{n: 4}
-	s := newClaimScheduler(Definition[string]{
+	s := newTestScheduler(Definition[string]{
 		Name:         "sync",
 		TodoList:     list,
 		Store:        store,
@@ -378,7 +394,7 @@ func TestClaimScheduler_DeferralReleasesAtDrained(t *testing.T) {
 			ctx := context.Background()
 			clk := newClock()
 			store := newFakeStore(clk)
-			s := newClaimScheduler(Definition[string]{
+			s := newTestScheduler(Definition[string]{
 				Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
 				Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
 			})
@@ -419,7 +435,7 @@ func TestClaimScheduler_LostSegmentKeepsItsDeferral(t *testing.T) {
 	ctx := context.Background()
 	clk := newClock()
 	store := newFakeStore(clk)
-	s := newClaimScheduler(Definition[string]{
+	s := newTestScheduler(Definition[string]{
 		Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
 		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
 	})
@@ -455,7 +471,7 @@ func (itemsList) Claim(context.Context, ClaimRequest) ([]string, error) {
 // gets no second batch while the first one runs.
 func TestClaimScheduler_UnsegmentedOneBatchAtATime(t *testing.T) {
 	ctx := context.Background()
-	s := newClaimScheduler(Definition[string]{
+	s := newTestScheduler(Definition[string]{
 		Name: "plain", TodoList: itemsList{}, Store: newFakeStore(newClock()), Logger: quietLogger(),
 		Lease: time.Minute, BatchSize: 1,
 	})

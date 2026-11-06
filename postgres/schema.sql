@@ -111,3 +111,26 @@ CREATE TABLE IF NOT EXISTS automation_segments (
     last_served  TIMESTAMPTZ,
     PRIMARY KEY (name, segment_key)
 );
+
+-- Automation-wide pause, set from a dashboard: a paused automation claims
+-- nothing on any instance.
+CREATE TABLE IF NOT EXISTS automation_controls (
+    name   TEXT    PRIMARY KEY,
+    paused BOOLEAN NOT NULL DEFAULT false
+);
+
+-- What each instance of an automation last published, for a dashboard.
+-- A row is live for ttl_ms after its heartbeat.
+CREATE TABLE IF NOT EXISTS automation_instances (
+    name        TEXT        NOT NULL,
+    owner       TEXT        NOT NULL,
+    phase       INT         NOT NULL,
+    waiting_for TEXT        NOT NULL DEFAULT '',
+    processed   BIGINT      NOT NULL DEFAULT 0,
+    failed      BIGINT      NOT NULL DEFAULT 0,
+    deferred    BIGINT      NOT NULL DEFAULT 0,
+    last_error  TEXT        NOT NULL DEFAULT '',
+    heartbeat   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ttl_ms      BIGINT      NOT NULL,
+    PRIMARY KEY (name, owner)
+);
