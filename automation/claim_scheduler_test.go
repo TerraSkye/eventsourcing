@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -486,5 +487,85 @@ func TestClaimScheduler_UnsegmentedOneBatchAtATime(t *testing.T) {
 	}
 	if b, _ := s.Next(ctx); len(b) != 1 {
 		t.Fatalf("Next after Drained = %d batches, want one", len(b))
+	}
+}
+
+func TestRunBatchNextEligibleMatchesSegmentPause(t *testing.T) {
+	for _, deferFor := range []time.Duration{0, -time.Second, 10 * time.Second, 5 * time.Minute} {
+		t.Run(deferFor.String(), func(t *testing.T) {
+			clk := &clock{t: time.Now()}
+			store := newFakeStore(clk)
+			until := clk.now().Add(deferFor)
+			if deferFor == 0 {
+				until = time.Time{}
+			}
+			def := Definition[string]{Name: "sync", TodoList: endlessList{"a"}, Store: store,
+				Logger: quietLogger(), Lease: time.Minute, BatchSize: 1, MaxSegments: 1,
+				PollInterval: time.Second, Concurrency: 1,
+				Work: func(context.Context, string) error { return Deferred(until) },
+			}
+			sched := newTestScheduler(def)
+			sched.now = clk.now
+			batches, err := sched.Next(t.Context())
+			if err != nil || len(batches) != 1 {
+				t.Fatalf("Next = %v, %v", batches, err)
+			}
+			runner := &Runner[string]{d: def, sched: sched}
+			sum := runner.runBatch(t.Context(), batches[0])
+			if err := sched.Drained(t.Context(), "a"); err != nil {
+				t.Fatal(err)
+			}
+			pause, err := store.DeferredFor(t.Context(), "sync", "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := clk.now().Add(pause)
+			if !sum.NextEligible.Equal(want) {
+				t.Fatalf("NextEligible = %s, store pause ends at %s", sum.NextEligible, want)
+			}
+		})
+	}
+}
+
+func TestRunBatchNextEligibleUsesLatestConcurrentDeferral(t *testing.T) {
+	clk := &clock{t: time.Now()}
+	store := newFakeStore(clk)
+	ready := make(chan struct{})
+	var started atomic.Int32
+	def := Definition[string]{Name: "sync", TodoList: endlessList{"a"}, Store: store,
+		Logger: quietLogger(), Lease: time.Minute, BatchSize: 2, MaxSegments: 1,
+		PollInterval: time.Second, Concurrency: 2,
+		Work: func(ctx context.Context, value string) error {
+			order := started.Add(1)
+			if order == 2 {
+				close(ready)
+			}
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return Deferred(clk.now().Add(time.Duration(order) * time.Hour))
+		},
+	}
+	sched := newTestScheduler(def)
+	sched.now = clk.now
+	batches, err := sched.Next(t.Context())
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next = %v, %v", batches, err)
+	}
+	// Both items belong to the same claimed segment and share its lease.
+	batches[0].Items = append(batches[0].Items, batches[0].Items[0])
+	runner := &Runner[string]{d: def, sched: sched}
+	sum := runner.runBatch(t.Context(), batches[0])
+	if err := sched.Drained(t.Context(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Deferred != 2 || !sum.NextEligible.Equal(clk.now().Add(2*time.Hour)) {
+		t.Fatalf("summary = %+v, want two deferrals until %s", sum, clk.now().Add(2*time.Hour))
+	}
+	pause, err := store.DeferredFor(t.Context(), "sync", "a")
+	if err != nil || pause != 2*time.Hour {
+		t.Fatalf("store pause = %s, %v", pause, err)
 	}
 }
