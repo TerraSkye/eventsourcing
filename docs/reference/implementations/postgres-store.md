@@ -67,7 +67,7 @@ defer store.Close()
 func NewAutomationStore(pool *pgxpool.Pool) *AutomationStore
 ```
 
-`AutomationStore` implements `automation.Store` on the `automation_segments` table, so the instances of an automation that share the database divide its segments between them: one owner per segment at a time, fenced by owner and epoch, with pauses from `automation.Deferred` seen by every instance. `Acquire` locks the candidate rows in key order, so instances acquiring at once wait for each other rather than deadlock. Time is the database's clock, so the instances' clocks need not agree.
+`AutomationStore` implements `automation.Store` on the `automation_segments` table, so the instances of an automation that share the database divide its segments between them: one owner per segment at a time, fenced by owner and epoch, with pauses from `automation.Deferred` seen by every instance. `Acquire` locks the candidate rows in key order, so instances acquiring at once wait for each other rather than deadlock. Time is the database's clock, so the instances' clocks need not agree. The pause set with `SetPaused` lives in `automation_controls`, and each instance's published status in `automation_instances`.
 
 ## Limitations
 

@@ -145,6 +145,15 @@
 //     Concurrency. A failed item parks its ordering key for the rest of the
 //     batch, so a later item of the same chain cannot overtake it.
 //
+// # Pausing and following
+//
+// Every instance publishes its [Status] to the [Store] and checks there
+// whether the automation is paused. [Store.SetPaused] pauses it for every
+// instance at once: each stops claiming at its next poll, lets the items
+// it is working on finish, and gives its segments back; [Runner.RunOnce]
+// returns at once while it is paused. [Store.LoadStatuses] and
+// [Store.LoadSegments] read back what every instance published.
+//
 // Scheduling is pluggable: [Definition.Scheduler] replaces the claiming
 // and leasing with another source of keyed work, a broker or a queue,
 // while the runner keeps dispatch, deadlines and outcomes. See

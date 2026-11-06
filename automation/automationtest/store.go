@@ -28,7 +28,8 @@ const (
 
 // StoreAcceptanceTest runs the [automation.Store] contract against store as
 // a set of subtests: grants and their limits, fencing on owner and epoch,
-// lease expiry, pauses, and the fairness order across groups and keys.
+// lease expiry, pauses, the fairness order across groups and keys, and the
+// automation-wide pause and published statuses a dashboard reads.
 //
 // store may already hold automations and may be shared with other tests:
 // every subtest uses an automation of its own, named with a fresh UUID. A
@@ -58,6 +59,13 @@ func StoreAcceptanceTest(t *testing.T, store automation.Store) {
 		"FencedOnOwnerAndEpoch": s.releaseFenced,
 		"DeferForPauses":        s.releaseDeferFor,
 		"ServedGoesToTheBack":   s.releaseServed,
+	})
+	group(t, "Status", map[string]func(*testing.T){
+		"PauseIsPerAutomation": s.pauseIsPerAutomation,
+		"SavedStatuses":        s.statusesSaved,
+		"ExpiredStatusLeftOut": s.statusesDropExpired,
+		"Segments":             s.segmentsLoaded,
+		"UnknownAutomation":    s.statusUnknown,
 	})
 	group(t, "Defer", map[string]func(*testing.T){
 		"PausesGrants":        s.deferPauses,
@@ -551,4 +559,122 @@ func (s storeAcceptance) deferUnsegmented(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.wantPaused(t, name, "", 5*time.Second)
+}
+
+// --- Status ---
+
+func (s storeAcceptance) loadStatuses(t *testing.T, name string) []automation.Status {
+	t.Helper()
+	sts, err := s.store.LoadStatuses(t.Context(), name)
+	if err != nil {
+		t.Fatalf("LoadStatuses: %v", err)
+	}
+	return sts
+}
+
+func (s storeAcceptance) pauseIsPerAutomation(t *testing.T) {
+	ctx := t.Context()
+	n1, n2 := newName(), newName()
+	if err := s.store.SetPaused(ctx, n1, true); err != nil {
+		t.Fatalf("SetPaused: %v", err)
+	}
+	if p, err := s.store.Paused(ctx, n1); err != nil || !p {
+		t.Fatalf("Paused(%s) = %v, %v; want true", n1, p, err)
+	}
+	if p, err := s.store.Paused(ctx, n2); err != nil || p {
+		t.Fatalf("Paused(%s) = %v, %v; want false: a pause is per automation", n2, p, err)
+	}
+	if err := s.store.SetPaused(ctx, n1, false); err != nil {
+		t.Fatalf("SetPaused(false): %v", err)
+	}
+	if p, err := s.store.Paused(ctx, n1); err != nil || p {
+		t.Fatalf("Paused after resume = %v, %v; want false", p, err)
+	}
+}
+
+func (s storeAcceptance) statusesSaved(t *testing.T) {
+	ctx := t.Context()
+	name := newName()
+	b := automation.Status{Owner: "owner-b", Phase: automation.Waiting, WaitingFor: "todo-list", Processed: 7, Failed: 2, Deferred: 1, LastError: "boom"}
+	a := automation.Status{Owner: "owner-a", Phase: automation.Working, Processed: 1}
+	if err := s.store.SaveStatus(ctx, name, b, longTTL); err != nil {
+		t.Fatalf("SaveStatus: %v", err)
+	}
+	if err := s.store.SaveStatus(ctx, name, automation.Status{Owner: "owner-a", Phase: automation.Idle}, longTTL); err != nil {
+		t.Fatalf("SaveStatus: %v", err)
+	}
+	// A second save replaces the first.
+	if err := s.store.SaveStatus(ctx, name, a, longTTL); err != nil {
+		t.Fatalf("SaveStatus: %v", err)
+	}
+	sts := s.loadStatuses(t, name)
+	if len(sts) != 2 {
+		t.Fatalf("statuses = %+v, want owner-a and owner-b", sts)
+	}
+	for i, want := range []automation.Status{a, b} {
+		got := sts[i]
+		if got.Age < 0 || got.Age > pauseSlack {
+			t.Fatalf("status of %s has age %s, want just saved", got.Owner, got.Age)
+		}
+		got.Age = 0
+		if got != want {
+			t.Fatalf("status %d = %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+func (s storeAcceptance) statusesDropExpired(t *testing.T) {
+	ctx := t.Context()
+	name := newName()
+	const ttl = 300 * time.Millisecond
+	if err := s.store.SaveStatus(ctx, name, automation.Status{Owner: "gone", Phase: automation.Idle}, ttl); err != nil {
+		t.Fatalf("SaveStatus: %v", err)
+	}
+	if err := s.store.SaveStatus(ctx, name, automation.Status{Owner: "here", Phase: automation.Idle}, longTTL); err != nil {
+		t.Fatalf("SaveStatus: %v", err)
+	}
+	time.Sleep(2 * ttl)
+	if sts := s.loadStatuses(t, name); len(sts) != 1 || sts[0].Owner != "here" {
+		t.Fatalf("statuses = %+v, want only the one still live", sts)
+	}
+}
+
+func (s storeAcceptance) segmentsLoaded(t *testing.T) {
+	ctx := t.Context()
+	name := newName()
+	if r := s.acquire(t, name, "o1", []automation.Segment{{Key: "a", Group: "acme"}}, 1, longTTL); keysOf(r.Granted) != "a" {
+		t.Fatalf("o1 got %q, want a", keysOf(r.Granted))
+	}
+	// b is only known from a deferral.
+	if err := s.store.Defer(ctx, name, "b", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	segs, err := s.store.LoadSegments(ctx, name)
+	if err != nil {
+		t.Fatalf("LoadSegments: %v", err)
+	}
+	if len(segs) != 2 {
+		t.Fatalf("segments = %+v, want a and b", segs)
+	}
+	a, b := segs[0], segs[1]
+	if a.Key != "a" || a.Group != "acme" || a.Owner != "o1" || a.PausedFor != 0 {
+		t.Fatalf("segment a = %+v, want group acme, held by o1, not paused", a)
+	}
+	if b.Key != "b" || b.Owner != "" || b.PausedFor > time.Minute || b.PausedFor < time.Minute-pauseSlack {
+		t.Fatalf("segment b = %+v, want unheld and paused for about a minute", b)
+	}
+}
+
+func (s storeAcceptance) statusUnknown(t *testing.T) {
+	ctx := t.Context()
+	name := newName()
+	if p, err := s.store.Paused(ctx, name); err != nil || p {
+		t.Fatalf("Paused(unknown) = %v, %v; want false", p, err)
+	}
+	if sts := s.loadStatuses(t, name); len(sts) != 0 {
+		t.Fatalf("LoadStatuses(unknown) = %+v, want none", sts)
+	}
+	if segs, err := s.store.LoadSegments(ctx, name); err != nil || len(segs) != 0 {
+		t.Fatalf("LoadSegments(unknown) = %+v, %v; want none", segs, err)
+	}
 }

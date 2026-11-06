@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 )
 
@@ -46,6 +47,11 @@ const (
 	// Stalled means a dependency check or the scheduler failed; the
 	// automation backs off and retries. [Status.LastError] has the error.
 	Stalled
+
+	// Paused means the automation is paused through its [Store], for every
+	// instance: it claims nothing until it is resumed. Batches that were
+	// running when it was paused finish.
+	Paused
 )
 
 // String returns the phase's name.
@@ -61,14 +67,19 @@ func (p Phase) String() string {
 		return "working"
 	case Stalled:
 		return "stalled"
+	case Paused:
+		return "paused"
 	}
 	return fmt.Sprintf("Phase(%d)", int(p))
 }
 
-// Status describes what an automation is doing on this instance, as
-// reported by [Runner.Status]. Its shape follows projection.Status, so one
-// dashboard reads both.
+// Status describes what an automation is doing on one instance, as
+// reported by [Runner.Status] and published to the [Store]. Its shape
+// follows projection.Status, so one dashboard reads both.
 type Status struct {
+	// Owner identifies the instance; the same ID it holds segments under.
+	Owner string
+
 	// Phase is what the automation is doing.
 	Phase Phase
 
@@ -91,6 +102,10 @@ type Status struct {
 	// LastError is the error of the most recent failed check, scheduler
 	// call or work attempt, or "" if there was none.
 	LastError string
+
+	// Age is how long ago this status was published, by the store's
+	// clock. It is only set on a status returned by [Store.LoadStatuses].
+	Age time.Duration
 }
 
 // Summary is what one [Runner.RunOnce] did.
@@ -226,10 +241,20 @@ type Runner[T any] struct {
 	sched   Scheduler[T]
 	waitFor []Dependency
 	nudge   chan struct{}
+	owner   string // this instance, in the Store and on a dashboard
 
 	mu     sync.Mutex
 	status Status
+
+	// The last status published to the Store, and when; only the loop of
+	// Run or RunOnce touches these.
+	published   Status
+	publishedAt time.Time
 }
+
+// publishEvery is how often a runner publishes its status while nothing
+// changes. A phase change is published at once.
+const publishEvery = time.Second
 
 // NewRunner creates the runner d describes.
 //
@@ -272,9 +297,10 @@ func NewRunner[T any](d Definition[T]) *Runner[T] {
 	if d.Logger == nil {
 		d.Logger = slog.Default()
 	}
+	owner := uuid.NewString()
 	sched := d.Scheduler
 	if sched == nil {
-		cs := newClaimScheduler(d)
+		cs := newClaimScheduler(d, owner)
 		d.Logger.LogAttrs(context.Background(), slog.LevelInfo, "automation configured",
 			slog.String("automation", d.Name), slog.String("list", cs.capabilities()),
 			slog.Int("concurrency", d.Concurrency), slog.Int("max_segments", d.MaxSegments))
@@ -282,6 +308,7 @@ func NewRunner[T any](d Definition[T]) *Runner[T] {
 	}
 	return &Runner[T]{
 		d:       d,
+		owner:   owner,
 		sched:   sched,
 		waitFor: append([]Dependency{d.Projection}, d.WaitFor...),
 		nudge:   make(chan struct{}, 1),
@@ -319,7 +346,27 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 	}
 
 	retry := newRetryBackOff()
+	released := false // segments given back for a pause
 	for ctx.Err() == nil {
+		r.saveStatus(ctx)
+		paused, err := r.paused(ctx)
+		if err != nil {
+			r.stall(ctx, fmt.Errorf("check pause: %w", err), retry)
+			continue
+		}
+		if paused {
+			r.setPhase(Paused, "")
+			// Give the segments back once the running batches are done,
+			// so they are not held for nothing while paused.
+			if !released && f.running() == 0 {
+				r.closeScheduler(ctx)
+				released = true
+			}
+			r.wait(ctx)
+			continue
+		}
+		released = false
+
 		dep, err := r.notLive(ctx)
 		switch {
 		case err != nil:
@@ -358,7 +405,8 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 }
 
 // RunOnce works until nothing is eligible, then gives every segment back
-// and returns what it did. It is the entry point for an automation that a
+// and returns what it did. A paused automation does nothing and returns at
+// once. It is the entry point for an automation that a
 // timer or a cron job starts: claim and work whatever is pending, then
 // stop. A dependency that is not live makes RunOnce wait for it; a failing
 // check or scheduler call ends the run with that error; a failing work
@@ -370,9 +418,20 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 func (r *Runner[T]) RunOnce(ctx context.Context) (Summary, error) {
 	defer r.closeScheduler(ctx)
 	f := &flight{}
+	defer func() { r.saveStatusNow(context.WithoutCancel(ctx)) }()
 	for {
 		if err := ctx.Err(); err != nil {
 			return f.finish(), err
+		}
+		r.saveStatus(ctx)
+		paused, err := r.paused(ctx)
+		if err != nil {
+			r.setPhase(Stalled, err.Error())
+			return f.finish(), fmt.Errorf("check pause: %w", err)
+		}
+		if paused {
+			r.setPhase(Paused, "")
+			return f.finish(), nil
 		}
 		dep, err := r.notLive(ctx)
 		switch {
@@ -413,6 +472,51 @@ func (s *Summary) add(o Summary) {
 	if !o.NextEligible.IsZero() && (s.NextEligible.IsZero() || o.NextEligible.Before(s.NextEligible)) {
 		s.NextEligible = o.NextEligible
 	}
+}
+
+// paused reports whether the automation is paused through its Store. An
+// automation with its own Scheduler has no Store and is never paused.
+func (r *Runner[T]) paused(ctx context.Context) (bool, error) {
+	if r.d.Store == nil {
+		return false, nil
+	}
+	return r.d.Store.Paused(ctx, r.d.Name)
+}
+
+// saveStatus writes the status to the Store when the phase changed since the
+// last write, or publishEvery has passed. A failed write is logged; the
+// automation goes on.
+func (r *Runner[T]) saveStatus(ctx context.Context) {
+	if r.d.Store == nil {
+		return
+	}
+	st := r.Status()
+	if st.Phase == r.published.Phase && st.WaitingFor == r.published.WaitingFor &&
+		time.Since(r.publishedAt) < publishEvery {
+		return
+	}
+	r.writeStatus(ctx, st)
+}
+
+// saveStatusNow writes the status regardless of when it was last written.
+func (r *Runner[T]) saveStatusNow(ctx context.Context) {
+	if r.d.Store != nil {
+		r.writeStatus(ctx, r.Status())
+	}
+}
+
+func (r *Runner[T]) writeStatus(ctx context.Context, st Status) {
+	// Live for three poll intervals: a runner waiting between polls
+	// publishes once per poll.
+	ttl := 3 * max(r.d.PollInterval, publishEvery)
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := r.d.Store.SaveStatus(pctx, r.d.Name, st, ttl); err != nil {
+		r.d.Logger.LogAttrs(ctx, slog.LevelWarn, "automation status publish failed",
+			slog.String("automation", r.d.Name), slog.String("error", err.Error()))
+		return
+	}
+	r.published, r.publishedAt = st, time.Now()
 }
 
 // closeScheduler gives the scheduler a short, uncancelled context to
@@ -722,7 +826,9 @@ func (r *Runner[T]) Nudge() {
 func (r *Runner[T]) Status() Status {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.status
+	st := r.status
+	st.Owner = r.owner
+	return st
 }
 
 // sleepCtx waits for d or until ctx is done, whichever comes first.

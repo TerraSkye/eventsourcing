@@ -5,8 +5,10 @@ import (
 	"time"
 )
 
-// Store keeps the segment leases of the default scheduler: which instance
-// holds each key, until when, and when a key may run again. The memory,
+// Store keeps the shared state of an automation's instances: the segment
+// leases of the default scheduler (which instance holds each key, until
+// when, and when a key may run again), whether the automation is paused,
+// and what each instance last reported, for a dashboard. The memory,
 // sqlite and postgres packages each provide one as AutomationStore: the
 // memory one for an automation that runs in one process, the SQL ones for
 // instances that share a database and divide segments between them.
@@ -42,6 +44,40 @@ type Store interface {
 
 	// DeferredFor returns how long key is still paused, or 0.
 	DeferredFor(ctx context.Context, name, key string) (time.Duration, error)
+
+	// SetPaused pauses the automation name for every instance, or resumes
+	// it. Pausing an automation the store has not seen yet is allowed.
+	SetPaused(ctx context.Context, name string, paused bool) error
+
+	// Paused reports whether the automation name is paused.
+	Paused(ctx context.Context, name string) (bool, error)
+
+	// SaveStatus publishes status as what instance status.Owner of the
+	// automation name is doing now, so other instances and a dashboard can
+	// follow it. The status is live for ttl; LoadStatuses leaves out
+	// statuses older than that, and a store may delete them.
+	SaveStatus(ctx context.Context, name string, status Status, ttl time.Duration) error
+
+	// LoadStatuses returns the status of every live instance of the
+	// automation name, ordered by Owner, with Age set.
+	LoadStatuses(ctx context.Context, name string) ([]Status, error)
+
+	// LoadSegments returns every segment of the automation name the store
+	// has seen, ordered by key.
+	LoadSegments(ctx context.Context, name string) ([]SegmentState, error)
+}
+
+// SegmentState is one segment of an automation as the store sees it; see
+// [Store.LoadSegments].
+type SegmentState struct {
+	Key, Group string
+
+	// Owner is the instance holding the segment, or "" when nobody does.
+	Owner string
+
+	// PausedFor is how long the segment is still paused by a deferral, or
+	// 0.
+	PausedFor time.Duration
 }
 
 // SegmentLease identifies one grant of a segment to an owner. Epoch fences

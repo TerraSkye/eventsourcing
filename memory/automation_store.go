@@ -18,8 +18,17 @@ var _ automation.Store = (*AutomationStore)(nil)
 // processes run the automation. Create it with [NewAutomationStore] and
 // pass it as [automation.Definition.Store].
 type AutomationStore struct {
-	mu   sync.Mutex
-	rows map[string]map[string]*localRow // name → key → row
+	mu        sync.Mutex
+	rows      map[string]map[string]*localRow // name → key → row
+	paused    map[string]bool                 // name → paused
+	instances map[string]map[string]published // name → owner → status
+}
+
+// published is an instance's last published status.
+type published struct {
+	status automation.Status
+	at     time.Time
+	ttl    time.Duration
 }
 
 type localRow struct {
@@ -34,7 +43,11 @@ type localRow struct {
 
 // NewAutomationStore returns an empty [AutomationStore].
 func NewAutomationStore() *AutomationStore {
-	return &AutomationStore{rows: map[string]map[string]*localRow{}}
+	return &AutomationStore{
+		rows:      map[string]map[string]*localRow{},
+		paused:    map[string]bool{},
+		instances: map[string]map[string]published{},
+	}
 }
 
 // row returns the row for (name, key), creating it at first sight.
@@ -244,4 +257,77 @@ func (s *AutomationStore) DeferredFor(_ context.Context, name, key string) (time
 		return d, nil
 	}
 	return 0, nil
+}
+
+// SetPaused implements [automation.Store].
+func (s *AutomationStore) SetPaused(_ context.Context, name string, paused bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused[name] = paused
+	return nil
+}
+
+// Paused implements [automation.Store].
+func (s *AutomationStore) Paused(_ context.Context, name string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused[name], nil
+}
+
+// SaveStatus implements [automation.Store]. It also forgets the name's
+// expired statuses.
+func (s *AutomationStore) SaveStatus(_ context.Context, name string, status automation.Status, ttl time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	inst := s.instances[name]
+	if inst == nil {
+		inst = map[string]published{}
+		s.instances[name] = inst
+	}
+	for o, p := range inst {
+		if now.Sub(p.at) > p.ttl {
+			delete(inst, o)
+		}
+	}
+	status.Age = 0
+	inst[status.Owner] = published{status: status, at: now, ttl: ttl}
+	return nil
+}
+
+// LoadStatuses implements [automation.Store].
+func (s *AutomationStore) LoadStatuses(_ context.Context, name string) ([]automation.Status, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := []automation.Status{}
+	for _, p := range s.instances[name] {
+		if age := now.Sub(p.at); age <= p.ttl {
+			st := p.status
+			st.Age = age
+			out = append(out, st)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Owner < out[j].Owner })
+	return out, nil
+}
+
+// LoadSegments implements [automation.Store].
+func (s *AutomationStore) LoadSegments(_ context.Context, name string) ([]automation.SegmentState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := []automation.SegmentState{}
+	for key, r := range s.rows[name] {
+		seg := automation.SegmentState{Key: key, Group: r.group}
+		if r.heldAt(now) {
+			seg.Owner = r.owner
+		}
+		if d := r.pausedTill.Sub(now); d > 0 {
+			seg.PausedFor = d
+		}
+		out = append(out, seg)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }

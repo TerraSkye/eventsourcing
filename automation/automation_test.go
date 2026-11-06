@@ -1064,3 +1064,113 @@ func TestSegmented_SlowSegmentDoesNotHoldOthers(t *testing.T) {
 	close(release)
 	eventually(t, "slow processed once released", func() bool { return list.pending() == 0 })
 }
+
+// TestRun_PauseThroughTheStore covers pausing and resuming an automation
+// through its store, as a dashboard does: paused, it claims nothing and
+// publishes the Paused phase; resumed, it works the list off.
+func TestRun_PauseThroughTheStore(t *testing.T) {
+	ctx := t.Context()
+	store := memory.NewAutomationStore()
+	if err := store.SetPaused(ctx, "ship-orders", true); err != nil {
+		t.Fatal(err)
+	}
+	list := newTodoList()
+	list.Add(ctx, "a")
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		Store:        store,
+		TodoList:     list,
+		Work:         completing(list, nil),
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, a)
+
+	eventually(t, "the Paused phase", func() bool { return a.Status().Phase == automation.Paused })
+	eventually(t, "Paused published", func() bool {
+		sts, _ := store.LoadStatuses(ctx, "ship-orders")
+		return len(sts) == 1 && sts[0].Phase == automation.Paused && sts[0].Owner == a.Status().Owner
+	})
+	time.Sleep(50 * time.Millisecond) // several polls
+	if list.pending() != 1 {
+		t.Fatal("a paused automation claimed work")
+	}
+
+	if err := store.SetPaused(ctx, "ship-orders", false); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the item worked after resuming", func() bool { return list.pending() == 0 })
+	eventually(t, "Idle published", func() bool {
+		sts, _ := store.LoadStatuses(ctx, "ship-orders")
+		return len(sts) == 1 && sts[0].Phase == automation.Idle && sts[0].Processed == 1
+	})
+}
+
+// TestRun_PauseLetsRunningWorkFinish covers pausing while an item is being
+// worked: the item finishes, nothing more is claimed, and the segment the
+// instance held is given back.
+func TestRun_PauseLetsRunningWorkFinish(t *testing.T) {
+	ctx := t.Context()
+	store := memory.NewAutomationStore()
+	list := newKeyedList()
+	list.Add(job{ID: "a/1", Key: "a"})
+	list.Add(job{ID: "a/2", Key: "a"})
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	a := automation.NewRunner(automation.Definition[job]{
+		Name:       "sync",
+		Projection: newDep("todo", true),
+		Store:      store,
+		TodoList:   list,
+		Work: func(ctx context.Context, j job) error {
+			started <- struct{}{}
+			<-release
+			return list.Complete(ctx, j)
+		},
+		BatchSize:    1,
+		Lease:        10 * time.Second,
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, a)
+
+	<-started
+	if err := store.SetPaused(ctx, "sync", true); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Paused phase", func() bool { return a.Status().Phase == automation.Paused })
+	close(release)
+	eventually(t, "the running item finished", func() bool { return list.pending() == 1 })
+	eventually(t, "the segment given back", func() bool {
+		segs, _ := store.LoadSegments(ctx, "sync")
+		return len(segs) == 1 && segs[0].Owner == ""
+	})
+	select {
+	case <-started:
+		t.Fatal("a paused automation started another item")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestRunOnce_PausedDoesNothing(t *testing.T) {
+	ctx := t.Context()
+	store := memory.NewAutomationStore()
+	store.SetPaused(ctx, "ship-orders", true)
+	list := newTodoList()
+	list.Add(ctx, "a")
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:       "ship-orders",
+		Projection: newDep("orders-to-ship", true),
+		Store:      store,
+		TodoList:   list,
+		Work:       completing(list, nil),
+		Logger:     quiet,
+	})
+	sum, err := a.RunOnce(ctx)
+	if err != nil || sum.Processed != 0 || list.pending() != 1 {
+		t.Fatalf("RunOnce = %+v, %v with %d pending; want nothing done", sum, err, list.pending())
+	}
+	if a.Status().Phase != automation.Paused {
+		t.Fatalf("phase %s, want paused", a.Status().Phase)
+	}
+}

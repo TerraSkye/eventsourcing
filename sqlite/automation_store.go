@@ -232,6 +232,127 @@ func (s *AutomationStore) DeferredFor(ctx context.Context, name, key string) (ti
 	return time.Duration(ms) * time.Millisecond, nil
 }
 
+// SetPaused implements [automation.Store].
+func (s *AutomationStore) SetPaused(ctx context.Context, name string, paused bool) error {
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO automation_controls (name, paused) VALUES (?, ?)
+		ON CONFLICT (name) DO UPDATE SET paused = excluded.paused`,
+		name, paused,
+	); err != nil {
+		return fmt.Errorf("sqlite: set paused %q: %w", name, err)
+	}
+	return nil
+}
+
+// Paused implements [automation.Store].
+func (s *AutomationStore) Paused(ctx context.Context, name string) (bool, error) {
+	var paused bool
+	err := s.db.QueryRowContext(ctx, `SELECT paused FROM automation_controls WHERE name = ?`, name).Scan(&paused)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("sqlite: paused %q: %w", name, err)
+	}
+	return paused, nil
+}
+
+// SaveStatus implements [automation.Store]. It also deletes the name's
+// expired statuses, so instances that stopped do not pile up.
+func (s *AutomationStore) SaveStatus(ctx context.Context, name string, st automation.Status, ttl time.Duration) error {
+	return s.runTx(ctx, fmt.Sprintf("save status %q", name), func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM automation_instances
+			WHERE name = ? AND heartbeat + ttl_ms < `+nowMS,
+			name,
+		); err != nil {
+			return fmt.Errorf("expire: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO automation_instances
+			    (name, owner, phase, waiting_for, processed, failed, deferred, last_error, heartbeat, ttl_ms)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, `+nowMS+`, ?)
+			ON CONFLICT (name, owner) DO UPDATE SET
+			    phase = excluded.phase, waiting_for = excluded.waiting_for,
+			    processed = excluded.processed, failed = excluded.failed, deferred = excluded.deferred,
+			    last_error = excluded.last_error, heartbeat = excluded.heartbeat, ttl_ms = excluded.ttl_ms`,
+			name, st.Owner, int(st.Phase), st.WaitingFor, int64(st.Processed), int64(st.Failed), int64(st.Deferred),
+			st.LastError, ttl.Milliseconds(),
+		); err != nil {
+			return fmt.Errorf("write: %w", err)
+		}
+		return nil
+	})
+}
+
+// LoadStatuses implements [automation.Store].
+func (s *AutomationStore) LoadStatuses(ctx context.Context, name string) ([]automation.Status, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT owner, phase, waiting_for, processed, failed, deferred, last_error, `+nowMS+` - heartbeat
+		FROM automation_instances
+		WHERE name = ? AND heartbeat + ttl_ms >= `+nowMS+`
+		ORDER BY owner`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load statuses %q: %w", name, err)
+	}
+	defer rows.Close()
+	out := []automation.Status{}
+	for rows.Next() {
+		var (
+			st                          automation.Status
+			phase                       int
+			processed, failed, deferred int64
+			ageMS                       int64
+		)
+		if err := rows.Scan(&st.Owner, &phase, &st.WaitingFor, &processed, &failed, &deferred, &st.LastError, &ageMS); err != nil {
+			return nil, fmt.Errorf("sqlite: load statuses %q: %w", name, err)
+		}
+		st.Phase = automation.Phase(phase)
+		st.Processed, st.Failed, st.Deferred = uint64(processed), uint64(failed), uint64(deferred)
+		st.Age = time.Duration(ageMS) * time.Millisecond
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: load statuses %q: %w", name, err)
+	}
+	return out, nil
+}
+
+// LoadSegments implements [automation.Store].
+func (s *AutomationStore) LoadSegments(ctx context.Context, name string) ([]automation.SegmentState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT segment_key, group_key,
+		       CASE WHEN owner <> '' AND lease_until > `+nowMS+` THEN owner ELSE '' END,
+		       max(paused_until - `+nowMS+`, 0)
+		FROM automation_segments
+		WHERE name = ?
+		ORDER BY segment_key`,
+		name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: load segments %q: %w", name, err)
+	}
+	defer rows.Close()
+	out := []automation.SegmentState{}
+	for rows.Next() {
+		var (
+			seg     automation.SegmentState
+			pauseMS int64
+		)
+		if err := rows.Scan(&seg.Key, &seg.Group, &seg.Owner, &pauseMS); err != nil {
+			return nil, fmt.Errorf("sqlite: load segments %q: %w", name, err)
+		}
+		seg.PausedFor = time.Duration(pauseMS) * time.Millisecond
+		out = append(out, seg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: load segments %q: %w", name, err)
+	}
+	return out, nil
+}
+
 // runTx runs fn in a transaction; op names the call in errors.
 func (s *AutomationStore) runTx(ctx context.Context, op string, fn func(tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)

@@ -71,6 +71,14 @@ release may break the API; every break is listed under **Breaking**.
   between them. `Schema` creates the table; apply it again when upgrading.
 - `automationtest.StoreAcceptanceTest` checks an `automation.Store`
   against its contract; all three stores run it.
+- `automation` pause and status: `Store.SetPaused` pauses an automation
+  for every instance (the new `Paused` phase; running items finish, and
+  `RunOnce` returns at once). Every runner publishes its `Status`, which
+  now carries `Owner` and `Age`, with `Store.SaveStatus`;
+  `Store.LoadStatuses` and `Store.LoadSegments` read the instances and
+  segments back, as `projection.Store.LoadStatuses` does for projections.
+  The SQL stores keep these in the new `automation_controls` and
+  `automation_instances` tables.
 
 ## [0.5.0] - 2026-10-29
 
