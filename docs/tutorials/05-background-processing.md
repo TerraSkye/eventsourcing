@@ -203,7 +203,7 @@ func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest)
 
 ## Step 3: Write the automation
 
-The automation is a `Definition`: the todo list to wait for, how to claim, and the work for one item:
+The automation is a type: it holds the todo list, the projection that keeps it, and the dispatcher its commands go to. `Definition` describes it for the runner, and `Work` does one item:
 
 ```go
 // automations/archivetasks/automation.go
@@ -219,22 +219,38 @@ import (
     "task-management/slices/taskstoarchive"
 )
 
-func NewAutomation(
+type ArchiveTasks struct {
+    list *taskstoarchive.TasksToArchive
+    todo automation.Dependency
+    bus  eventsourcing.Dispatcher
+}
+
+func New(
     list *taskstoarchive.TasksToArchive,
-    todoList automation.Dependency,
-    archive eventsourcing.CommandHandler[archivetask.ArchiveTask],
-) automation.Definition[uuid.UUID] {
+    todo automation.Dependency,
+    bus eventsourcing.Dispatcher,
+) *ArchiveTasks {
+    return &ArchiveTasks{list: list, todo: todo, bus: bus}
+}
+
+func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
     return automation.Definition[uuid.UUID]{
         Name:       "archive-tasks",
-        TodoList:   list,     // the repository: anything with Claim
-        Projection: todoList, // the runner that keeps it; work only while it is live
-        Work: func(ctx context.Context, taskID uuid.UUID) error {
-            _, err := archive(ctx, archivetask.ArchiveTask{TaskID: taskID})
-            return err
-        },
+        TodoList:   a.list, // the repository: anything with Claim
+        Projection: a.todo, // the runner that keeps it; work only while it is live
+        Work:       a.Work,
     }
 }
+
+// Work archives one due task. A task archived meanwhile is no error: the
+// decider appends nothing.
+func (a *ArchiveTasks) Work(ctx context.Context, taskID uuid.UUID) error {
+    _, err := a.bus.Dispatch(ctx, archivetask.ArchiveTask{TaskID: taskID})
+    return err
+}
 ```
+
+`Work` dispatches the command rather than calling the handler, so the automation does not need to know which handler serves it, and middleware on the bus (logging, tracing) applies to it as to a command from an HTTP request. Because `Work` is a method, a test calls it directly: with a stub dispatcher to check which command it sends, or with a real bus and handler on a memory store to check that the task ends up archived. No runner, no timing.
 
 The automation only claims while its projection is **live**. While the projection catches up after a start, the list still holds tasks whose `TaskArchived` it has not read yet; claiming then would archive them twice. The runner from Part 4 tells the automation when it is live, and nudges it whenever the todo list changes.
 
@@ -247,11 +263,12 @@ That is the whole default: every instance claims from the list and runs items on
 archiveList := taskstoarchive.NewTasksToArchive(5 * time.Second) // 30 * 24 * time.Hour in production
 archiveTodo := projection.NewRunner(taskstoarchive.NewProjection(archiveList), store, memory.NewProjectionStore())
 
-archiveTasks := automation.NewRunner(archivetasks.NewAutomation(
-    archiveList,
-    archiveTodo,
-    archivetask.NewHandler(store),
-))
+// The automation dispatches ArchiveTask, so a command bus serves it.
+commandBus := eventsourcing.NewCommandBus(20, 1)
+defer commandBus.Stop()
+eventsourcing.Register(commandBus, archivetask.NewHandler(store))
+
+archiveTasks := automation.NewRunner(archivetasks.New(archiveList, archiveTodo, commandBus).Definition())
 
 go func() {
     if err := archiveTodo.Run(ctx); err != nil && ctx.Err() == nil {
@@ -265,7 +282,7 @@ go func() {
 }()
 ```
 
-A due task waits for the next check, every five seconds by default (`Interval` in the definition). `archiveTasks.Status()` reports what the automation is doing: waiting for its todo list, idle, working or stalled, with counts of processed and failed items.
+A due task waits for the next check, every five seconds by default (`PollInterval` in the definition). `archiveTasks.Status()` reports what the automation is doing: waiting for its todo list, idle, working or stalled, with counts of processed and failed items.
 
 ## Step 5: Test it
 
