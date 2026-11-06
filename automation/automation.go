@@ -679,6 +679,11 @@ func (r *Runner[T]) runBatch(ctx context.Context, b Batch[T]) Summary {
 			finished <- struct{}{}
 		}()
 	}
+	if cs, ok := r.sched.(*claimScheduler[T]); ok && cs.segmenter != nil && run.sum.Deferred > 0 {
+		if until := cs.nextEligible(b.Key); !until.IsZero() {
+			run.sum.NextEligible = until
+		}
+	}
 	return run.sum
 }
 

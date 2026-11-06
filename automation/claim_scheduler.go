@@ -332,11 +332,24 @@ func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
 	if h.deferUntil.IsZero() {
 		return nil
 	}
-	until := h.deferUntil
-	if h.leaseEnd.After(until) {
-		until = h.leaseEnd
+	return s.release(ctx, h, h.nextEligible().Sub(s.now()))
+}
+
+// nextEligible reports the same pause that Drained will write to the store.
+func (s *claimScheduler[T]) nextEligible(key string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h := s.held[key]; h != nil {
+		return h.nextEligible()
 	}
-	return s.release(ctx, h, until.Sub(s.now()))
+	return time.Time{}
+}
+
+func (h *heldSegment) nextEligible() time.Time {
+	if h.leaseEnd.After(h.deferUntil) {
+		return h.leaseEnd
+	}
+	return h.deferUntil
 }
 
 // Close implements [Scheduler]: it gives back every held segment, with any
