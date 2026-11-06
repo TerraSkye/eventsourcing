@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/projection"
 )
 
@@ -38,6 +39,10 @@ type Dashboard struct {
 	hosts    []string                        // host names allowed besides localhost and IP addresses
 	events   eventsourcing.GlobalReader      // nil: no events view
 	chains   eventsourcing.CorrelationLoader // nil: no correlation chains
+
+	automations     automation.Store // nil: no automations view
+	automationNames []string         // in display order
+	pause           bool             // the page offers pause and resume
 
 	mux *http.ServeMux
 	hub *hub
@@ -67,6 +72,26 @@ func WithProjections(names ...string) Option {
 // where the people who can open the dashboard may wipe a read model.
 func WithReset() Option {
 	return func(d *Dashboard) { d.reset = true }
+}
+
+// WithAutomations adds an automations view that shows the automations with
+// these names, as their instances publish them to store, the
+// [automation.Definition.Store] they run with: what each instance is
+// doing, what it processed, and who holds which segment. Like projections,
+// they show wherever they run, as long as they share the store.
+func WithAutomations(store automation.Store, names ...string) Option {
+	return func(d *Dashboard) {
+		d.automations = store
+		d.automationNames = append(d.automationNames, names...)
+	}
+}
+
+// WithPause adds a pause and a resume button to every automation shown. A
+// pause is recorded in the automation's store and stops every instance from
+// claiming, wherever it runs. Only enable it where the people who can open
+// the dashboard may stop background work.
+func WithPause() Option {
+	return func(d *Dashboard) { d.pause = true }
 }
 
 // WithInterval sets how often the dashboard reads the statuses while a page
@@ -111,7 +136,8 @@ func WithEvents(reader eventsourcing.GlobalReader) Option {
 	}
 }
 
-// WithTitle sets the page's title. Default "Projections".
+// WithTitle sets the page's title. Default "Projections", or "Automations"
+// for a dashboard that shows only automations.
 func WithTitle(title string) Option {
 	return func(d *Dashboard) { d.title = title }
 }
@@ -136,6 +162,13 @@ func New(store projection.Store, opts ...Option) *Dashboard {
 		d.claimTTL = projection.DefaultClaimTTL
 	}
 	d.names = dedupe(d.names)
+	d.automationNames = dedupe(d.automationNames)
+	if d.title == "Projections" && len(d.names) == 0 && len(d.automationNames) > 0 {
+		d.title = "Automations"
+	}
+	if d.automations == nil {
+		d.automationNames, d.pause = nil, false
+	}
 	d.hub = newHub(d)
 	for _, r := range d.runners {
 		r.Watch(d.hub.poke)
@@ -146,6 +179,8 @@ func New(store projection.Store, opts ...Option) *Dashboard {
 	d.mux.HandleFunc("GET /events", d.serveEvents)
 	d.mux.HandleFunc("GET /api/snapshot", d.serveSnapshot)
 	d.mux.HandleFunc("POST /api/projections/{name}/rebuild", d.serveRebuild)
+	d.mux.HandleFunc("POST /api/automations/{name}/pause", d.servePause(true))
+	d.mux.HandleFunc("POST /api/automations/{name}/resume", d.servePause(false))
 	d.mux.HandleFunc("GET /api/events", d.serveEventList)
 	d.mux.HandleFunc("GET /api/correlations/{id}", d.serveChain)
 	return d

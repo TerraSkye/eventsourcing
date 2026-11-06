@@ -79,6 +79,9 @@ release may break the API; every break is listed under **Breaking**.
   segments back, as `projection.Store.LoadStatuses` does for projections.
   The SQL stores keep these in the new `automation_controls` and
   `automation_instances` tables.
+- `dashboard.WithAutomations` shows automations as their instances
+  publish them, wherever they run, and `dashboard.WithPause` adds a pause
+  and a resume button to each.
 
 ## [0.5.0] - 2026-10-29
 

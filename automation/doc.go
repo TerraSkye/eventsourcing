@@ -152,7 +152,8 @@
 // instance at once: each stops claiming at its next poll, lets the items
 // it is working on finish, and gives its segments back; [Runner.RunOnce]
 // returns at once while it is paused. [Store.LoadStatuses] and
-// [Store.LoadSegments] read back what every instance published.
+// [Store.LoadSegments] read back what every instance published; the
+// dashboard package shows them and offers the pause as a button.
 //
 // Scheduling is pluggable: [Definition.Scheduler] replaces the claiming
 // and leasing with another source of keyed work, a broker or a queue,

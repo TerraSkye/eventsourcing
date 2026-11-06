@@ -72,8 +72,8 @@
   .where { color: var(--muted); font-size: 0.875rem; }
   .spacer { flex: 1; }
 
-  [data-state="live"] { --c: var(--live); }
-  [data-state="catching_up"], [data-state="replaying"], [data-state="rebuild_requested"] { --c: var(--catching); }
+  [data-state="live"], [data-state="working"], [data-state="idle"] { --c: var(--live); }
+  [data-state="catching_up"], [data-state="replaying"], [data-state="rebuild_requested"], [data-state="paused"] { --c: var(--catching); }
   [data-state="stalled"], [data-state="unreadable"], [data-state="silent"] { --c: var(--stalled); }
   [data-state="waiting"], [data-state="not_started"] { --c: var(--idle); }
 
@@ -108,6 +108,8 @@
   td { padding: 0.375rem 1.5rem 0.375rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
   td.num, th.num { text-align: right; }
   table.instances { margin-top: 1rem; }
+  section.automation { padding: 1.75rem 0; border-bottom: 1px solid var(--rule); }
+  section.automation dl.numbers { margin-top: 1rem; }
   table.instances td.standby { color: var(--muted); }
 
   button {
@@ -198,9 +200,11 @@
   </header>
   <nav class="tabs" id="tabs" hidden>
     <a href="#projections" data-view="projections">Projections</a>
+    <a href="#automations" data-view="automations">Automations</a>
     <a href="#events" data-view="events">Events</a>
   </nav>
   <div id="list" data-view="projections"></div>
+  <div id="automations-view" data-view="automations" hidden></div>
   <div id="events-view" data-view="events" hidden>
     <form class="filters" id="filters">
       <label>Event type <input name="type" list="types" placeholder="Any" autocomplete="off"></label>
@@ -252,6 +256,9 @@
     waiting: "Waiting for a runner",
     not_started: "Not started",
     unreadable: "Status unreadable",
+    paused: "Paused",
+    working: "Working",
+    idle: "Idle",
   };
 
   const num = new Intl.NumberFormat();
@@ -425,6 +432,7 @@
     document.title = snap.title;
     document.getElementById("title").textContent = snap.title;
     configure(snap);
+    if (snap.showAutomations) renderAutomations(snap.automations);
     if (!snap.projections.length) {
       list.replaceChildren(el("div", { class: "empty" },
         el("strong", {}, "No projections to show"),
@@ -436,6 +444,154 @@
     const shown = new Set(snap.projections.map(p => p.name));
     for (const name of sections.keys()) if (!shown.has(name)) sections.delete(name);
     list.replaceChildren(...nodes);
+  }
+
+  // --- Automations ---
+
+  const automationsView = document.getElementById("automations-view");
+  const autoSections = new Map(); // automation name -> its DOM parts
+  const toggling = new Set();     // pause or resume requests in flight
+
+  function buildAutomation(name) {
+    const h2 = el("h2", {}, name);
+    const state = el("span", { class: "state" });
+    const button = el("button", { type: "button" });
+    button.hidden = true;
+    button.addEventListener("click", () => togglePause(name));
+
+    const stats = {
+      processed: stat("Processed"),
+      failed: stat("Failed"),
+      deferred: stat("Deferred"),
+      instances: stat("Instances"),
+    };
+    const numbers = el("dl", { class: "numbers" }, ...Object.values(stats).map(s => s.wrap));
+    const problem = el("div", { class: "problem" });
+    problem.hidden = true;
+
+    const itbody = el("tbody");
+    const itable = el("table", { class: "instances" },
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Instance"), el("th", {}, "State"), el("th", { class: "num" }, "Processed"),
+        el("th", { class: "num" }, "Failed"), el("th", { class: "num" }, "Segments"), el("th", {}, "Last heard"))),
+      itbody);
+    const stbody = el("tbody");
+    const stable = el("table", { class: "instances" },
+      el("thead", {}, el("tr", {},
+        el("th", {}, "Segment"), el("th", {}, "Group"), el("th", {}, "Owner"), el("th", {}, "Paused for"))),
+      stbody);
+    const summary = el("summary");
+    const details = el("details", {}, summary, el("div", { class: "segments-wrap" }, itable, stable));
+    summary.addEventListener("click", () => { details.dataset.touched = "1"; });
+
+    const section = el("section", { class: "automation", "aria-label": name },
+      el("div", { class: "head" }, h2, state, el("span", { class: "spacer" }), button),
+      numbers, problem, details);
+    const parts = { section, state, button, stats, problem, details, summary, itable, itbody, stable, stbody };
+    autoSections.set(name, parts);
+    return parts;
+  }
+
+  function updateAutomation(a) {
+    const parts = autoSections.get(a.name) || buildAutomation(a.name);
+    parts.section.dataset.state = a.state;
+    parts.state.textContent = a.state === "waiting" && a.waitingFor
+      ? `Waiting for ${a.waitingFor}`
+      : STATE_TEXT[a.state] || a.state;
+
+    parts.paused = a.paused;
+    parts.button.hidden = !a.canPause;
+    setToggling(parts, toggling.has(a.name));
+
+    const st = parts.stats;
+    st.processed.dd.textContent = num.format(a.processed);
+    st.failed.dd.textContent = num.format(a.failed);
+    st.deferred.dd.textContent = num.format(a.deferred);
+    st.instances.dd.textContent = num.format(a.instances.length);
+
+    const problem = describeAutomation(a);
+    parts.problem.hidden = !problem;
+    parts.problem.classList.toggle("note", !!(problem && problem.note));
+    parts.problem.replaceChildren();
+    if (problem) {
+      parts.problem.append(el("p", {}, problem.text));
+      if (problem.detail) parts.problem.append(el("p", { class: "detail" }, problem.detail));
+    }
+
+    const troubled = a.instances.some(m => m.state === "stalled");
+    parts.details.hidden = a.instances.length === 0 && a.segments.length === 0;
+    if (troubled && !parts.details.dataset.touched) parts.details.open = true;
+    const instText = a.instances.length === 1 ? "1 instance" : `${a.instances.length} instances`;
+    const segText = a.segments.length === 1 ? "1 segment" : `${a.segments.length} segments`;
+    parts.summary.textContent = a.segments.length ? `${instText}, ${segText}` : instText;
+    parts.itable.hidden = a.instances.length === 0;
+    parts.itbody.replaceChildren(...a.instances.map(m => el("tr", { "data-state": m.state },
+      el("td", {}, m.owner),
+      el("td", {}, el("span", { class: "state" },
+        m.state === "waiting" && m.waitingFor ? `Waiting for ${m.waitingFor}` : STATE_TEXT[m.state] || m.state)),
+      el("td", { class: "num" }, num.format(m.processed)),
+      el("td", { class: "num" }, num.format(m.failed)),
+      el("td", { class: "num" }, String(m.segments)),
+      el("td", {}, heard(m.ageMs)))));
+    parts.stable.hidden = a.segments.length === 0;
+    parts.stbody.replaceChildren(...a.segments.map(sg => el("tr", {},
+      el("td", { class: "mono" }, sg.key || "(unsegmented)"),
+      el("td", {}, sg.group || ""),
+      el("td", {}, sg.owner || "None"),
+      el("td", {}, sg.pausedMs > 0 ? duration(sg.pausedMs / 1000) : ""))));
+    return parts.section;
+  }
+
+  function describeAutomation(a) {
+    if (a.error) return { text: "The dashboard could not read this automation from its store.", detail: a.error };
+    if (a.paused) {
+      const busy = a.instances.some(m => m.state === "working");
+      return { note: true, text: busy
+        ? "Paused. Instances finish the items they are working on, then claim nothing until it is resumed."
+        : "Paused on every instance. Nothing is claimed until it is resumed." };
+    }
+    if (a.state === "stalled") return { text: "An instance is stalled and retrying.", detail: a.lastError };
+    if (a.state === "not_started") return { text: "No instance of this automation is running, or none has published its status yet." };
+    if (a.state === "waiting" && a.waitingFor) return { note: true, text: `Waiting until ${a.waitingFor} is live; nothing is claimed meanwhile.` };
+    return null;
+  }
+
+  function renderAutomations(automations) {
+    if (!automations.length) {
+      automationsView.replaceChildren(el("div", { class: "empty" },
+        el("strong", {}, "No automations to show"),
+        "Pass the names of the automations with dashboard.WithAutomations."));
+      autoSections.clear();
+      return;
+    }
+    const nodes = automations.map(updateAutomation);
+    const shown = new Set(automations.map(a => a.name));
+    for (const name of autoSections.keys()) if (!shown.has(name)) autoSections.delete(name);
+    automationsView.replaceChildren(...nodes);
+  }
+
+  async function togglePause(name) {
+    const parts = autoSections.get(name);
+    if (!parts || toggling.has(name)) return;
+    const action = parts.paused ? "resume" : "pause";
+    toggling.add(name);
+    setToggling(parts, true);
+    try {
+      const res = await fetch(`api/automations/${encodeURIComponent(name)}/${action}`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      toast(body.message || body.error || `${action} failed with status ${res.status}.`, !res.ok);
+    } catch (err) {
+      toast(`Could not reach the dashboard to ${action} ${name}.`, true);
+    } finally {
+      toggling.delete(name);
+      const now = autoSections.get(name);
+      if (now) setToggling(now, false);
+    }
+  }
+
+  function setToggling(parts, busy) {
+    parts.button.disabled = busy;
+    parts.button.textContent = busy ? (parts.paused ? "Resuming…" : "Pausing…") : (parts.paused ? "Resume" : "Pause");
   }
 
   // Rebuild, after the person confirms it.
@@ -493,16 +649,22 @@
   const pagerNote = document.getElementById("pager-note");
   const chainView = document.getElementById("chain-view");
   const time = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
-  const config = { events: false, chains: false, known: false };
+  const config = { events: false, chains: false, automations: false, projections: true, known: false };
   const seenTypes = new Set();
   let olderCursor = 0;
 
   // configure learns from the first snapshot which views the dashboard
   // offers, and shows the one the address asks for.
   function configure(snap) {
-    if (config.known && config.events === snap.events && config.chains === snap.chains) return;
-    Object.assign(config, { events: snap.events, chains: snap.chains, known: true });
-    tabs.hidden = !config.events;
+    const next = {
+      events: snap.events, chains: snap.chains,
+      automations: snap.showAutomations, projections: snap.projections.length > 0 || !snap.showAutomations,
+    };
+    if (config.known && Object.keys(next).every(k => config[k] === next[k])) return;
+    Object.assign(config, next, { known: true });
+    const shownTabs = { projections: config.projections, automations: config.automations, events: config.events };
+    for (const a of tabs.querySelectorAll("a")) a.hidden = !shownTabs[a.dataset.view];
+    tabs.hidden = Object.values(shownTabs).filter(Boolean).length < 2;
     document.getElementById("chain-open").hidden = !config.chains;
     route();
   }
@@ -511,7 +673,8 @@
     // Decode parts, not the whole hash: a correlation ID may hold any
     // character, the separators included.
     const hash = location.hash.slice(1);
-    let view = "projections";
+    let view = config.projections ? "projections" : "automations";
+    if (config.automations && hash.startsWith("automations")) view = "automations";
     if (config.events && hash.startsWith("events")) view = "events";
     if (config.chains && hash.startsWith("chain/")) view = "chain";
     for (const v of views) v.hidden = v.dataset.view !== view;

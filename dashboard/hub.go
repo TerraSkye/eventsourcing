@@ -172,5 +172,10 @@ func (h *hub) read(ctx context.Context, track bool) snapshot {
 		}
 		snap.Projections = append(snap.Projections, v)
 	}
+	snap.ShowAutomations = d.automations != nil
+	snap.Automations = []automationView{}
+	if d.automations != nil {
+		snap.Automations = d.readAutomations(ctx)
+	}
 	return snap
 }

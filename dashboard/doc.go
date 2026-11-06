@@ -1,7 +1,8 @@
 // Package dashboard serves a web page that shows how a program's projections
 // are doing, live: how far each segment has processed the log, how far it is
 // behind, how fast it is catching up, and why a stalled segment stalled. It
-// can also rebuild a projection, to show a replay as it happens.
+// can also rebuild a projection, to show a replay as it happens, and show,
+// pause and resume automations.
 //
 // The page reads the status every runner publishes to the projection
 // [projection.Store], so it shows projections wherever they run. Pass the
@@ -38,6 +39,25 @@
 // cannot trigger one from a visitor's browser. The check on the Host header
 // keeps a site that rebinds its own name to the dashboard's address from
 // passing for it.
+//
+// # Automations
+//
+// [WithAutomations] adds an automations view. It reads what every instance
+// of an automation publishes to the automation store, the
+// [automation.Definition.Store] the automations run with, so it shows them
+// wherever they run, as long as they share that store: each instance's
+// phase and counts, which instance holds which segment, and which segments
+// are paused by a deferral. [WithPause] adds a pause and a resume button
+// per automation; a pause is recorded in the store and stops every
+// instance from claiming, while items already running finish:
+//
+//	d := dashboard.New(projectionStore,
+//		dashboard.WithAutomations(postgres.NewAutomationStore(pool), "archive-tasks", "sync-orders"),
+//		dashboard.WithPause(),
+//	)
+//
+// The pause endpoints accept requests from the dashboard's own page only,
+// as the rebuild endpoint does.
 //
 // # Events
 //
