@@ -130,6 +130,9 @@
 //     before segments, so a tenant with forty segments and a tenant with
 //     one get the same number of turns. The list claims every held
 //     segment in one call and hands the items back grouped by segment.
+//     Each segment's batch runs on its own: when it finishes, that segment
+//     is claimed for again without waiting for slower segments, and a
+//     deferred segment is given back, paused, once its batch is done.
 //   - [Definition.Concurrency] is how many items of one segment run at
 //     once.
 //   - [Definition.OrderingKey] groups items that must run one at a time in

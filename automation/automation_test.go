@@ -924,7 +924,8 @@ func (nopScheduler[T]) Next(context.Context) ([]automation.Batch[T], error) { re
 func (nopScheduler[T]) Done(context.Context, automation.Item[T], automation.Outcome) error {
 	return nil
 }
-func (nopScheduler[T]) Close(context.Context) error { return nil }
+func (nopScheduler[T]) Drained(context.Context, string) error { return nil }
+func (nopScheduler[T]) Close(context.Context) error           { return nil }
 
 // TestCustomScheduler covers that a Scheduler replaces the default
 // claiming entirely: the runner works what it hands out and reports back.
@@ -967,12 +968,17 @@ func TestCustomScheduler(t *testing.T) {
 	if len(s.outcomes) != 3 || s.outcomes["b"].Kind != automation.Failed {
 		t.Fatalf("outcomes = %+v, want three with b failed", s.outcomes)
 	}
+	sort.Strings(s.drained)
+	if strings.Join(s.drained, ",") != "k1,k2" {
+		t.Fatalf("drained %v, want k1 and k2 once each", s.drained)
+	}
 }
 
 type scriptedScheduler struct {
 	mu       sync.Mutex
 	batches  [][]automation.Batch[string]
 	outcomes map[string]automation.Outcome
+	drained  []string
 	closed   bool
 }
 
@@ -997,4 +1003,48 @@ func (s *scriptedScheduler) Done(_ context.Context, it automation.Item[string], 
 	return nil
 }
 
+func (s *scriptedScheduler) Drained(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.drained = append(s.drained, key)
+	return nil
+}
+
 func (s *scriptedScheduler) Close(context.Context) error { s.closed = true; return nil }
+
+// TestSegmented_SlowSegmentDoesNotHoldOthers covers that batches run on
+// their own: while one segment's batch is stuck, another segment works
+// through batch after batch.
+func TestSegmented_SlowSegmentDoesNotHoldOthers(t *testing.T) {
+	list := newKeyedList()
+	list.Add(job{ID: "slow/1", Key: "slow"})
+	for i := range 5 {
+		list.Add(job{ID: "fast/" + string(rune('1'+i)), Key: "fast"})
+	}
+	release := make(chan struct{})
+	r := automation.NewRunner(automation.Definition[job]{
+		Name:       "sync",
+		Projection: newDep("todo", true),
+		Store:      automation.NewLocalStore(),
+		TodoList:   list,
+		Work: func(ctx context.Context, j job) error {
+			if j.Key == "slow" {
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return list.Complete(ctx, j)
+		},
+		BatchSize:    1, // one item per batch: fast needs five batches
+		Lease:        10 * time.Second,
+		PollInterval: time.Hour, // only finishing batches wake the runner
+		Logger:       quiet,
+	})
+	start(t, r)
+
+	eventually(t, "fast drained while slow is stuck", func() bool { return list.pending() == 1 })
+	close(release)
+	eventually(t, "slow processed once released", func() bool { return list.pending() == 0 })
+}

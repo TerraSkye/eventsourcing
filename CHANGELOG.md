@@ -47,7 +47,9 @@ release may break the API; every break is listed under **Breaking**.
 - `automation.Scheduler`: the pluggable half of an automation (discovery,
   ownership, per-segment limits, pauses). `Definition.Scheduler` replaces
   the default claim-based scheduling with another source of keyed work.
-  The interface may still change before v1.0.
+  Batches run on their own, so one slow segment does not hold up the
+  others: `Next`, `Done` and `Drained` (a segment's batch has finished)
+  are called concurrently. The interface may still change before v1.0.
 - `automation.Deferred` / `DeferredError`: a Work result that pauses the
   item's segment until a time for every instance without counting a
   failure, for a 429 with Retry-After.

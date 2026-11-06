@@ -290,19 +290,24 @@ func (r *Runner[T]) Name() string { return r.d.Name }
 // Run works until ctx is done, and then returns ctx.Err().
 //
 // Each round, Run checks that every dependency is live and asks the
-// scheduler for work. Each segment's items run in their own goroutine,
-// Concurrency at a time, one at a time per OrderingKey. If work was found,
-// the next round starts right away; otherwise Run waits for the poll
-// interval or a nudge. A dependency that is not live makes Run wait
+// scheduler for work. Each batch runs in its own goroutine, Concurrency
+// items at a time, one at a time per OrderingKey, and on its own: when a
+// batch finishes, its segment can be claimed for again at once, while the
+// batches of other segments are still running. If work was found, the
+// next round starts right away; otherwise Run waits for the poll interval,
+// a nudge, or a batch to finish. A dependency that is not live makes Run wait
 // ([Waiting]); a failing check or scheduler call makes it back off from
 // 0.5s up to 30s ([Stalled]); a failing work call is counted and logged,
 // and its item comes back once its lease expires. Run never gives up.
 //
 // When a dependency implements [Watcher], Run registers the runner's
 // Nudge with it, so the automation wakes up when the todo list changes.
-// Call Run once per Runner; the scheduler is closed when it returns.
+// Call Run once per Runner. When ctx is done, Run waits for the running
+// batches to stop, then closes the scheduler and returns.
 func (r *Runner[T]) Run(ctx context.Context) error {
+	f := &flight{}
 	defer r.closeScheduler(ctx)
+	defer f.wg.Wait()
 	for _, dep := range r.waitFor {
 		if w, ok := dep.(Watcher); ok {
 			w.Watch(r.Nudge)
@@ -331,13 +336,19 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 			continue
 		}
 		retry.Reset()
-		if len(batches) == 0 {
-			r.setPhase(Idle, "")
-			r.wait(ctx)
+		for _, b := range batches {
+			r.start(ctx, f, b)
+		}
+		if len(batches) > 0 {
+			r.setPhase(Working, "")
 			continue
 		}
-		r.setPhase(Working, "")
-		r.runBatches(ctx, batches)
+		if f.running() > 0 {
+			r.setPhase(Working, "")
+		} else {
+			r.setPhase(Idle, "")
+		}
+		r.wait(ctx)
 	}
 	return ctx.Err()
 }
@@ -348,35 +359,46 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 // stop. A dependency that is not live makes RunOnce wait for it; a failing
 // check or scheduler call ends the run with that error; a failing work
 // call is counted and its item comes back once its lease expires.
+//
+// RunOnce is done when the scheduler has nothing more, no batch is still
+// running, and none finished since the scheduler was last asked, since a
+// finished batch can leave its segment with more work.
 func (r *Runner[T]) RunOnce(ctx context.Context) (Summary, error) {
 	defer r.closeScheduler(ctx)
-	var sum Summary
+	f := &flight{}
 	for {
 		if err := ctx.Err(); err != nil {
-			return sum, err
+			return f.finish(), err
 		}
 		dep, err := r.notLive(ctx)
 		switch {
 		case err != nil:
 			r.setPhase(Stalled, err.Error())
-			return sum, fmt.Errorf("check %s: %w", dep, err)
+			return f.finish(), fmt.Errorf("check %s: %w", dep, err)
 		case dep != "":
 			r.setWaiting(ctx, dep)
 			r.wait(ctx)
 			continue
 		}
 
+		drained := f.drainedCount()
 		batches, err := r.sched.Next(ctx)
 		if err != nil {
 			r.setPhase(Stalled, err.Error())
-			return sum, fmt.Errorf("schedule: %w", err)
+			return f.finish(), fmt.Errorf("schedule: %w", err)
 		}
-		if len(batches) == 0 {
+		for _, b := range batches {
+			r.start(ctx, f, b)
+		}
+		if len(batches) > 0 {
+			r.setPhase(Working, "")
+			continue
+		}
+		if f.running() == 0 && f.drainedCount() == drained {
 			r.setPhase(Idle, "")
-			return sum, nil
+			return f.finish(), nil
 		}
-		r.setPhase(Working, "")
-		sum.add(r.runBatches(ctx, batches))
+		r.wait(ctx) // a finishing batch nudges
 	}
 }
 
@@ -416,33 +438,64 @@ func (r *Runner[T]) notLive(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// runBatches runs every batch in its own goroutine and waits for all of
-// them. Segments are independent, so they run in parallel.
-func (r *Runner[T]) runBatches(ctx context.Context, batches []Batch[T]) Summary {
-	if len(batches) == 1 {
-		return r.runBatch(ctx, batches[0])
-	}
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		sum  Summary
-		each = make([]Summary, len(batches))
-	)
-	for i, b := range batches {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s := r.runBatch(ctx, b)
-			mu.Lock()
-			each[i] = s
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	for _, s := range each {
-		sum.add(s)
-	}
-	return sum
+// flight is the batches a Run or RunOnce has started and not yet seen
+// finish, and the summary of those that have.
+type flight struct {
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	active  int
+	drained uint64 // batches finished so far
+	sum     Summary
+}
+
+func (f *flight) running() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
+
+func (f *flight) drainedCount() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.drained
+}
+
+// finish waits for every batch and returns the summary of them all.
+func (f *flight) finish() Summary {
+	f.wg.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sum
+}
+
+// start runs b in its own goroutine. When it finishes, the scheduler hears
+// that the segment drained and the runner is nudged, so the segment can be
+// claimed for again without waiting for the other running batches.
+func (r *Runner[T]) start(ctx context.Context, f *flight, b Batch[T]) {
+	f.mu.Lock()
+	f.active++
+	f.mu.Unlock()
+	f.wg.Add(1)
+	go func() {
+		defer f.wg.Done()
+		s := r.runBatch(ctx, b)
+
+		// The segment must be given back even when the run is stopping,
+		// with any pause it asked for, so this does not use ctx.
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		if err := r.sched.Drained(dctx, b.Key); err != nil {
+			r.d.Logger.LogAttrs(dctx, slog.LevelWarn, "automation scheduler drained failed",
+				slog.String("automation", r.d.Name), slog.String("segment", b.Key), slog.String("error", err.Error()))
+		}
+		cancel()
+
+		f.mu.Lock()
+		f.active--
+		f.drained++
+		f.sum.add(s)
+		f.mu.Unlock()
+		r.Nudge()
+	}()
 }
 
 // batchRun is the dispatch state of one segment's batch: a queue per
