@@ -106,7 +106,7 @@ func isWrongExpectedVersion(err error) bool {
 // expectationError translates a failed optimistic-concurrency check on Save
 // into the error the caller's own expectation implies, so that violating a
 // [eventsourcing.NoStream] or [eventsourcing.StreamExists] precondition reports the same
-// sentinel here as it does in packages memory and file. It
+// sentinel here as it does in the other stores. It
 // returns nil when err is not a concurrency failure, or when the expectation
 // was a [eventsourcing.Revision], which Save reports as a
 // [eventsourcing.StreamRevisionConflictError] itself.

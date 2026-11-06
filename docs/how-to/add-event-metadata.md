@@ -24,7 +24,7 @@ handler := eventsourcing.NewCommandHandler(
 )
 ```
 
-Every event saved by this handler will include `user_id` in its envelope metadata.
+Every event saved by this handler will include `user_id` in its envelope metadata. Metadata is stored with the event for good, so stamp IDs, never names, email addresses or IP addresses; see [Personal data and events](../explanation/personal-data.md).
 
 ## Multiple extractors
 
