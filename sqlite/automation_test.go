@@ -113,6 +113,7 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 	list := &tasksToFinish{db: db}
 	finish := automation.NewRunner(automation.Definition[string]{
 		Name:       "finish-tasks",
+		Store:      sqlite.NewAutomationStore(db),
 		TodoList:   list,
 		Projection: todoList,
 		Work: func(ctx context.Context, id string) error {

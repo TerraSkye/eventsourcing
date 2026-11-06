@@ -250,7 +250,7 @@ func (s *AutomationStore) DeferredFor(ctx context.Context, name, key string) (ti
 }
 
 // uniqueCandidates splits segs into keys and groups, dropping repeated
-// keys and keeping the first, as [automation.LocalStore] does.
+// keys and keeping the first, as memory.AutomationStore does.
 func uniqueCandidates(segs []automation.Segment) (keys, groups []string) {
 	seen := make(map[string]bool, len(segs))
 	for _, s := range segs {

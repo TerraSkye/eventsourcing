@@ -95,6 +95,7 @@ func newApp(logger *slog.Logger, archiveAfter, checkEvery time.Duration) *app {
 	eventsourcing.Register(commandBus, archivetask.NewHandler(store))
 
 	archive := archivetasks.New(archiveList, archiveTodo, commandBus).Definition()
+	archive.Store = memory.NewAutomationStore() // one process; sqlite or postgres to share leases
 	archive.Logger = logger
 	archive.PollInterval = checkEvery
 	archiveTasks := automation.NewRunner(archive)

@@ -28,6 +28,14 @@ defer store.Close()
 - Thread-safe via `sync.RWMutex`.
 - `Close` clears all stored events; `Save` returns an error after it.
 
+## Automation store
+
+```go
+func NewAutomationStore() *AutomationStore
+```
+
+`AutomationStore` implements `automation.Store` in memory: segment leases, pauses and the fair hand-out across groups, for tests and for an automation that runs in one process. Another process does not see its leases; use the [sqlite](./sqlite.md) or [postgres](./postgres-store.md) `AutomationStore` when several processes run the automation.
+
 ## Limitations
 
 - No durability — data lost on process exit.

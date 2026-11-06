@@ -50,7 +50,7 @@ They share `db`, which belongs to the caller: their `Close` methods do not close
 
 ## Automation store
 
-`AutomationStore` implements `automation.Store` on the `automation_segments` table: which process holds each segment of a segmented automation, and the segment's pauses. Pass it as `automation.Definition.Store` when more than one process opens the same database file; within one process `automation.NewLocalStore` (the default) does the same job without a table. Leases are fenced by owner and epoch, and time is SQLite's clock in milliseconds.
+`AutomationStore` implements `automation.Store` on the `automation_segments` table: which process holds each segment of a segmented automation, and the segment's pauses. Pass it as `automation.Definition.Store` when more than one process opens the same database file; within one process `memory.NewAutomationStore` does the same job without a table. Leases are fenced by owner and epoch, and time is SQLite's clock in milliseconds.
 
 ## When to use something else
 

@@ -142,11 +142,12 @@ type Definition[T any] struct {
 	// runs in this program, or a *projection.Probe when it runs elsewhere.
 	Projection Dependency
 
-	// Store keeps segment leases and pauses for the default scheduler.
-	// nil means [NewLocalStore]: per-process leases, right for tests and
-	// for an automation that runs in one process only. When several
-	// processes run the automation, pass a store they share, such as
-	// sqlite.NewAutomationStore or postgres.NewAutomationStore.
+	// Store keeps segment leases and pauses for the default scheduler; it
+	// decides how far they reach. memory.NewAutomationStore keeps them in
+	// this process, which is right for tests and for an automation that
+	// runs in one process only; sqlite.NewAutomationStore and
+	// postgres.NewAutomationStore share them between every process on the
+	// same database. Required with TodoList.
 	Store Store
 
 	// Scheduler replaces the default scheduling with another source of
@@ -233,7 +234,8 @@ type Runner[T any] struct {
 // NewRunner creates the runner d describes.
 //
 // It panics on wiring mistakes: an empty Name; a nil Projection or Work;
-// neither TodoList nor Scheduler, or both. It logs once which
+// neither TodoList nor Scheduler, or both; a TodoList without a Store.
+// It logs once which
 // capabilities it found on the list, so a list that was meant to be
 // segmented but is not shows up at startup rather than in production.
 func NewRunner[T any](d Definition[T]) *Runner[T] {
@@ -248,6 +250,9 @@ func NewRunner[T any](d Definition[T]) *Runner[T] {
 		panic(fmt.Sprintf("automation %q: TodoList or Scheduler is required", d.Name))
 	case d.Scheduler != nil && (d.TodoList != nil || d.Store != nil):
 		panic(fmt.Sprintf("automation %q: Scheduler excludes TodoList and Store", d.Name))
+	case d.TodoList != nil && d.Store == nil:
+		panic(fmt.Sprintf("automation %q: Store is required with TodoList; "+
+			"use memory.NewAutomationStore for one process", d.Name))
 	}
 	if d.BatchSize <= 0 {
 		d.BatchSize = DefaultBatchSize
@@ -269,9 +274,6 @@ func NewRunner[T any](d Definition[T]) *Runner[T] {
 	}
 	sched := d.Scheduler
 	if sched == nil {
-		if d.Store == nil {
-			d.Store = NewLocalStore()
-		}
 		cs := newClaimScheduler(d)
 		d.Logger.LogAttrs(context.Background(), slog.LevelInfo, "automation configured",
 			slog.String("automation", d.Name), slog.String("list", cs.capabilities()),

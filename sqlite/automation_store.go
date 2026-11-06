@@ -259,7 +259,7 @@ func changed(res sql.Result) (bool, error) {
 }
 
 // uniqueCandidates drops repeated keys, keeping the first, as
-// [automation.LocalStore] does.
+// memory.AutomationStore does.
 func uniqueCandidates(segs []automation.Segment) []candidate {
 	seen := make(map[string]bool, len(segs))
 	out := make([]candidate, 0, len(segs))

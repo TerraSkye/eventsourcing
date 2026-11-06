@@ -38,10 +38,11 @@ func New(
 }
 
 // Definition describes the automation for automation.NewRunner: what it
-// works and when. Tuning such as the poll interval is main's choice:
+// works and when. Where its leases live is main's choice, as it is for the
+// projection store, so main sets Definition.Store:
 //
 //	archive := archivetasks.New(list, todo, commandBus).Definition()
-//	archive.PollInterval = checkEvery
+//	archive.Store = memory.NewAutomationStore()
 //	go automation.NewRunner(archive).Run(ctx)
 func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
 	return automation.Definition[uuid.UUID]{

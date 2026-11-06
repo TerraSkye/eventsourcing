@@ -27,6 +27,11 @@ release may break the API; every break is listed under **Breaking**.
   the event an item comes from, set it in `Work` with
   `eventsourcing.WithCorrelationID` and `WithCausationID` before sending
   the command. Work still starts each item with no chain.
+- `automation`: `Definition.Store` is required with `TodoList`;
+  `NewRunner` panics without one. The store decides how far leases and
+  pauses reach, so it is chosen in `main` as the projection store is:
+  `memory.NewAutomationStore()` for one process, or the sqlite or
+  postgres `AutomationStore` when instances share a database.
 - `automation`: `Work`'s context now carries the item lease as its
   deadline. Work that outlives its lease is cancelled instead of running
   on while another instance may re-claim the item.
@@ -36,9 +41,7 @@ release may break the API; every break is listed under **Breaking**.
 - `automation` segments: a list that implements `Segmented` (returning
   `Shards(n)` for fixed hash buckets written with `ShardKey`, or `Query`
   for segments discovered from the work) is leased one segment per
-  instance at a time through a `Store` (`NewLocalStore` in-process,
-  `sqlite.NewAutomationStore` and `postgres.NewAutomationStore` across
-  processes), with round-robin fairness
+  instance at a time through a `Store`, with round-robin fairness
   across `Segment.Group` before segments, idle release with a churn
   guard, and work-conserving rotation under contention. A segmented list
   implements `ClaimSegments`, which claims all held segments in one call
@@ -61,12 +64,13 @@ release may break the API; every break is listed under **Breaking**.
 - `Runner.RunOnce` works until nothing is eligible, releases every
   segment and returns a `Summary`, for automations started by a timer.
 - `Status.Deferred` counts deferrals; they are not failures.
-- `sqlite.AutomationStore` and `postgres.AutomationStore` implement
-  `automation.Store` on the new `automation_segments` table, so instances
-  that share a database divide an automation's segments between them.
-  `Schema` creates the table; apply it again when upgrading.
+- `memory.AutomationStore`, `sqlite.AutomationStore` and
+  `postgres.AutomationStore` implement `automation.Store`: the memory one
+  for one process, the SQL ones on the new `automation_segments` table so
+  that instances sharing a database divide an automation's segments
+  between them. `Schema` creates the table; apply it again when upgrading.
 - `automationtest.StoreAcceptanceTest` checks an `automation.Store`
-  against its contract; `LocalStore` and both SQL stores run it.
+  against its contract; all three stores run it.
 
 ## [0.5.0] - 2026-10-29
 

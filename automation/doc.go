@@ -60,8 +60,13 @@
 //		Name:       "ship-orders",
 //		TodoList:   ordersToShip,
 //		Projection: todoList,
+//		Store:      postgres.NewAutomationStore(pool),
 //		Work:       shipping.ShipOrder(commandBus, carrier),
 //	})
+//
+// The Store keeps which instance holds which segment, and pauses: a
+// postgres or sqlite store shares them between every instance on the
+// database, memory.NewAutomationStore keeps them in one process.
 //
 //	go todoList.Run(ctx)
 //	go ship.Run(ctx)
