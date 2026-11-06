@@ -7,6 +7,58 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+### Breaking
+
+- `automation`: `Definition.TodoList` is now the list itself, a
+  `TodoList[T]` (anything with `Claim(ctx, ClaimRequest) ([]T, error)`),
+  and the projection that keeps it moves to `Definition.Projection`. The
+  `Claim` field is gone: `Definition{TodoList: todoRunner, Claim: list.Claim}`
+  becomes `Definition{TodoList: list, Projection: todoRunner}`.
+- `automation`: `Claim` takes a `ClaimRequest{Segments, MaxPerKey, Lease}`
+  instead of `(max, lease)`. Existing claim queries change their two
+  parameters and are otherwise unaffected; `Segments` is empty for an
+  unsegmented list. `automationtest.ClaimAcceptanceTest` and its
+  `TodoList` interface follow.
+- `automation`: `Definition.Interval` is `PollInterval` and
+  `DefaultInterval` is `DefaultPollInterval`, as projection's.
+- `automation`: `Automation[T]` is `Runner[T]` and `New` is `NewRunner`,
+  as projection's. No aliases are kept.
+- `automation`: `Definition.Chain` is removed. To continue the chain of
+  the event an item comes from, set it in `Work` with
+  `eventsourcing.WithCorrelationID` and `WithCausationID` before sending
+  the command. Work still starts each item with no chain.
+- `automation`: `Work`'s context now carries the item lease as its
+  deadline. Work that outlives its lease is cancelled instead of running
+  on while another instance may re-claim the item.
+
+### Added
+
+- `automation` segments: a list that implements `Segmented` (returning
+  `Shards(n)` for fixed hash buckets written with `ShardKey`, or `Query`
+  for segments discovered from the work) is leased one segment per
+  instance at a time through a `Store` (`NewLocalStore` in-process;
+  memory, SQLite and Postgres stores follow), with round-robin fairness
+  across `Segment.Group` before segments, idle release with a churn
+  guard, and work-conserving rotation under contention. A segmented list
+  implements `ClaimSegments`, which claims all held segments in one call
+  and returns the items grouped per segment. `Definition.MaxSegments` caps
+  the segments an instance holds. `NewRunner` logs once which capabilities
+  it found on the list.
+- `automation.Scheduler`: the pluggable half of an automation (discovery,
+  ownership, per-segment limits, pauses). `Definition.Scheduler` replaces
+  the default claim-based scheduling with another source of keyed work.
+  The interface may still change before v1.0.
+- `automation.Deferred` / `DeferredError`: a Work result that pauses the
+  item's segment until a time for every instance without counting a
+  failure, for a 429 with Retry-After.
+- `Definition.Concurrency` runs items of one segment in parallel;
+  `Definition.OrderingKey` keeps items of one chain (an order, an aggregate)
+  one at a time in claim order within that parallelism, and parks the
+  chain for the rest of the batch when an item fails.
+- `Runner.RunOnce` works until nothing is eligible, releases every
+  segment and returns a `Summary`, for automations started by a timer.
+- `Status.Deferred` counts deferrals; they are not failures.
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking

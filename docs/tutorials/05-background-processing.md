@@ -124,6 +124,7 @@ import (
 
     "github.com/google/uuid"
     "github.com/terraskye/eventsourcing"
+    "github.com/terraskye/eventsourcing/automation"
     "github.com/terraskye/eventsourcing/projection"
     "task-management/events"
 )
@@ -174,9 +175,10 @@ func (l *TasksToArchive) onArchived(_ context.Context, e *events.TaskArchived) e
     return nil
 }
 
-// Claim leases up to max due tasks, so that a second claim skips them until
-// the lease runs out.
-func (l *TasksToArchive) Claim(ctx context.Context, max int, lease time.Duration) ([]uuid.UUID, error) {
+// Claim leases up to req.MaxPerKey due tasks, so that a second claim skips
+// them until the lease runs out. That one method makes the list an
+// automation.TodoList.
+func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest) ([]uuid.UUID, error) {
     l.mu.Lock()
     defer l.mu.Unlock()
     now := time.Now()
@@ -187,11 +189,11 @@ func (l *TasksToArchive) Claim(ctx context.Context, max int, lease time.Duration
         }
     }
     sort.Slice(due, func(i, j int) bool { return due[i].String() < due[j].String() })
-    if len(due) > max {
-        due = due[:max]
+    if len(due) > req.MaxPerKey {
+        due = due[:req.MaxPerKey]
     }
     for _, id := range due {
-        l.items[id].claimedUntil = now.Add(lease)
+        l.items[id].claimedUntil = now.Add(req.Lease)
     }
     return due, nil
 }
@@ -223,9 +225,9 @@ func NewAutomation(
     archive eventsourcing.CommandHandler[archivetask.ArchiveTask],
 ) automation.Definition[uuid.UUID] {
     return automation.Definition[uuid.UUID]{
-        Name:     "archive-tasks",
-        TodoList: todoList,
-        Claim:    list.Claim,
+        Name:       "archive-tasks",
+        TodoList:   list,     // the repository: anything with Claim
+        Projection: todoList, // the runner that keeps it; work only while it is live
         Work: func(ctx context.Context, taskID uuid.UUID) error {
             _, err := archive(ctx, archivetask.ArchiveTask{TaskID: taskID})
             return err
@@ -234,7 +236,9 @@ func NewAutomation(
 }
 ```
 
-The automation only claims while its todo list is **live**. While the projection catches up after a start, it still lists tasks whose `TaskArchived` it has not read yet; claiming then would archive them twice. The runner from Part 4 tells the automation when it is live, and nudges it whenever the todo list changes.
+The automation only claims while its projection is **live**. While the projection catches up after a start, the list still holds tasks whose `TaskArchived` it has not read yet; claiming then would archive them twice. The runner from Part 4 tells the automation when it is live, and nudges it whenever the todo list changes.
+
+That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the package documentation.
 
 ## Step 4: Wire it up
 
@@ -243,7 +247,7 @@ The automation only claims while its todo list is **live**. While the projection
 archiveList := taskstoarchive.NewTasksToArchive(5 * time.Second) // 30 * 24 * time.Hour in production
 archiveTodo := projection.NewRunner(taskstoarchive.NewProjection(archiveList), store, memory.NewProjectionStore())
 
-archiveTasks := automation.New(archivetasks.NewAutomation(
+archiveTasks := automation.NewRunner(archivetasks.NewAutomation(
     archiveList,
     archiveTodo,
     archivetask.NewHandler(store),

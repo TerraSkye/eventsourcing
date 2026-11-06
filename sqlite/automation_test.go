@@ -27,9 +27,9 @@ const tasksToFinishTable = `CREATE TABLE tasks_to_finish (
 	claimed_until INTEGER NOT NULL DEFAULT 0
 )`
 
-// Claim leases up to max pending tasks. SQLite runs one writer at a time,
+// Claim leases up to req.MaxPerKey pending tasks. SQLite runs one writer at a time,
 // so the UPDATE needs no SKIP LOCKED to keep two claims apart.
-func (l *tasksToFinish) Claim(ctx context.Context, max int, lease time.Duration) ([]string, error) {
+func (l *tasksToFinish) Claim(ctx context.Context, req automation.ClaimRequest) ([]string, error) {
 	now := time.Now().UnixMilli()
 	rows, err := l.db.QueryContext(ctx, `
 		UPDATE tasks_to_finish SET claimed_until = ?
@@ -38,7 +38,7 @@ func (l *tasksToFinish) Claim(ctx context.Context, max int, lease time.Duration)
 			WHERE claimed_until <= ?
 			ORDER BY task_id
 			LIMIT ?)
-		RETURNING task_id`, now+lease.Milliseconds(), now, max)
+		RETURNING task_id`, now+req.Lease.Milliseconds(), now, req.MaxPerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -111,17 +111,17 @@ func TestAutomation_ClosesTheLoop(t *testing.T) {
 	}, store, sqlite.NewProjectionStore(db))
 
 	list := &tasksToFinish{db: db}
-	finish := automation.New(automation.Definition[string]{
-		Name:     "finish-tasks",
-		TodoList: todoList,
-		Claim:    list.Claim,
+	finish := automation.NewRunner(automation.Definition[string]{
+		Name:       "finish-tasks",
+		TodoList:   list,
+		Projection: todoList,
 		Work: func(ctx context.Context, id string) error {
 			// The command's outcome: the event that removes the item.
 			_, err := store.Save(ctx, []eventsourcing.Envelope{{EventID: uuid.New(), StreamID: "task-" + id, Event: &taskDone{ID: id}}}, eventsourcing.StreamExists{})
 			return err
 		},
-		Interval: time.Hour, // nudges from the runner do the waking
-		Logger:   quiet,
+		PollInterval: time.Hour, // nudges from the runner do the waking
+		Logger:       quiet,
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
