@@ -1,11 +1,19 @@
-// Package automationtest provides [ClaimAcceptanceTest], the contract a
-// todo list's Claim ([automation.TodoList]) is checked against. Run it from the
-// todo list's own tests:
+// Package automationtest provides the contracts that the parts of an
+// automation are checked against. Each implementation runs them from its
+// own tests.
+//
+// [ClaimAcceptanceTest] checks a todo list's Claim ([automation.TodoList]):
 //
 //	func TestClaimAcceptance(t *testing.T) {
 //		automationtest.ClaimAcceptanceTest(t, func(t *testing.T) automationtest.TodoList {
 //			return newOrdersToShipForTest(t)
 //		})
+//	}
+//
+// [StoreAcceptanceTest] checks an [automation.Store]:
+//
+//	func TestAutomationStoreAcceptance(t *testing.T) {
+//		automationtest.StoreAcceptanceTest(t, sqlite.NewAutomationStore(db))
 //	}
 package automationtest
 

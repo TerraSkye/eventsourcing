@@ -144,7 +144,9 @@ type Definition[T any] struct {
 
 	// Store keeps segment leases and pauses for the default scheduler.
 	// nil means [NewLocalStore]: per-process leases, right for tests and
-	// for an automation that runs in one process only.
+	// for an automation that runs in one process only. When several
+	// processes run the automation, pass a store they share, such as
+	// sqlite.NewAutomationStore or postgres.NewAutomationStore.
 	Store Store
 
 	// Scheduler replaces the default scheduling with another source of

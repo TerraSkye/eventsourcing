@@ -36,8 +36,9 @@ release may break the API; every break is listed under **Breaking**.
 - `automation` segments: a list that implements `Segmented` (returning
   `Shards(n)` for fixed hash buckets written with `ShardKey`, or `Query`
   for segments discovered from the work) is leased one segment per
-  instance at a time through a `Store` (`NewLocalStore` in-process;
-  memory, SQLite and Postgres stores follow), with round-robin fairness
+  instance at a time through a `Store` (`NewLocalStore` in-process,
+  `sqlite.NewAutomationStore` and `postgres.NewAutomationStore` across
+  processes), with round-robin fairness
   across `Segment.Group` before segments, idle release with a churn
   guard, and work-conserving rotation under contention. A segmented list
   implements `ClaimSegments`, which claims all held segments in one call
@@ -58,6 +59,12 @@ release may break the API; every break is listed under **Breaking**.
 - `Runner.RunOnce` works until nothing is eligible, releases every
   segment and returns a `Summary`, for automations started by a timer.
 - `Status.Deferred` counts deferrals; they are not failures.
+- `sqlite.AutomationStore` and `postgres.AutomationStore` implement
+  `automation.Store` on the new `automation_segments` table, so instances
+  that share a database divide an automation's segments between them.
+  `Schema` creates the table; apply it again when upgrading.
+- `automationtest.StoreAcceptanceTest` checks an `automation.Store`
+  against its contract; `LocalStore` and both SQL stores run it.
 
 ## [0.5.0] - 2026-10-29
 

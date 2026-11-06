@@ -31,10 +31,11 @@ if _, err := db.ExecContext(ctx, sqlite.Schema); err != nil {
 ```go
 func NewEventStore(db *sql.DB) *EventStore
 func NewProjectionStore(db *sql.DB) *ProjectionStore
+func NewAutomationStore(db *sql.DB) *AutomationStore
 func Tx(ctx context.Context) *sql.Tx
 ```
 
-Both share `db`, which belongs to the caller: their `Close` methods do not close it.
+They share `db`, which belongs to the caller: their `Close` methods do not close it.
 
 ## Event store
 
@@ -46,6 +47,10 @@ Both share `db`, which belongs to the caller: their `Close` methods do not close
 
 !!! warning "Write through `sqlite.Tx(ctx)`"
     With one connection, the batch's transaction holds it while the handler runs. A handler that uses `db` directly waits for that connection and never returns.
+
+## Automation store
+
+`AutomationStore` implements `automation.Store` on the `automation_segments` table: which process holds each segment of a segmented automation, and the segment's pauses. Pass it as `automation.Definition.Store` when more than one process opens the same database file; within one process `automation.NewLocalStore` (the default) does the same job without a table. Leases are fenced by owner and epoch, and time is SQLite's clock in milliseconds.
 
 ## When to use something else
 

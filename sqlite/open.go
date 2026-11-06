@@ -10,8 +10,8 @@ import (
 )
 
 // Schema creates every table the package uses: the events table of
-// [EventStore], and the segment and dead-letter tables of
-// [ProjectionStore]. It is idempotent; run it with
+// [EventStore], the segment and dead-letter tables of [ProjectionStore],
+// and the segment table of [AutomationStore]. It is idempotent; run it with
 // your migrations, or once at startup. The same SQL ships as schema.sql in
 // this package's directory.
 //

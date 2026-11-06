@@ -8,9 +8,12 @@ import (
 )
 
 // Store keeps the segment leases of the default scheduler: which instance
-// holds each key, until when, and when a key may run again. The library
-// implements it for memory, SQLite and Postgres; [LocalStore] is the
-// in-process one for single-process deployments and tests.
+// holds each key, until when, and when a key may run again. [LocalStore] is
+// the in-process one for single-process deployments and tests; the sqlite
+// and postgres packages each provide an AutomationStore that instances
+// sharing a database use to divide segments between them.
+// automationtest.StoreAcceptanceTest checks an implementation against
+// this contract.
 //
 // Its methods and their signatures may change in minor releases before
 // v1.0; external implementations should expect breakage.
