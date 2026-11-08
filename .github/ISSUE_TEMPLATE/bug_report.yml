@@ -1,0 +1,51 @@
+name: Bug report
+description: Something does not behave as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One concern per issue. If you have found two problems, open two issues.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did the library do? Include the error or the wrong result, verbatim.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What should have happened instead, and where the docs or doc comments say so if they do.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: The smallest program or test that shows the problem. A failing test in the matching `_test.go` file is ideal.
+      render: go
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The `github.com/terraskye/eventsourcing` version from your `go.mod`, or the commit if you are on master, and the Go version.
+      placeholder: v0.5.0, go1.25.0
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Store in use
+      multiple: true
+      options:
+        - memory
+        - postgres
+        - sqlite
+        - kurrentdb
+        - not store related
+    validations:
+      required: true

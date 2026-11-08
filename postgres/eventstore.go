@@ -70,7 +70,7 @@ func NewEventStore(pool *pgxpool.Pool) *EventStore {
 // the stream's new length.
 func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
-		return eventsourcing.AppendResult{Successful: true}, nil
+		return eventsourcing.AppendResult{}, nil
 	}
 
 	streamID := events[0].StreamID
@@ -104,13 +104,13 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 	for i, e := range events {
 		payload, err := eventsourcing.EncodeEvent(e.Event)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
 		metadataJSON, err := eventsourcing.EncodeMetadata(e.Metadata)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
@@ -147,18 +147,18 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 		// no check
 	case eventsourcing.NoStream:
 		if currentVersion != 0 {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("stream %q: already exists: %w", streamID, eventsourcing.ErrStreamExists)
 		}
 	case eventsourcing.StreamExists:
 		if currentVersion == 0 {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("stream %q: does not exist: %w", streamID, eventsourcing.ErrStreamNotFound)
 		}
 	case eventsourcing.Revision:
 		expected := uint64(rev)
 		if currentVersion != expected {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				&eventsourcing.StreamRevisionConflictError{
 					Stream:           streamID,
 					ExpectedRevision: rev,
@@ -166,7 +166,7 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 				}
 		}
 	default:
-		return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+		return eventsourcing.AppendResult{StreamID: streamID},
 			fmt.Errorf("unsupported revision type for stream %s: %w", streamID, eventsourcing.ErrInvalidRevision)
 	}
 
@@ -191,26 +191,25 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-				return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+				return eventsourcing.AppendResult{StreamID: streamID},
 					&eventsourcing.StreamRevisionConflictError{
 						Stream:           streamID,
 						ExpectedRevision: revision,
 						ActualRevision:   eventsourcing.Revision(currentVersion),
 					}
 			}
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: insert event %d: %w", streamID, i, err)
 		}
 	}
 
 	if err = tx.Commit(ctx); err != nil {
-		return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+		return eventsourcing.AppendResult{StreamID: streamID},
 			fmt.Errorf("save events to stream %q: commit: %w", streamID, err)
 	}
 
 	finalVersion := currentVersion + uint64(len(events))
 	return eventsourcing.AppendResult{
-		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: finalVersion,
 		GlobalPosition:      uint64(lastID),

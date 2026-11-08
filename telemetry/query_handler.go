@@ -124,8 +124,6 @@ func handleQuery(ctx context.Context, cfg *config, queryType string, qry eventso
 		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
-	} else {
-		span.SetStatus(codes.Ok, "")
 	}
 	QueryDuration.Record(ctx, duration, metric.WithAttributes(metricAttrs...))
 	return result, err
