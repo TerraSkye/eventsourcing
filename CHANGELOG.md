@@ -121,6 +121,13 @@ release may break the API; every break is listed under **Breaking**.
   before it waits or backs off, publishes a stalled status with a ttl
   that covers the sleep, and withdraws its status when it stops: a
   `SaveStatus` with a ttl of 0 (#261).
+- `automation`: a segment whose lease was lost while its batch still ran
+  (a `Renew` past the segment TTL) was forgotten at once, so the same
+  `Next` could take it again and hand out a second batch for it while
+  the first was still running, with items of one ordering chain worked
+  twice in parallel. The segment now stays busy until its batch drains:
+  it is not renewed, taken or claimed for meanwhile, and a deferral its
+  batch asks for is still recorded in the store.
 - The Postgres `AutomationStore` could deadlock an instance's `Renew` or
   `Release` against another's `Acquire`, which locks the segment rows in
   key order: `Renew` and `Release` updated the rows in one statement

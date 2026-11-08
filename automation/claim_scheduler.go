@@ -17,7 +17,9 @@ import (
 //
 // Batches run on their own (see [Scheduler]), so a held segment is busy
 // from the Next that hands out its batch until the batch's Drained: it is
-// renewed but neither claimed for again nor rotated out meanwhile.
+// renewed but neither claimed for again nor rotated out meanwhile. A busy
+// segment whose lease is lost stays busy too: it is not taken again until
+// its batch drains, so that one segment never has two batches running.
 type claimScheduler[T any] struct {
 	name      string
 	list      TodoList[T]
@@ -55,6 +57,11 @@ type heldSegment struct {
 	busy       bool
 	leaseEnd   time.Time
 	deferUntil time.Time
+
+	// lost is set when the lease was lost while the batch runs. The
+	// segment is then ours no more, but stays busy until the batch drains:
+	// not renewed, not acquired again and not claimed for meanwhile.
+	lost bool
 }
 
 // newClaimScheduler returns the scheduler for d, leasing segments as owner.
@@ -137,19 +144,27 @@ func (s *claimScheduler[T]) nextUnsegmented(ctx context.Context) ([]Batch[T], er
 func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], error) {
 	now := s.now()
 
-	// Keep what we hold, and learn what we lost.
-	if len(s.held) > 0 {
-		held := make([]SegmentLease, 0, len(s.held))
-		for _, h := range s.held {
+	// Keep what we hold, and learn what we lost. A lost segment whose
+	// batch still runs is kept, as lost, until the batch drains: taking
+	// it again now would claim a second batch for it.
+	held := make([]SegmentLease, 0, len(s.held))
+	for _, h := range s.held {
+		if !h.lost {
 			held = append(held, h.lease)
 		}
+	}
+	if len(held) > 0 {
 		lost, err := s.store.Renew(ctx, held, s.ttl)
 		if err != nil {
 			return nil, fmt.Errorf("renew: %w", err)
 		}
 		for _, l := range lost {
 			h := s.held[l.Key]
-			delete(s.held, l.Key)
+			if h != nil && h.busy {
+				h.lost = true
+			} else {
+				delete(s.held, l.Key)
+			}
 			s.logger.LogAttrs(ctx, slog.LevelWarn, "automation segment lost",
 				slog.String("automation", s.name), slog.String("segment", l.Key))
 			// A pause the lost batch asked for must still reach the other
@@ -180,11 +195,14 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 		}
 	}
 
-	// Discover and acquire.
+	// Discover and acquire. A lost segment whose batch still runs is not
+	// a candidate: it keeps its slot, and is taken again at the earliest
+	// on the Next after its Drained.
 	cands, err := s.segmenter.segments(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("segments: %w", err)
 	}
+	cands = s.withoutLost(cands)
 	room := s.maxSegments - len(s.held)
 	if room < 0 {
 		room = 0
@@ -243,6 +261,18 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 		h.leaseEnd = got[h.lease.Key]
 	}
 	return batches, nil
+}
+
+// withoutLost returns cands without the segments held as lost.
+func (s *claimScheduler[T]) withoutLost(cands []Segment) []Segment {
+	out := cands[:0:0]
+	for _, c := range cands {
+		if h, ok := s.held[c.Key]; ok && h.lost {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // claimHeld claims for the held segments keys in one call.
@@ -306,7 +336,7 @@ func (s *claimScheduler[T]) Done(ctx context.Context, item Item[T], out Outcome)
 		return nil
 	}
 	h, ok := s.held[item.Key]
-	if !ok {
+	if !ok || h.lost {
 		// Not ours any more; the pause must still be recorded.
 		if err := s.store.Defer(ctx, s.name, item.Key, until.Sub(s.now())); err != nil {
 			return fmt.Errorf("defer %s: %w", item.Key, err)
@@ -335,6 +365,12 @@ func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
 	if !ok {
 		return nil // lost meanwhile; Next recorded any pause
 	}
+	if h.lost {
+		// Lost while the batch ran; Next recorded any pause, and the
+		// segment may be taken again from the next Next on.
+		delete(s.held, key)
+		return nil
+	}
 	h.busy = false
 	if h.deferUntil.IsZero() {
 		return nil
@@ -356,16 +392,17 @@ func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
 }
 
 // Close implements [Scheduler]: it gives back every held segment, with any
-// pause a batch asked for.
+// pause a batch asked for. A lost segment is not ours to give back; Next
+// recorded its pause when it was lost.
 func (s *claimScheduler[T]) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.held) == 0 {
-		return nil
-	}
 	now := s.now()
 	rel := make([]ReleaseRequest, 0, len(s.held))
 	for _, h := range s.held {
+		if h.lost {
+			continue
+		}
 		rr := ReleaseRequest{Lease: h.lease, Served: h.served}
 		if h.deferUntil.After(now) {
 			rr.DeferFor = h.deferUntil.Sub(now)
@@ -373,6 +410,9 @@ func (s *claimScheduler[T]) Close(ctx context.Context) error {
 		rel = append(rel, rr)
 	}
 	s.held = map[string]*heldSegment{}
+	if len(rel) == 0 {
+		return nil
+	}
 	if _, err := s.store.Release(ctx, rel); err != nil {
 		return fmt.Errorf("release: %w", err)
 	}
