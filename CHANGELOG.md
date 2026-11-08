@@ -150,6 +150,16 @@ release may break the API; every break is listed under **Breaking**.
   transaction that locks the rows in key order before updating them.
   The SQLite store needs no change: it writes under the database's one
   write lock, so there is no row order to deadlock on.
+- The automation scheduler rotated a held segment out after its term
+  whenever any other segment was eligible, and with `Shards(n)` every
+  bucket nobody holds is, empty or not: with more buckets than
+  `MaxSegments`, a segment with work was given back every term to look
+  at empty buckets. The scheduler now claims one waiting segment before
+  it gives a held one back: with work, it takes the held segment's
+  place; empty, it is released and the held segment keeps its lease.
+  The `eventsourcing.automation.segment.waiting` gauge is documented as
+  what it reports, segments with no owner whose pause has passed, which
+  with `Shards` includes empty buckets.
 
 ## [0.5.0] - 2026-10-29
 
