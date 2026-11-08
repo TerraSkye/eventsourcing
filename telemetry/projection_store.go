@@ -261,12 +261,12 @@ func (t telemetryDeadLetterStore) ReplayResult(ctx context.Context, name string,
 	return t.dls.ReplayResult(ctx, name, number)
 }
 
-// endSpan sets span's status from err.
+// endSpan marks span as failed with err. A nil err leaves the status
+// unset, as the OpenTelemetry Trace API asks of instrumentation.
 func endSpan(span trace.Span, err error) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return
 	}
-	span.SetStatus(codes.Ok, "")
 }

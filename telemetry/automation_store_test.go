@@ -8,6 +8,7 @@ import (
 
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/memory"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // TestWithAutomationStoreTelemetry_Segments checks acquisitions, grants,
@@ -50,7 +51,8 @@ func TestWithAutomationStoreTelemetry_Segments(t *testing.T) {
 }
 
 // TestWithAutomationStoreTelemetry_PauseSpans checks that pausing and
-// resuming are traced.
+// resuming are traced, and that the spans' status is left unset when they
+// succeed.
 func TestWithAutomationStoreTelemetry_PauseSpans(t *testing.T) {
 	name := newAutomationName()
 	store := WithAutomationStoreTelemetry(memory.NewAutomationStore())
@@ -65,6 +67,9 @@ func TestWithAutomationStoreTelemetry_PauseSpans(t *testing.T) {
 	for _, s := range spanNameRecorder.spansSince(before) {
 		if attrString(s.attrs, AttrAutomationName) == name {
 			got = append(got, s.name)
+			if s.status != codes.Unset {
+				t.Errorf("span %s has status %v, want Unset", s.name, s.status)
+			}
 		}
 	}
 	sort.Strings(got)
