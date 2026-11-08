@@ -79,9 +79,6 @@ func TestCreateTask_Success(t *testing.T) {
     if err != nil {
         t.Fatal(err)
     }
-    if !result.Successful {
-        t.Error("expected successful result")
-    }
     if result.NextExpectedVersion != 1 {
         t.Errorf("expected version 1, got %d", result.NextExpectedVersion)
     }

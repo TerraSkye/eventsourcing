@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -202,11 +203,11 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 		return nil, fmt.Errorf("segments: %w", err)
 	}
 	cands = s.withoutLost(cands)
-	max := s.maxSegments - len(s.held)
-	if max < 0 {
-		max = 0
+	room := s.maxSegments - len(s.held)
+	if room < 0 {
+		room = 0
 	}
-	res, err := s.store.Acquire(ctx, s.name, s.owner, cands, max, s.ttl)
+	res, err := s.store.Acquire(ctx, s.name, s.owner, cands, room, s.ttl)
 	if err != nil {
 		return nil, fmt.Errorf("acquire: %w", err)
 	}
@@ -237,21 +238,27 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 	for _, b := range batches {
 		got[b.Key] = b.Items[0].Deadline
 	}
-	var idle []*heldSegment
+	var served []*heldSegment
 	for _, k := range free {
 		h := s.held[k]
-		if end, ok := got[k]; ok {
-			h.served = true
-			h.busy = true
-			h.leaseEnd = end
+		if _, ok := got[k]; ok {
+			served = append(served, h)
 			continue
 		}
-		idle = append(idle, h)
-	}
-	for _, h := range idle {
 		if err := s.release(ctx, h, s.pollInterval); err != nil {
 			return nil, err
 		}
+	}
+
+	// The batches are handed out only now that nothing can fail any more.
+	// A segment marked busy for a batch that an error dropped would never
+	// drain, so it would be renewed forever and never claimed for or
+	// rotated again; held and free, it is claimed for again on the next
+	// Next instead.
+	for _, h := range served {
+		h.served = true
+		h.busy = true
+		h.leaseEnd = got[h.lease.Key]
 	}
 	return batches, nil
 }
@@ -372,7 +379,16 @@ func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
 	if h.leaseEnd.After(until) {
 		until = h.leaseEnd
 	}
-	return s.release(ctx, h, until.Sub(s.now()))
+	if err := s.release(ctx, h, until.Sub(s.now())); err != nil {
+		// The segment stays the store's until its lease runs out, but the
+		// pause must still reach whoever takes it then; Defer is not
+		// fenced, as for a lost lease.
+		if derr := s.store.Defer(ctx, s.name, key, until.Sub(s.now())); derr != nil {
+			return errors.Join(err, fmt.Errorf("defer %s: %w", key, derr))
+		}
+		return err
+	}
+	return nil
 }
 
 // Close implements [Scheduler]: it gives back every held segment, with any

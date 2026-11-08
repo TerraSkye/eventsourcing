@@ -170,9 +170,6 @@ func TestNewCommandHandler_NoEvents_NoSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if !res.Successful {
-		t.Fatalf("expected Successful true when no events produced")
-	}
 	// NextExpectedVersion should be 0 (no prior events)
 	if res.NextExpectedVersion != 0 {
 		t.Fatalf("expected NextExpectedVersion 0, got %d", res.NextExpectedVersion)
@@ -215,7 +212,7 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 		if envelopes[0].StreamID != "stream-"+envelopes[0].Event.AggregateID() {
 			t.Fatalf("unexpected stream name: %s", envelopes[0].StreamID)
 		}
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	decide := func(state int, cmd testEvent) ([]Event, error) {
@@ -243,9 +240,6 @@ func TestNewCommandHandler_SaveSuccess_Versioning_Metadata_StreamName(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !res.Successful {
-		t.Fatalf("expected success")
-	}
 	if res.NextExpectedVersion != 3 {
 		t.Fatalf("expected next expected version 3, got %d", res.NextExpectedVersion)
 	}
@@ -260,7 +254,7 @@ func TestNewCommandHandler_SavePermanentError(t *testing.T) {
 		return newSliceEnvelopeIterator(ctx, nil), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
-		return AppendResult{Successful: false}, fmt.Errorf("disk full")
+		return AppendResult{}, fmt.Errorf("disk full")
 	}
 
 	handler := NewCommandHandler(
@@ -295,10 +289,10 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 		if callCount == 1 {
 			// return a StreamRevisionConflictError to trigger retry
 			// assume the concrete type exists in package (NewCommandHandler checks via errors.As)
-			return AppendResult{Successful: false}, &StreamRevisionConflictError{}
+			return AppendResult{}, &StreamRevisionConflictError{}
 		}
 		// second call succeed
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -314,12 +308,9 @@ func TestNewCommandHandler_SaveConflict_Retry(t *testing.T) {
 		}),
 	)
 
-	res, err := handler(context.Background(), testEvent{agg: "agg", typ: "c"})
+	_, err := handler(context.Background(), testEvent{agg: "agg", typ: "c"})
 	if err != nil {
 		t.Fatalf("unexpected error from handler with retry: %v", err)
-	}
-	if !res.Successful {
-		t.Fatalf("expected success after retry")
 	}
 	if callCount < 2 {
 		t.Fatalf("expected at least 2 save attempts, got %d", callCount)
@@ -343,7 +334,7 @@ func TestNewCommandHandler_ExplicitRevision_Update(t *testing.T) {
 	var seenRevision StreamState
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		seenRevision = revision
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -403,7 +394,7 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 		if len(seenRevisions) == 1 {
 			return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(1), ActualRevision: Revision(2)}
 		}
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -420,8 +411,8 @@ func TestNewCommandHandler_AnyRevision_RetryConverges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected retry to converge, got error: %v", err)
 	}
-	if !res.Successful {
-		t.Fatalf("expected successful append, got %+v", res)
+	if res.NextExpectedVersion != 3 {
+		t.Fatalf("expected the retried save to append version 3 after the foreign event at 2, got %+v", res)
 	}
 
 	if len(seenRevisions) != 2 {
@@ -534,7 +525,7 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 		if len(seenRevisions) == 1 {
 			return AppendResult{}, &StreamRevisionConflictError{Stream: "s", ExpectedRevision: Revision(1), ActualRevision: Revision(2)}
 		}
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -552,8 +543,8 @@ func TestNewCommandHandler_StreamExists_ConflictRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected retry to converge, got error: %v", err)
 	}
-	if !res.Successful {
-		t.Fatalf("expected successful append, got %+v", res)
+	if res.NextExpectedVersion != 3 {
+		t.Fatalf("expected the retried save to append version 3 after the foreign event at 2, got %+v", res)
 	}
 	if len(seenRevisions) != 2 {
 		t.Fatalf("expected 2 save attempts, got %d", len(seenRevisions))
@@ -576,7 +567,7 @@ func TestNewCommandHandler_MetadataMergeOrder(t *testing.T) {
 		if envelopes[0].Metadata["first_only"] != "1" {
 			t.Fatalf("expected first_only key present")
 		}
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[0].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[0].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -614,7 +605,7 @@ func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
 		},
 		saveFn: func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 			savedEnvelopes = envelopes
-			return AppendResult{Successful: true, StreamID: "s"}, nil
+			return AppendResult{StreamID: "s"}, nil
 		},
 	}
 
@@ -633,12 +624,9 @@ func TestNewCommandHandler_EnvelopesDoNotShareMetadataMap(t *testing.T) {
 		}),
 	)
 
-	res, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
+	_, err := handler(context.Background(), testEvent{agg: "s", typ: "c"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !res.Successful {
-		t.Fatalf("expected successful append, got %+v", res)
 	}
 	if len(savedEnvelopes) != 2 {
 		t.Fatalf("expected 2 saved envelopes, got %d", len(savedEnvelopes))
@@ -766,7 +754,7 @@ func TestNewCommandHandler_PinnedRevisionFoldsFullState(t *testing.T) {
 		return newSliceEnvelopeIterator(ctx, out), nil
 	}
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	var sawState int
@@ -1006,7 +994,7 @@ func TestNewCommandHandler_AutoConvergeDefaultDoesNotPinEmptyStreamRevision(t *t
 	var seenRevision StreamState
 	store.saveFn = func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 		seenRevision = revision
-		return AppendResult{Successful: true, NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
+		return AppendResult{NextExpectedVersion: envelopes[len(envelopes)-1].Version}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -1067,7 +1055,7 @@ func TestNewCommandHandler_AutoConvergeEmptyStreamRejectsSecondCreate(t *testing
 			}
 		}
 		storedVersion += uint64(len(envelopes))
-		return AppendResult{Successful: true, NextExpectedVersion: storedVersion}, nil
+		return AppendResult{NextExpectedVersion: storedVersion}, nil
 	}
 
 	handler := NewCommandHandler(
@@ -1109,7 +1097,7 @@ func chainHandler(t *testing.T) (CommandHandler[testEvent], *[]Envelope) {
 		},
 		saveFn: func(ctx context.Context, envelopes []Envelope, revision StreamState) (AppendResult, error) {
 			saved = envelopes
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		},
 	}
 	decide := func(state int, cmd testEvent) ([]Event, error) {

@@ -2,10 +2,12 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type durationTestQuery struct{}
@@ -111,6 +113,32 @@ func TestQueryTelemetry_SpanName(t *testing.T) {
 			call()
 			if got := spanNameRecorder.since(before); len(got) != 1 || got[0] != want {
 				t.Errorf("spans = %v, want [%s]", got, want)
+			}
+		})
+	}
+}
+
+// TestQueryTelemetry_SpanStatus covers the span status: a success leaves
+// it unset, as the OpenTelemetry Trace API asks of instrumentation, and an
+// error sets it to Error.
+func TestQueryTelemetry_SpanStatus(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"success": {nil, codes.Unset},
+		"failure": {errors.New("boom"), codes.Error},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			handler := WithQueryTelemetry(eventsourcing.NewQueryHandlerFunc(func(context.Context, durationTestQuery) (int, error) {
+				return 0, tt.err
+			}))
+			before := spanNameRecorder.len()
+			_, _ = handler.HandleQuery(context.Background(), durationTestQuery{})
+			spans := spanNameRecorder.spansSince(before)
+			if len(spans) != 1 || spans[0].status != tt.want {
+				t.Errorf("spans = %+v, want one with status %v", spans, tt.want)
 			}
 		})
 	}

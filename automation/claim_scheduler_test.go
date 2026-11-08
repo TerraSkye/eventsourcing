@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -186,9 +187,13 @@ func TestClaimScheduler_RotatesUnderContention(t *testing.T) {
 		}
 		served = append(served, batches[0].Key)
 		for _, it := range batches[0].Items {
-			s.Done(ctx, it, Outcome{Kind: Done})
+			if err := s.Done(ctx, it, Outcome{Kind: Done}); err != nil {
+				t.Fatal(err)
+			}
 		}
-		s.Drained(ctx, batches[0].Key)
+		if err := s.Drained(ctx, batches[0].Key); err != nil {
+			t.Fatal(err)
+		}
 		c.tick(11 * time.Second) // past the term
 	}
 	if got := strings.Join(served, ","); got != "a,b,a,b" {
@@ -230,7 +235,9 @@ func TestClaimScheduler_KeepsAnUncontendedSegment(t *testing.T) {
 			t.Fatalf("round %d: epoch %d, want %d; the uncontended key was re-acquired", i, e, epoch)
 		}
 		epoch = e
-		s.Drained(ctx, "a")
+		if err := s.Drained(ctx, "a"); err != nil {
+			t.Fatal(err)
+		}
 		c.tick(11 * time.Second)
 	}
 }
@@ -357,7 +364,9 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if store.owner("sync", "3") == "" {
 		t.Fatal("shard 3 with work was released")
 	}
-	s.Drained(ctx, "3")
+	if err := s.Drained(ctx, "3"); err != nil {
+		t.Fatal(err)
+	}
 	list.reqs = nil
 	c.tick(time.Second)
 	if _, err := s.Next(ctx); err != nil {
@@ -366,7 +375,9 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 1 || list.reqs[0].Segments[0] != "3" {
 		t.Fatalf("second poll claimed %v, want only shard 3 while the others are paused", list.reqs)
 	}
-	s.Drained(ctx, "3")
+	if err := s.Drained(ctx, "3"); err != nil {
+		t.Fatal(err)
+	}
 
 	// After the interval the empty shards are candidates again.
 	c.tick(10 * time.Second)
@@ -376,6 +387,55 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	}
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 4 {
 		t.Fatalf("third poll claimed %+v, want all 4 shards again", list.reqs)
+	}
+}
+
+// flakyStore is a fakeStore whose Release fails the next failures times.
+type flakyStore struct {
+	*fakeStore
+	failures int
+}
+
+func (s *flakyStore) Release(ctx context.Context, rel []ReleaseRequest) ([]SegmentLease, error) {
+	if s.failures > 0 {
+		s.failures--
+		return nil, errors.New("store down")
+	}
+	return s.fakeStore.Release(ctx, rel)
+}
+
+// TestClaimScheduler_FailedIdleReleaseKeepsSegmentsWorkable covers a Next
+// that fails while giving back an empty shard: the batches it drops must
+// not leave the shards with work marked busy, as their Drained never
+// comes, so the next Next claims for them again.
+func TestClaimScheduler_FailedIdleReleaseKeepsSegmentsWorkable(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store := &flakyStore{fakeStore: newFakeStore(c), failures: 1}
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: &shardedList{n: 4}, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 5, MaxSegments: 4, PollInterval: 10 * time.Second,
+	})
+	s.now = c.now
+
+	if batches, err := s.Next(ctx); err == nil {
+		t.Fatalf("Next = %d batches, nil; want the release error", len(batches))
+	}
+	if h := s.held["3"]; h == nil || h.busy {
+		t.Fatalf("shard 3 after the failed Next: %+v; want held and not busy, its batch was dropped", h)
+	}
+	for i := range 2 {
+		c.tick(time.Second)
+		batches, err := s.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next %d after the failure: %v", i+1, err)
+		}
+		if len(batches) != 1 || batches[0].Key != "3" {
+			t.Fatalf("Next %d after the failure = %+v, want the batch of shard 3", i+1, batches)
+		}
+		if err := s.Drained(ctx, "3"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -424,6 +484,35 @@ func TestClaimScheduler_DeferralReleasesAtDrained(t *testing.T) {
 				t.Fatalf("paused for %s, want %s", d, c.wantPause)
 			}
 		})
+	}
+}
+
+// TestClaimScheduler_FailedReleaseAtDrainedKeepsItsDeferral covers a
+// deferred batch whose release at Drained fails: the pause must still be
+// written, so the instance that takes the segment over honours it.
+func TestClaimScheduler_FailedReleaseAtDrainedKeepsItsDeferral(t *testing.T) {
+	ctx := context.Background()
+	clk := newClock()
+	store := &flakyStore{fakeStore: newFakeStore(clk)}
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
+	})
+	s.now = clk.now
+
+	batches, err := s.Next(ctx)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next = %d batches, %v; want one", len(batches), err)
+	}
+	if err := s.Done(ctx, batches[0].Items[0], Outcome{Kind: DeferredOutcome, Until: clk.now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	store.failures = 1
+	if err := s.Drained(ctx, "a"); err == nil {
+		t.Fatal("Drained = nil, want the release error")
+	}
+	if d, _ := store.DeferredFor(ctx, "sync", "a"); d < 50*time.Minute {
+		t.Fatalf("after the failed release the segment is paused for %s, want the deferral", d)
 	}
 }
 
