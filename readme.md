@@ -115,7 +115,7 @@ func main() {
 
 	id := uuid.New()
 	res, err := bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Write a README"})
-	fmt.Println(res.Successful, err) // true <nil>
+	fmt.Println(res.NextExpectedVersion, err) // 1 <nil>
 
 	_, err = bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Again"})
 	var violation *eventsourcing.BusinessRuleViolationError

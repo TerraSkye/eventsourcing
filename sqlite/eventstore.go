@@ -56,7 +56,7 @@ func NewEventStore(db *sql.DB) *EventStore {
 // event appended.
 func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
-		return eventsourcing.AppendResult{Successful: true}, nil
+		return eventsourcing.AppendResult{}, nil
 	}
 
 	streamID := events[0].StreamID
@@ -172,7 +172,6 @@ func (s *EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, 
 			fmt.Errorf("save events to stream %q: commit: %w", streamID, err)
 	}
 	return eventsourcing.AppendResult{
-		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: currentVersion + uint64(len(events)),
 		GlobalPosition:      uint64(lastID),
