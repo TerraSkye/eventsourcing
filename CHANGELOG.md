@@ -124,6 +124,11 @@ release may break the API; every break is listed under **Breaking**.
   the release at the end of a deferred batch failed, the pause the batch
   asked for was lost; it is now written with `Store.Defer`, as for a lost
   lease.
+- `automation`: when the default scheduler's `Close` failed to give back
+  its segments, every pause a deferred batch had asked for was dropped
+  with them, so another instance could claim those segments at once. The
+  pauses are now written with `Store.Defer`, as when the release at the
+  end of a deferred batch fails (#278).
 - An automation's published status was late or missing when it mattered.
   A phase change was only published at the top of the next round, so
   after a pause each instance showed its old phase for up to two poll
