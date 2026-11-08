@@ -252,6 +252,34 @@ func TestWithWorkTelemetry_Operation(t *testing.T) {
 	}
 }
 
+// shipOrders is the automation of ExampleWithWorkTelemetry: a type next to
+// its todo list with a Definition method, as automation.Definition
+// describes.
+type shipOrders struct {
+	list *items
+	todo automation.Dependency
+}
+
+func newShipOrders(list *items, todo automation.Dependency) *shipOrders {
+	return &shipOrders{list: list, todo: todo}
+}
+
+func (a *shipOrders) Definition() automation.Definition[string] {
+	return automation.Definition[string]{Name: "ship-orders", TodoList: a.list, Projection: a.todo, Work: a.Work}
+}
+
+func (a *shipOrders) Work(context.Context, string) error { return nil }
+
+// ExampleWithWorkTelemetry wraps an automation's work in main, after the
+// automation described itself and before the runner is created.
+func ExampleWithWorkTelemetry() {
+	ship := newShipOrders(&items{}, liveDep{}).Definition()
+	ship.Work = WithWorkTelemetry(ship.Name, ship.Work)
+	ship.Store = memory.NewAutomationStore() // postgres.NewAutomationStore(pool) to share leases
+	runner := automation.NewRunner(ship)
+	_ = runner.Run // go runner.Run(ctx)
+}
+
 // TestWithWorkTelemetry_SpanStatus covers the span status: a success, a
 // deferral and the cancellation of a stopping run leave it unset, as the
 // OpenTelemetry Trace API asks of instrumentation, and any other error

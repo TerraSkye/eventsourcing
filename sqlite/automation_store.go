@@ -13,9 +13,11 @@ import (
 
 var _ automation.Store = (*AutomationStore)(nil)
 
-// AutomationStore is the SQLite [automation.Store]: it keeps which instance
-// holds each segment of an automation, and the segment's pauses, in the
-// automation_segments table that [Schema] creates. Create it with
+// AutomationStore is the SQLite [automation.Store]. It keeps which
+// instance holds each segment of an automation, and the segment's pauses,
+// in the automation_segments table; whether the automation is paused in
+// automation_controls; and what each instance last reported in
+// automation_instances. [Schema] creates all three. Create the store with
 // [NewAutomationStore] and pass it as [automation.Definition.Store].
 //
 // Every process that opens the same database file shares the leases, so a

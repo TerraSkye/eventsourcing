@@ -175,9 +175,9 @@ func (l *TasksToArchive) onArchived(_ context.Context, e *events.TaskArchived) e
     return nil
 }
 
-// Claim leases up to req.MaxPerKey due tasks, so that a second claim skips
-// them until the lease runs out. That one method makes the list an
-// automation.TodoList.
+// Claim leases up to req.MaxPerKey due tasks for req.Lease, so that a
+// second claim skips them until the lease runs out. That one method makes
+// the list an automation.TodoList.
 func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest) ([]uuid.UUID, error) {
     l.mu.Lock()
     defer l.mu.Unlock()
@@ -286,7 +286,7 @@ go func() {
 }()
 ```
 
-A due task waits for the next check, every five seconds by default (`PollInterval` in the definition). `archiveTasks.Status()` reports what the automation is doing: waiting for its todo list, idle, working or stalled, with counts of processed and failed items.
+A due task waits for the next check, every five seconds by default (`PollInterval` in the definition). `archiveTasks.Status()` reports what the automation is doing: starting, waiting for its todo list, idle, working, stalled, or paused through its store, with counts of processed, failed and deferred items.
 
 ## Step 5: Test it
 

@@ -164,7 +164,7 @@ type Item[T any] struct {
 }
 
 // Batch is the items of one segment, in the order they should be
-// dispatched. Items that share a ordering key run in that order; see
+// dispatched. Items that share an ordering key run in that order; see
 // [Definition.OrderingKey].
 type Batch[T any] struct {
 	Key   string

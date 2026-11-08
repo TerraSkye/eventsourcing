@@ -1314,3 +1314,79 @@ func TestRunOnce_PausedDoesNothing(t *testing.T) {
 		t.Fatalf("phase %s, want paused", a.Status().Phase)
 	}
 }
+
+// The types of ExampleDefinition: a todo list of orders to ship, and the
+// automation that ships them, laid out as the Definition doc describes.
+type shippingTodo struct{ OrderID, Address string }
+
+// ordersToShip is the todo list. A projection fills it; Claim leases from
+// it.
+type ordersToShip struct {
+	mu      sync.Mutex
+	pending map[string]shippingTodo
+	leased  map[string]time.Time // until when each pending item is leased
+}
+
+func (l *ordersToShip) Claim(_ context.Context, req automation.ClaimRequest) ([]shippingTodo, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	var out []shippingTodo
+	for id, t := range l.pending {
+		if len(out) == req.MaxPerKey {
+			break
+		}
+		if l.leased[id].After(now) {
+			continue
+		}
+		l.leased[id] = now.Add(req.Lease)
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// shipOrder is the command the automation sends for one item.
+type shipOrder struct{ OrderID string }
+
+func (c shipOrder) AggregateID() string { return c.OrderID }
+func (c shipOrder) CommandType() string { return "ShipOrder" }
+
+// shipOrders is the automation as a type: the todo list it claims from, the
+// projection that keeps that list, and the dispatcher its commands go to.
+type shipOrders struct {
+	list *ordersToShip
+	todo automation.Dependency
+	bus  eventsourcing.Dispatcher
+}
+
+func newShipOrders(list *ordersToShip, todo automation.Dependency, bus eventsourcing.Dispatcher) *shipOrders {
+	return &shipOrders{list: list, todo: todo, bus: bus}
+}
+
+func (a *shipOrders) Definition() automation.Definition[shippingTodo] {
+	return automation.Definition[shippingTodo]{
+		Name:       "ship-orders",
+		TodoList:   a.list,
+		Projection: a.todo, // work only while the list is live
+		Work:       a.Work,
+	}
+}
+
+func (a *shipOrders) Work(ctx context.Context, t shippingTodo) error {
+	_, err := a.bus.Dispatch(ctx, shipOrder{OrderID: t.OrderID})
+	return err
+}
+
+// ExampleDefinition is main's side of the Definition doc: the automation
+// describes itself, main chooses where its leases live and runs it.
+func ExampleDefinition() {
+	list := &ordersToShip{pending: map[string]shippingTodo{}, leased: map[string]time.Time{}}
+	todoRunner := newDep("orders-to-ship", true) // the *projection.Runner that keeps list
+	commandBus := eventsourcing.NewCommandBus(20, 1)
+	defer commandBus.Stop()
+
+	ship := newShipOrders(list, todoRunner, commandBus).Definition()
+	ship.Store = memory.NewAutomationStore() // one process; sqlite or postgres to share leases
+	runner := automation.NewRunner(ship)
+	_ = runner.Run // go runner.Run(ctx)
+}
