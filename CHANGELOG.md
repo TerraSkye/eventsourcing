@@ -88,6 +88,16 @@ release may break the API; every break is listed under **Breaking**.
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
 
+### Fixed
+
+- `automation`: a segment whose lease was lost while its batch still ran
+  (a `Renew` past the segment TTL) was forgotten at once, so the same
+  `Next` could take it again and hand out a second batch for it while
+  the first was still running, with items of one ordering chain worked
+  twice in parallel. The segment now stays busy until its batch drains:
+  it is not renewed, taken or claimed for meanwhile, and a deferral its
+  batch asks for is still recorded in the store.
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking
