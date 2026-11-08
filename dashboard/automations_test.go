@@ -78,29 +78,33 @@ func TestAutomations_ShowWhatTheStoreKnows(t *testing.T) {
 	if err := store.Defer(ctx, "sync", "zed", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	store.SaveStatus(ctx, "sync", automation.Status{Owner: "worker-1", Phase: automation.Working, Processed: 3, Deferred: 1}, time.Minute)
-	store.SaveStatus(ctx, "sync", automation.Status{Owner: "worker-2", Phase: automation.Stalled, Processed: 2, Failed: 1, LastError: "store down"}, time.Minute)
+	if err := store.SaveStatus(ctx, "sync", automation.Status{Owner: "worker-1", Phase: automation.Working, Processed: 3, Deferred: 1}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveStatus(ctx, "sync", automation.Status{Owner: "worker-2", Phase: automation.Stalled, Processed: 2, Failed: 1, LastError: "store down"}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
 
 	d := dashboard.New(memory.NewProjectionStore(), dashboard.WithAutomations(store, "sync", "mail"))
 	s := getAutomations(t, d)
 	if !s.ShowAutomations || s.Title != "Automations" || len(s.Automations) != 2 {
 		t.Fatalf("snapshot = %+v, want the automations view titled Automations with sync and mail", s)
 	}
-	sync, mail := s.Automations[0], s.Automations[1]
-	if sync.State != "stalled" || sync.Processed != 5 || sync.Failed != 1 || sync.Deferred != 1 || sync.LastError != "store down" {
-		t.Errorf("sync = %+v, want stalled with the totals of both instances and the stalled one's error", sync)
+	syncAuto, mail := s.Automations[0], s.Automations[1]
+	if syncAuto.State != "stalled" || syncAuto.Processed != 5 || syncAuto.Failed != 1 || syncAuto.Deferred != 1 || syncAuto.LastError != "store down" {
+		t.Errorf("sync = %+v, want stalled with the totals of both instances and the stalled one's error", syncAuto)
 	}
-	if sync.CanPause {
+	if syncAuto.CanPause {
 		t.Error("sync offers pause without WithPause")
 	}
-	if len(sync.Instances) != 2 || sync.Instances[0].Owner != "worker-1" || sync.Instances[0].Segments != 1 || sync.Instances[1].Segments != 0 {
-		t.Errorf("instances = %+v, want worker-1 holding one segment and worker-2 none", sync.Instances)
+	if len(syncAuto.Instances) != 2 || syncAuto.Instances[0].Owner != "worker-1" || syncAuto.Instances[0].Segments != 1 || syncAuto.Instances[1].Segments != 0 {
+		t.Errorf("instances = %+v, want worker-1 holding one segment and worker-2 none", syncAuto.Instances)
 	}
-	if len(sync.Segments) != 2 {
-		t.Fatalf("segments = %+v, want acme and zed", sync.Segments)
+	if len(syncAuto.Segments) != 2 {
+		t.Fatalf("segments = %+v, want acme and zed", syncAuto.Segments)
 	}
-	if acme, zed := sync.Segments[0], sync.Segments[1]; acme.Owner != "worker-1" || acme.Group != "tenant" || zed.Owner != "" || zed.PausedMs <= 0 {
-		t.Errorf("segments = %+v, want acme held by worker-1 and zed paused", sync.Segments)
+	if acme, zed := syncAuto.Segments[0], syncAuto.Segments[1]; acme.Owner != "worker-1" || acme.Group != "tenant" || zed.Owner != "" || zed.PausedMs <= 0 {
+		t.Errorf("segments = %+v, want acme held by worker-1 and zed paused", syncAuto.Segments)
 	}
 	if mail.State != "not_started" || len(mail.Instances) != 0 {
 		t.Errorf("mail = %+v, want not_started: no instance published it", mail)

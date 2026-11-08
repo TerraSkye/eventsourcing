@@ -12,6 +12,7 @@ import (
 	"github.com/terraskye/eventsourcing/memory"
 	"github.com/terraskye/eventsourcing/projection"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // projectedEvent is the event the projection tests project.
@@ -212,13 +213,15 @@ func TestWithProjectionStoreTelemetry_Heartbeat(t *testing.T) {
 }
 
 // TestWithProjectionStoreTelemetry_CommitClaimLost checks a Commit by an
-// instance that does not hold the segment is recorded as claim_lost.
+// instance that does not hold the segment is recorded as claim_lost and
+// fails its span.
 func TestWithProjectionStoreTelemetry_CommitClaimLost(t *testing.T) {
 	name := newProjectionName()
 	store := WithProjectionStoreTelemetry(memory.NewProjectionStore())
 	if err := store.Declare(t.Context(), name, 1, 0); err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
+	before := spanNameRecorder.len()
 	err := store.Commit(t.Context(), projection.Lease{Name: name, Owner: "a"}, projection.Checkpoint{Position: 1}, projection.Status{},
 		func(context.Context) error { return nil })
 	if !errors.Is(err, projection.ErrClaimLost) {
@@ -228,6 +231,36 @@ func TestWithProjectionStoreTelemetry_CommitClaimLost(t *testing.T) {
 	batches := forProjection(durationRecorder.recordsFor("eventsourcing.projection.batch.duration"), name)
 	if len(batches) != 1 || attrString(batches[0].attrs, AttrResult) != "claim_lost" {
 		t.Errorf("batch durations = %v, want one with result claim_lost", batches)
+	}
+	spans := spanNameRecorder.spansSince(before)
+	if len(spans) != 1 || spans[0].status != codes.Error {
+		t.Errorf("spans = %+v, want one with status Error", spans)
+	}
+}
+
+// TestWithProjectionStoreTelemetry_CommitSpanStatus checks a Commit that
+// succeeds leaves its span's status unset, as the OpenTelemetry Trace API
+// asks of instrumentation.
+func TestWithProjectionStoreTelemetry_CommitSpanStatus(t *testing.T) {
+	name := newProjectionName()
+	store := WithProjectionStoreTelemetry(memory.NewProjectionStore())
+	l := projection.Lease{Name: name, Owner: "a"}
+	if err := store.Declare(t.Context(), name, 1, 0); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	l, _, ok, err := store.Claim(t.Context(), l, time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("Claim = %v, %v; want true, nil", ok, err)
+	}
+	before := spanNameRecorder.len()
+	err = store.Commit(t.Context(), l, projection.Checkpoint{Position: 1}, projection.Status{},
+		func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	spans := spanNameRecorder.spansSince(before)
+	if len(spans) != 1 || spans[0].name != "process batch" || spans[0].status != codes.Unset {
+		t.Errorf("spans = %+v, want one process batch span with status Unset", spans)
 	}
 }
 

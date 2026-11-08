@@ -3,6 +3,7 @@ package automation_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -327,27 +328,6 @@ func TestRun_WatcherNudges(t *testing.T) {
 	eventually(t, "the item processed after the nudge", func() bool { return list.pending() == 0 })
 }
 
-func TestNew_Panics(t *testing.T) {
-	list := newTodoList()
-	work := func(context.Context, string) error { return nil }
-	tests := map[string]automation.Definition[string]{
-		"no name":       {Projection: newDep("x", true), TodoList: list, Work: work},
-		"no projection": {Name: "a", TodoList: list, Work: work},
-		"no todo list":  {Name: "a", Projection: newDep("x", true), Work: work},
-		"no work":       {Name: "a", Projection: newDep("x", true), TodoList: list},
-	}
-	for name, d := range tests {
-		t.Run(name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("New did not panic")
-				}
-			}()
-			automation.NewRunner(d)
-		})
-	}
-}
-
 // countingList wraps a todo list and counts its claims.
 type countingList struct {
 	*memTodoList
@@ -377,7 +357,7 @@ type job struct {
 }
 
 // keyedList is an in-memory todo list with segment keys, the shape the
-// default scheduler needs when Keys is set.
+// default scheduler needs when the list is Segmented.
 type keyedList struct {
 	mu    sync.Mutex
 	seq   int
@@ -450,8 +430,8 @@ func (l *keyedList) pendingSegments(context.Context) ([]automation.Segment, erro
 	return keys, nil
 }
 
-// Claim leases up to req.MaxPerKey pending items per key in req.Keys, in
-// insertion order; all keys when req.Keys is empty.
+// Claim leases up to req.MaxPerKey pending items per key in req.Segments,
+// in insertion order; all keys when req.Segments is empty.
 func (l *keyedList) Claim(_ context.Context, req automation.ClaimRequest) ([]job, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -860,26 +840,36 @@ func TestSegmented_DeferredPausesOnlyThatKey(t *testing.T) {
 	}
 }
 
+// TestNewRunner_Panics covers each rejected definition. Every case has a
+// valid store except "list without store", so the panic names the field
+// that is actually missing.
 func TestNewRunner_Panics(t *testing.T) {
 	dep := newDep("todo", true)
 	work := func(context.Context, string) error { return nil }
 	list := newTodoList()
-	cases := map[string]automation.Definition[string]{
-		"no list and no scheduler": {Name: "x", Projection: dep, Work: work},
-		"list and scheduler":       {Name: "x", Projection: dep, Work: work, TodoList: list, Scheduler: nopScheduler[string]{}},
-		"no projection":            {Name: "x", Work: work, TodoList: list},
-		"no work":                  {Name: "x", Projection: dep, TodoList: list},
-		"list without store":       {Name: "x", Projection: dep, Work: work, TodoList: list},
-		"scheduler and store":      {Name: "x", Projection: dep, Work: work, Scheduler: nopScheduler[string]{}, Store: memory.NewAutomationStore()},
+	store := memory.NewAutomationStore()
+	sched := nopScheduler[string]{}
+	cases := map[string]struct {
+		def  automation.Definition[string]
+		want string
+	}{
+		"no name":                  {automation.Definition[string]{Projection: dep, Work: work, TodoList: list, Store: store}, "Name is required"},
+		"no projection":            {automation.Definition[string]{Name: "x", Work: work, TodoList: list, Store: store}, "Projection is required"},
+		"no work":                  {automation.Definition[string]{Name: "x", Projection: dep, TodoList: list, Store: store}, "Work is required"},
+		"no list and no scheduler": {automation.Definition[string]{Name: "x", Projection: dep, Work: work, Store: store}, "TodoList or Scheduler is required"},
+		"list and scheduler":       {automation.Definition[string]{Name: "x", Projection: dep, Work: work, TodoList: list, Store: store, Scheduler: sched}, "Scheduler excludes TodoList and Store"},
+		"scheduler and store":      {automation.Definition[string]{Name: "x", Projection: dep, Work: work, Scheduler: sched, Store: store}, "Scheduler excludes TodoList and Store"},
+		"list without store":       {automation.Definition[string]{Name: "x", Projection: dep, Work: work, TodoList: list}, "Store is required"},
 	}
-	for name, d := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
-				if recover() == nil {
-					t.Fatal("NewRunner did not panic")
+				got := fmt.Sprint(recover())
+				if !strings.Contains(got, tc.want) {
+					t.Fatalf("NewRunner panicked with %q, want %q", got, tc.want)
 				}
 			}()
-			automation.NewRunner(d)
+			automation.NewRunner(tc.def)
 		})
 	}
 }
@@ -980,7 +970,7 @@ func TestCustomScheduler(t *testing.T) {
 	}
 	sort.Strings(worked)
 	if strings.Join(worked, ",") != "a,b,c" {
-		t.Fatalf("worked %v", worked)
+		t.Fatalf("worked %v, want a, b and c", worked)
 	}
 	if !s.closed {
 		t.Fatal("scheduler was not closed")
@@ -1303,7 +1293,9 @@ func TestRun_PauseLetsRunningWorkFinish(t *testing.T) {
 func TestRunOnce_PausedDoesNothing(t *testing.T) {
 	ctx := t.Context()
 	store := memory.NewAutomationStore()
-	store.SetPaused(ctx, "ship-orders", true)
+	if err := store.SetPaused(ctx, "ship-orders", true); err != nil {
+		t.Fatal(err)
+	}
 	list := newTodoList()
 	list.Add(ctx, "a")
 	a := automation.NewRunner(automation.Definition[string]{

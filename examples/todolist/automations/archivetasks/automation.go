@@ -17,10 +17,11 @@ import (
 	"github.com/terraskye/eventsourcing/examples/todolist/slices/taskstoarchive"
 )
 
-// ArchiveTasks is the automation as a type: the todo list it claims from,
-// the projection that keeps that list, and the dispatcher its commands go
-// to. Work is a method, so the automation can be tested without a runner.
-type ArchiveTasks struct {
+// Automation is the archive-tasks automation as a type: the todo list it
+// claims from, the projection that keeps that list, and the dispatcher its
+// commands go to. Work is a method, so the automation can be tested
+// without a runner.
+type Automation struct {
 	list *taskstoarchive.TasksToArchive
 	todo automation.Dependency
 	bus  eventsourcing.Dispatcher
@@ -33,8 +34,8 @@ func New(
 	list *taskstoarchive.TasksToArchive,
 	todo automation.Dependency,
 	bus eventsourcing.Dispatcher,
-) *ArchiveTasks {
-	return &ArchiveTasks{list: list, todo: todo, bus: bus}
+) *Automation {
+	return &Automation{list: list, todo: todo, bus: bus}
 }
 
 // Definition describes the automation for automation.NewRunner: what it
@@ -44,7 +45,7 @@ func New(
 //	archive := archivetasks.New(list, todo, commandBus).Definition()
 //	archive.Store = memory.NewAutomationStore()
 //	go automation.NewRunner(archive).Run(ctx)
-func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
+func (a *Automation) Definition() automation.Definition[uuid.UUID] {
 	return automation.Definition[uuid.UUID]{
 		Name:       "archive-tasks",
 		TodoList:   a.list,
@@ -56,7 +57,7 @@ func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
 // Work archives one due task. The command goes through the bus, so the
 // bus's middleware applies to it as to any other command. A task that was
 // archived meanwhile is not an error: the decider appends nothing.
-func (a *ArchiveTasks) Work(ctx context.Context, taskID uuid.UUID) error {
+func (a *Automation) Work(ctx context.Context, taskID uuid.UUID) error {
 	_, err := a.bus.Dispatch(ctx, archivetask.ArchiveTask{TaskID: taskID})
 	return err
 }
