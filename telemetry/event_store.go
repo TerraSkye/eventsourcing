@@ -32,9 +32,14 @@ type EventStore struct {
 }
 
 // baseAttrs returns the span attributes common to every operation: the
-// attributes from cfg, such as [AttrDBSystemName].
-func (t EventStore) baseAttrs() []attribute.KeyValue {
-	return append([]attribute.KeyValue(nil), t.cfg.Attributes...)
+// attributes from cfg, such as [AttrDBSystemName], and those its
+// [WithAttributeGetter] derives from ctx.
+func (t EventStore) baseAttrs(ctx context.Context) []attribute.KeyValue {
+	attrs := append([]attribute.KeyValue(nil), t.cfg.Attributes...)
+	if t.cfg.GetAttributes != nil {
+		attrs = append(attrs, t.cfg.GetAttributes(ctx)...)
+	}
+	return attrs
 }
 
 // metricAttrs returns the attributes [EventStoreDuration] is recorded with
@@ -50,7 +55,8 @@ func (t EventStore) metricAttrs(op string, err error) metric.MeasurementOption {
 
 // dbSystem returns the [AttrDBSystemName] attribute from cfg, if it sets one.
 // Only [WithAttributes] counts: an attribute from [WithAttributeGetter] is
-// computed per call for spans and does not reach the metrics.
+// computed per call for the spans, by [EventStore.baseAttrs], and does not
+// reach the metrics.
 func (t EventStore) dbSystem() []attribute.KeyValue {
 	for _, kv := range t.cfg.Attributes {
 		if kv.Key == AttrDBSystemName {
@@ -74,7 +80,7 @@ func (t EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		break
 	}
 
-	spanAttrs := append(t.baseAttrs(),
+	spanAttrs := append(t.baseAttrs(ctx),
 		AttrEventStoreOperation.String("append"),
 		AttrStreamID.String(streamID),
 		AttrStreamVersion.Int64(revision.ToRawInt64()),
@@ -168,7 +174,7 @@ func (t EventStore) LoadStreamFrom(ctx context.Context, id string, version event
 // way. A caller that stops early is therefore instrumented like any other,
 // provided it closes the iterator.
 func (t EventStore) load(ctx context.Context, attrs []attribute.KeyValue, open func(context.Context) (*eventsourcing.Iterator[*eventsourcing.Envelope], error)) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
-	spanAttrs := append(t.baseAttrs(), AttrEventStoreOperation.String("load"))
+	spanAttrs := append(t.baseAttrs(ctx), AttrEventStoreOperation.String("load"))
 	// Keep the span's context for the metrics recorded below, so they are
 	// attributed to the span rather than to ctx alone.
 	spanCtx, span := tracer.Start(ctx, "load events",
@@ -247,7 +253,7 @@ func (t telemetryGlobalStore) ReadAll(ctx context.Context, after uint64, opts ev
 	_, span := tracer.Start(ctx, "read all events",
 		trace.WithTimestamp(startedAt),
 		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(append(t.baseAttrs(),
+		trace.WithAttributes(append(t.baseAttrs(ctx),
 			AttrEventStoreOperation.String("read_all"),
 			AttrStreamVersion.Int64(int64(min(after, math.MaxInt64))),
 			AttrEventCount.Int64(int64(len(res.Events))),
@@ -278,7 +284,9 @@ func (t EventStore) Close() error {
 // every save and load with OpenTelemetry tracing and metrics as described on
 // [EventStore]. [WithAttributes] adds attributes to every span; set
 // [AttrDBSystemName] with it to label the store's metrics too.
-// [WithOperation] and [WithOperationGetter] rename the "append events" span.
+// [WithAttributeGetter] adds attributes derived from the context to every
+// span, and to the spans only. [WithOperation] and [WithOperationGetter]
+// rename the "append events" span.
 //
 // If next also implements [eventsourcing.GlobalReader], so does the returned
 // store, and its ReadAll is traced as well; otherwise the returned store is
