@@ -12,7 +12,8 @@ release may break the API; every break is listed under **Breaking**.
 - `automation`: `Definition.TodoList` is now the list itself, a
   `TodoList[T]` (anything with `Claim(ctx, ClaimRequest) ([]T, error)`),
   and the projection that keeps it moves to `Definition.Projection`. The
-  `Claim` field is gone: `Definition{TodoList: todoRunner, Claim: list.Claim}`
+  `Claim` field and `ClaimFunc[T]` are removed; a todo list now implements
+  `TodoList[T]` itself: `Definition{TodoList: todoRunner, Claim: list.Claim}`
   becomes `Definition{TodoList: list, Projection: todoRunner}`.
 - `automation`: `Claim` takes a `ClaimRequest{Segments, MaxPerKey, Lease}`
   instead of `(max, lease)`. Existing claim queries change their two
@@ -34,7 +35,10 @@ release may break the API; every break is listed under **Breaking**.
   postgres `AutomationStore` when instances share a database.
 - `automation`: `Work`'s context now carries the item lease as its
   deadline. Work that outlives its lease is cancelled instead of running
-  on while another instance may re-claim the item.
+  on while another instance may re-claim the item, and an item whose
+  lease expired before its work started is skipped and counted as failed
+  (in `Status.Failed`, with `LastError` "lease expired before work
+  started") instead of run late.
 
 ### Added
 
@@ -57,18 +61,21 @@ release may break the API; every break is listed under **Breaking**.
 - `automation.Deferred` / `DeferredError`: a Work result that pauses the
   item's segment until a time for every instance without counting a
   failure, for a 429 with Retry-After.
-- `Definition.Concurrency` runs items of one segment in parallel;
-  `Definition.OrderingKey` keeps items of one chain (an order, an aggregate)
-  one at a time in claim order within that parallelism, and parks the
-  chain for the rest of the batch when an item fails.
-- `Runner.RunOnce` works until nothing is eligible, releases every
-  segment and returns a `Summary`, for automations started by a timer.
-- `Status.Deferred` counts deferrals; they are not failures.
+- `automation.Definition.Concurrency` runs items of one segment in
+  parallel; `Definition.OrderingKey` keeps items of one chain (an order,
+  an aggregate) one at a time in claim order within that parallelism, and
+  parks the chain for the rest of the batch when an item fails.
+- `automation.Runner.RunOnce` works until nothing is eligible, releases
+  every segment and returns a `Summary`, for automations started by a
+  timer.
+- `automation.Status.Deferred` counts deferrals; they are not failures.
 - `memory.AutomationStore`, `sqlite.AutomationStore` and
   `postgres.AutomationStore` implement `automation.Store`: the memory one
-  for one process, the SQL ones on the new `automation_segments` table so
-  that instances sharing a database divide an automation's segments
-  between them. `Schema` creates the table; apply it again when upgrading.
+  for one process, the SQL ones on the new `automation_segments`,
+  `automation_controls` and `automation_instances` tables, so that
+  instances sharing a database divide an automation's segments between
+  them and share its pause and statuses. `Schema` creates all three;
+  apply it again when upgrading, or add them to your own migrations.
 - `automationtest.StoreAcceptanceTest` checks an `automation.Store`
   against its contract; all three stores run it.
 - `telemetry`: `WithWorkTelemetry` traces and times an automation's work
@@ -87,6 +94,14 @@ release may break the API; every break is listed under **Breaking**.
 - `dashboard.WithAutomations` shows automations as their instances
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
+
+### Changed
+
+- `automation.Phase.String` returns `Phase(n)` for a phase it does not
+  know, instead of `unknown`.
+- `automation.Status.LastError` of a failed claim starts with `schedule:`
+  (`schedule: claim: ...`) instead of `claim:`, now that the claim runs
+  inside the scheduler.
 
 ## [0.5.0] - 2026-10-29
 

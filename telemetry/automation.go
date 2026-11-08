@@ -80,8 +80,10 @@ func ObserveAutomation(r StatusReporter) (metric.Registration, error) {
 // OpenTelemetry tracing and metrics, returning an [automation.WorkFunc] to
 // put in [automation.Definition.Work]:
 //
-//	def := shipping.NewShipOrders(list, todo, bus).Definition()
-//	def.Work = telemetry.WithWorkTelemetry(def.Name, def.Work)
+//	ship := shipping.NewShipOrders(list, todoRunner, commandBus).Definition()
+//	ship.Work = telemetry.WithWorkTelemetry(ship.Name, ship.Work)
+//	ship.Store = postgres.NewAutomationStore(pool)
+//	go automation.NewRunner(ship).Run(ctx)
 //
 // Each item runs inside a "process item" span tagged with the
 // automation's name, so a command the work dispatches through a bus with

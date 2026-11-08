@@ -63,8 +63,8 @@ func (l *TasksToArchive) onArchived(_ context.Context, e *events.TaskArchived) e
 	return nil
 }
 
-// Claim leases up to max due tasks, so that a second claim skips them until
-// the lease runs out.
+// Claim leases up to req.MaxPerKey due tasks for req.Lease, so that a
+// second claim skips them until the lease runs out.
 func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest) ([]uuid.UUID, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

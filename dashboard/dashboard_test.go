@@ -321,3 +321,27 @@ func TestRebuild_ExplainsWhyItCannot(t *testing.T) {
 		t.Errorf("rebuild of a projection the dashboard does not show = %d, want 404", rec.Code)
 	}
 }
+
+// TestNew_NilProjectionStore covers a dashboard that shows automations
+// only: the projection store is read for shown projections alone, so it
+// may be nil.
+func TestNew_NilProjectionStore(t *testing.T) {
+	store := memory.NewAutomationStore()
+	d := dashboard.New(nil, dashboard.WithAutomations(store, "sync"), dashboard.WithReset())
+
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, localRequest(http.MethodGet, "/api/snapshot", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"sync"`) {
+		t.Fatalf("GET /api/snapshot = %d: %s, want 200 showing sync", rec.Code, rec.Body)
+	}
+
+	req := localRequest(http.MethodPost, "/api/projections/ticks/rebuild", nil)
+	for k, v := range fromThePage {
+		req.Header.Set(k, v)
+	}
+	rec = httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("rebuild of a projection not shown = %d, want 404 without touching the store", rec.Code)
+	}
+}

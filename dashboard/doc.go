@@ -77,8 +77,10 @@
 // # Updates
 //
 // The page receives updates as server-sent events. While at least one page
-// is open, the dashboard reads every projection's status once per interval
-// (see [WithInterval]), however many pages are open, and stops reading when
-// the last one closes. A runner given with [WithRunners] also pushes an
-// update as soon as it commits or changes phase.
+// is open, the dashboard reads every projection's and automation's status
+// once per interval (see [WithInterval]), however many pages are open, and
+// stops reading when the last one closes. A runner given with [WithRunners]
+// also pushes an update as soon as it commits or changes phase, and a pause
+// or resume from the page pushes one at once; what an automation's
+// instances publish shows at the next interval.
 package dashboard

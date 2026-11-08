@@ -13,9 +13,11 @@ import (
 
 var _ automation.Store = (*AutomationStore)(nil)
 
-// AutomationStore is the Postgres [automation.Store]: it keeps which
+// AutomationStore is the Postgres [automation.Store]. It keeps which
 // instance holds each segment of an automation, and the segment's pauses,
-// in the automation_segments table that [Schema] creates. Create it with
+// in the automation_segments table; whether the automation is paused in
+// automation_controls; and what each instance last reported in
+// automation_instances. [Schema] creates all three. Create the store with
 // [NewAutomationStore] and pass it as [automation.Definition.Store].
 //
 // Every instance that uses the same database shares the leases, so a

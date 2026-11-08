@@ -22,7 +22,7 @@
 //
 //	// Claim reads pending items from the todo list and leases them, so that
 //	// other instances skip them for a while.
-//	func (p *OrdersToShip) Claim(ctx context.Context, max int, lease time.Duration) ([]ShippingTodo, error) {
+//	func (p *OrdersToShip) Claim(ctx context.Context, req automation.ClaimRequest) ([]ShippingTodo, error) {
 //		rows, err := p.pool.Query(ctx, `
 //			UPDATE orders_to_ship SET claimed_until = now() + $2
 //			WHERE order_id IN (
@@ -31,7 +31,7 @@
 //				ORDER BY order_id
 //				LIMIT $1
 //				FOR UPDATE SKIP LOCKED)
-//			RETURNING order_id, address`, max, lease)
+//			RETURNING order_id, address`, req.MaxPerKey, req.Lease)
 //		if err != nil {
 //			return nil, err
 //		}
@@ -102,11 +102,14 @@
 //
 // There is no attempt limit and no dead letter: an item whose work keeps
 // failing is retried once per lease for as long as it stays on the todo
-// list. Nor is the work cancelled when the lease runs out; ctx is only
-// cancelled when the automation stops. Work that fails for good should
-// record that outcome as an event, so the todo list drops the item, and
-// work that may hang should set its own deadline well below
-// [Definition.Lease].
+// list. Work that fails for good should record that outcome as an event,
+// so the todo list drops the item.
+//
+// The lease is also Work's deadline: ctx carries it, so work that outlives
+// its lease is cancelled rather than running on while another instance
+// may claim the item again, and ctx is cancelled when the automation
+// stops. An item whose lease ran out while it waited in its batch is
+// skipped and counted as failed, not run late; see [Definition.BatchSize].
 //
 // Work starts with no chain, so the commands it sends start a new one.
 // To continue the chain of the event the item comes from, keep that
@@ -183,9 +186,10 @@
 //
 // # Status
 //
-// [Runner.Status] reports a [Phase] (Waiting, Idle, Working, Stalled)
-// and counts for this instance, in the same shape as a projection's
-// status. A failing check or scheduler call stalls the automation with the same backoff as a projection,
-// 0.5s growing to 30s, and it never gives up; a failing work call is
-// counted, logged, and retried once its item's lease expires.
+// [Runner.Status] reports a [Phase] (Starting, Waiting, Idle, Working,
+// Stalled or Paused) and counts for this instance, in the same shape as a
+// projection's status. A failing check or scheduler call stalls the
+// automation with the same backoff as a projection, 0.5s growing to 30s,
+// and it never gives up; a failing work call is counted, logged, and
+// retried once its item's lease expires.
 package automation

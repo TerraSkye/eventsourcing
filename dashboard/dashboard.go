@@ -142,8 +142,11 @@ func WithTitle(title string) Option {
 	return func(d *Dashboard) { d.title = title }
 }
 
-// New returns a [Dashboard] showing projections whose status is published
-// to store.
+// New returns a [Dashboard] showing the projections given with
+// [WithRunners] and [WithProjections], as their status is published to
+// store, and the automations given with [WithAutomations]. store is read
+// for those projections only, so it may be nil for a dashboard that shows
+// automations alone.
 func New(store projection.Store, opts ...Option) *Dashboard {
 	d := &Dashboard{
 		store:    store,

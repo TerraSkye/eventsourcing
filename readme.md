@@ -211,8 +211,8 @@ Projection handlers on SQLite and Postgres write through `sqlite.Tx(ctx)` / `pos
 | `eventsourcing` (root) | `Command`, `Event`, `Envelope`, `EventStore`, `GlobalReader`, `EventHandler`, command/query buses, `NewCommandHandler`, middleware, event registry, `Iterator`, stream states and typed errors |
 | `projection` | `Definition`, `Runner`, `Store`; checkpoints, leases, segments, rebuilds, replay, error policies, dead-lettering |
 | `automation` | Background workers that claim items from a todo-list read model and act on them (process managers, scheduled follow-ups) |
-| `memory`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore` and, where supported, `NewProjectionStore` |
-| `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores and projections |
+| `memory`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore` and, where supported, `NewProjectionStore` and `NewAutomationStore` |
+| `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores, projections and automations |
 | `logging` | `slog` middleware for commands, queries and events |
 | `eventsourcingtest`, `projection/projectiontest`, `automation/automationtest` | Acceptance suites and fakes for testing your own implementations |
 

@@ -123,17 +123,32 @@ type Summary struct {
 // projection that keeps that list, how it does the work, and its tuning.
 // The zero value for every optional field picks sensible defaults.
 //
-// An automation is usually defined next to its todo list, by a constructor
-// in the same package, and handed to [NewRunner] by main:
+// An automation is usually a type next to its todo list, in the same
+// package: it holds the list, the projection that keeps it and the
+// dispatcher its commands go to, and describes itself with a Definition
+// method. Work is a method too, so a test calls it without a runner:
 //
-//	func NewShipOrders(list *OrdersToShip, runner *projection.Runner, bus eventsourcing.Dispatcher, carrier Carrier) automation.Definition[ShippingTodo] {
+//	type ShipOrders struct {
+//		list *OrdersToShip
+//		todo automation.Dependency
+//		bus  eventsourcing.Dispatcher
+//	}
+//
+//	func (a *ShipOrders) Definition() automation.Definition[ShippingTodo] {
 //		return automation.Definition[ShippingTodo]{
 //			Name:       "ship-orders",
-//			TodoList:   list,
-//			Projection: runner,
-//			Work:       ShipOrder(bus, carrier),
+//			TodoList:   a.list,
+//			Projection: a.todo, // work only while the list is live
+//			Work:       a.Work,
 //		}
 //	}
+//
+// Where the leases live is main's choice, as it is for the projection
+// store, so main sets Store and hands the definition to [NewRunner]:
+//
+//	ship := shipping.NewShipOrders(list, todoRunner, commandBus).Definition()
+//	ship.Store = postgres.NewAutomationStore(pool)
+//	go automation.NewRunner(ship).Run(ctx)
 //
 // That is the whole default: competing consumers over the list, one item
 // at a time per instance. Everything else is opt-in, and sits where it
@@ -166,7 +181,10 @@ type Definition[T any] struct {
 	Store Store
 
 	// Scheduler replaces the default scheduling with another source of
-	// keyed work; see [Scheduler]. When set, TodoList and Store stay nil.
+	// keyed work; see [Scheduler]. When set, TodoList and Store stay nil,
+	// and without a Store the automation publishes no status, cannot be
+	// paused with [Store.SetPaused], and does not appear on the dashboard.
+	// [Runner.Status] still reports what this instance is doing.
 	Scheduler Scheduler[T]
 
 	// Work processes one claimed item; see [WorkFunc].
@@ -259,10 +277,10 @@ const publishEvery = time.Second
 // NewRunner creates the runner d describes.
 //
 // It panics on wiring mistakes: an empty Name; a nil Projection or Work;
-// neither TodoList nor Scheduler, or both; a TodoList without a Store.
-// It logs once which
-// capabilities it found on the list, so a list that was meant to be
-// segmented but is not shows up at startup rather than in production.
+// neither TodoList nor Scheduler, or both; a TodoList without a Store. It
+// logs once which capabilities it found on the list, so a list that was
+// meant to be segmented but is not shows up at startup rather than in
+// production.
 func NewRunner[T any](d Definition[T]) *Runner[T] {
 	switch {
 	case d.Name == "":
@@ -406,11 +424,11 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 
 // RunOnce works until nothing is eligible, then gives every segment back
 // and returns what it did. A paused automation does nothing and returns at
-// once. It is the entry point for an automation that a
-// timer or a cron job starts: claim and work whatever is pending, then
-// stop. A dependency that is not live makes RunOnce wait for it; a failing
-// check or scheduler call ends the run with that error; a failing work
-// call is counted and its item comes back once its lease expires.
+// once. It is the entry point for an automation that a timer or a cron job
+// starts: claim and work whatever is pending, then stop. A dependency that
+// is not live makes RunOnce wait for it; a failing check or scheduler call
+// ends the run with that error; a failing work call is counted and its
+// item comes back once its lease expires.
 //
 // RunOnce is done when the scheduler has nothing more, no batch is still
 // running, and none finished since the scheduler was last asked, since a
@@ -620,7 +638,7 @@ type batchRun[T any] struct {
 }
 
 // runBatch runs b's items Concurrency at a time, never two of the same
-// ordering key at once, in claim order within a ordering key. A failed item
+// ordering key at once, in claim order within an ordering key. A failed item
 // parks its ordering key for the rest of the batch, so a later item of the
 // same chain cannot overtake it; a deferral stops the batch.
 func (r *Runner[T]) runBatch(ctx context.Context, b Batch[T]) Summary {
