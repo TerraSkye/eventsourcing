@@ -103,7 +103,7 @@ projection makes on every poll, are counted in metrics but get no span.
 
 | Metric | Type | What it shows |
 |---|---|---|
-| `eventsourcing.projection.lag` | gauge | Head of the log minus the checkpoint. Events on Postgres, memory and file; log bytes on KurrentDB |
+| `eventsourcing.projection.lag` | gauge | Head of the log minus the checkpoint. Events on memory, SQLite and Postgres; log bytes on KurrentDB |
 | `eventsourcing.projection.position` | gauge | The checkpoint |
 | `eventsourcing.projection.phase` | gauge | 1 for the current phase, per `eventsourcing.projection.phase` |
 | `eventsourcing.projection.dead_lettered.events` | counter | Events dead-lettered under `SkipWhenLive` or `SkipAlways` |

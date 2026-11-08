@@ -112,7 +112,7 @@ type GlobalReader interface {
 }
 ```
 
-Reads the global log — every event across all streams — in strictly ascending `GlobalPosition` order, a page at a time. Implemented by the memory, file, Postgres and KurrentDB stores.
+Reads the global log — every event across all streams — in strictly ascending `GlobalPosition` order, a page at a time. Implemented by the memory, SQLite, Postgres and KurrentDB stores.
 
 - `ReadAll` — returns the events after position `after` (exclusive; `0` reads from the start), up to `opts.Limit`, optionally filtered by `opts.EventTypes` (exact names) and `opts.StreamPrefixes`. `ReadResult.Next` is the position to pass as `after` next time, and moves past filtered-out events; `ReadResult.AtEnd` reports the read reached the head. It never blocks waiting for new events.
 - `Head` — the `GlobalPosition` of the newest event `ReadAll` could return, ignoring filters, or `0` for an empty log.
@@ -155,7 +155,8 @@ Processes a single event. Use `OnEvent[T]` to create a strongly-typed handler, o
 type AppendResult struct {
     StreamID            string
     NextExpectedVersion uint64
+    GlobalPosition      uint64
 }
 ```
 
-Returned by `EventStore.Save` and `CommandHandler`. `NextExpectedVersion` is the version to use for the next write with optimistic locking.
+Returned by `EventStore.Save` and `CommandHandler`. `NextExpectedVersion` is the version to use for the next write with optimistic locking. `GlobalPosition` is the `Envelope.GlobalPosition` of the last event appended, or 0 if nothing was appended or the store does not report it; pass it to `projection.Runner.WaitUntil` to wait until a projection reflects the append.

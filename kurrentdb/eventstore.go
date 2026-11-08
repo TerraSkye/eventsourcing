@@ -97,7 +97,7 @@ func defaultSaveBackoff() backoff.BackOff {
 // expectation as the number of the stream's last event, where this package
 // numbers them from 1 and a [eventsourcing.Revision] is a count of events.
 // The conversion happens at this boundary only, so every caller sees the
-// same numbering it gets from the memory, file and postgres stores:
+// same numbering it gets from the memory, sqlite and postgres stores:
 //
 //	Envelope.Version        = EventNumber + 1
 //	Save(Revision(0))       → kurrentdb.NoStream{}
@@ -298,7 +298,7 @@ func (e EventStore) currentRevision(ctx context.Context, streamID string) events
 //
 // A stream that does not exist is a failure, not an empty read: iteration
 // ends with an error matching [eventsourcing.ErrStreamNotFound], as it does in the
-// memory and file implementations. Because the read is lazy, that error
+// memory, sqlite and postgres implementations. Because the read is lazy, that error
 // arrives through the iterator's Err rather than from LoadStream itself —
 // the server only reports the missing stream once the first event is
 // requested. Every other failure reaches Err too, mapped through
