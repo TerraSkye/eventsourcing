@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -273,9 +274,10 @@ type plainList struct{}
 func (plainList) Claim(context.Context, ClaimRequest) ([]string, error) { return nil, nil }
 
 // shardedList is Segmented by Shards. It records every ClaimRequest it
-// gets and has work in shard "3" only.
+// gets and has endless work in the shards named in work only.
 type shardedList struct {
 	n    int
+	work []string
 	reqs []ClaimRequest
 }
 
@@ -283,12 +285,13 @@ func (l *shardedList) Claim(context.Context, ClaimRequest) ([]string, error) { r
 
 func (l *shardedList) ClaimSegments(_ context.Context, req ClaimRequest) ([]Claimed[string], error) {
 	l.reqs = append(l.reqs, req)
+	var out []Claimed[string]
 	for _, k := range req.Segments {
-		if k == "3" {
-			return []Claimed[string]{{Segment: "3", Items: []string{"item-in-3"}}}, nil
+		if slices.Contains(l.work, k) {
+			out = append(out, Claimed[string]{Segment: k, Items: []string{"item-in-" + k}})
 		}
 	}
-	return nil, nil
+	return out, nil
 }
 
 func (l *shardedList) Segments() Segmenter { return Shards(l.n) }
@@ -320,7 +323,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	ctx := context.Background()
 	c := newClock()
 	store := newFakeStore(c)
-	list := &shardedList{n: 4}
+	list := &shardedList{n: 4, work: []string{"3"}}
 	s := newTestScheduler(Definition[string]{
 		Name:         "sync",
 		TodoList:     list,
@@ -376,6 +379,98 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	}
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 4 {
 		t.Fatalf("third poll claimed %+v, want all 4 shards again", list.reqs)
+	}
+}
+
+// TestClaimScheduler_ShardsRotateOnlyForABucketWithWork covers rotation
+// with Shards, where every bucket is a candidate whether it has work or
+// not: at its cap, past the term, the scheduler claims one waiting bucket
+// before it gives a held segment back. An empty bucket is given back
+// instead and the held segment keeps its lease; a bucket with work takes
+// the held segment's place.
+func TestClaimScheduler_ShardsRotateOnlyForABucketWithWork(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	store := newFakeStore(c)
+	list := &shardedList{n: 4, work: []string{"0"}}
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: list, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: 10 * time.Second,
+	})
+	s.now = c.now
+	s.term = 10 * time.Second
+
+	// A round is one Next after tick: the keys it served, and the claim
+	// calls it made, each as its keys.
+	type round struct{ served, claimed string }
+	run := func(tick time.Duration) round {
+		t.Helper()
+		c.tick(tick)
+		list.reqs = nil
+		batches, err := s.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r round
+		for _, b := range batches {
+			r.served += b.Key
+			s.Drained(ctx, b.Key)
+		}
+		var calls []string
+		for _, req := range list.reqs {
+			calls = append(calls, strings.Join(req.Segments, ""))
+		}
+		r.claimed = strings.Join(calls, ",")
+		return r
+	}
+	check := func(step string, got, want round) {
+		t.Helper()
+		if got != want {
+			t.Fatalf("%s: served %q with claims %q, want %q with %q", step, got.served, got.claimed, want.served, want.claimed)
+		}
+	}
+
+	check("first poll", run(0), round{"0", "0"})
+	epoch := s.held["0"].lease.Epoch
+
+	// Past the term, the three empty buckets are eligible as far as the
+	// store knows. Each Next claims one of them before shard 0: empty, it
+	// is given back, paused for the poll interval, and shard 0 keeps its
+	// lease. Once all three are paused nothing is waiting any more.
+	check("probe 1", run(11*time.Second), round{"0", "1,0"})
+	check("probe 2", run(time.Second), round{"0", "2,0"})
+	check("probe 3", run(time.Second), round{"0", "3,0"})
+	check("nothing waiting", run(time.Second), round{"0", "0"})
+	if e := s.held["0"].lease.Epoch; e != epoch {
+		t.Fatalf("shard 0 has epoch %d, want %d: it was given back for an empty bucket", e, epoch)
+	}
+	for _, k := range []string{"1", "2", "3"} {
+		if store.owner("sync", k) != "" {
+			t.Fatalf("empty shard %s is held", k)
+		}
+	}
+
+	// Work appears in shard 3. The next poll finds the empty buckets'
+	// pauses over, so they are looked at again, in order; shard 3, once
+	// claimed, takes shard 0's place.
+	list.work = append(list.work, "3")
+	check("next poll", run(10*time.Second), round{"0", "0"})
+	check("probe 1 again", run(time.Second), round{"0", "1,0"})
+	check("probe 2 again", run(time.Second), round{"0", "2,0"})
+	check("shard 3 has work", run(time.Second), round{"3", "3"})
+	if store.owner("sync", "0") != "" {
+		t.Fatal("shard 0 was not given back for shard 3")
+	}
+
+	// Shard 0 now waits with work, behind the empty buckets in the
+	// fairness order. Once shard 3 has held past the term it gets the
+	// same treatment: the empty buckets are claimed and given back, then
+	// shard 0 takes its place.
+	check("probe 1 for shard 3", run(11*time.Second), round{"3", "1,3"})
+	check("probe 2 for shard 3", run(time.Second), round{"3", "2,3"})
+	check("shard 0 takes over", run(time.Second), round{"0", "0"})
+	if store.owner("sync", "3") != "" {
+		t.Fatal("shard 3 was not given back for shard 0")
 	}
 }
 

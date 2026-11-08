@@ -149,13 +149,13 @@ grow without bound.
 | `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `failure` with `error.type`) |
 | `eventsourcing.automation.acquisitions` | counter | Calls to acquire segments, by `eventsourcing.result`; while they fail the instance gets no new segments |
 | `eventsourcing.automation.segment.grants` | counter | Segments granted to this instance |
-| `eventsourcing.automation.segment.waiting` | gauge | Segments with work and no owner. Every instance reports it: aggregate with max |
+| `eventsourcing.automation.segment.waiting` | gauge | Segments with no owner whose pause has passed. With `Query` these have work; with `Shards` empty buckets count too. Every instance reports it: aggregate with max |
 | `eventsourcing.automation.segment.lost` | counter | Segment leases this instance lost to expiry or another instance |
 
 Alert on `phase{eventsourcing.automation.phase="stalled"} == 1`, on
-`segment.waiting` that stays above zero (the instances hold too few
-segments to keep up), and on a rising `segment.lost`, which means work
-outlives its leases.
+`segment.waiting` that stays above zero with `Query` segments (the
+instances hold too few segments to keep up), and on a rising
+`segment.lost`, which means work outlives its leases.
 
 ## Add custom attributes
 

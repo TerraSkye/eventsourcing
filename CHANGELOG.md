@@ -88,6 +88,19 @@ release may break the API; every break is listed under **Breaking**.
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
 
+### Fixed
+
+- The automation scheduler rotated a held segment out after its term
+  whenever any other segment was eligible, and with `Shards(n)` every
+  bucket nobody holds is, empty or not: with more buckets than
+  `MaxSegments`, a segment with work was given back every term to look
+  at empty buckets. The scheduler now claims one waiting segment before
+  it gives a held one back: with work, it takes the held segment's
+  place; empty, it is released and the held segment keeps its lease.
+  The `eventsourcing.automation.segment.waiting` gauge is documented as
+  what it reports, segments with no owner whose pause has passed, which
+  with `Shards` includes empty buckets.
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking

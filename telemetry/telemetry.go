@@ -266,10 +266,13 @@ var (
 	)
 
 	// AutomationSegmentWaiting records the segments of an automation that
-	// have work and are waiting for an owner, as of an instance's last
-	// acquisition, labelled by [AttrAutomationName]. Every instance reports
-	// it, so aggregate it with max rather than sum. A value that stays
-	// above zero means the instances hold too few segments to keep up.
+	// are waiting for an owner, as of an instance's last acquisition:
+	// candidates nobody holds whose pause has passed, labelled by
+	// [AttrAutomationName]. Every instance reports it, so aggregate it
+	// with max rather than sum. With [automation.Query] every candidate
+	// has work, so a value that stays above zero means the instances hold
+	// too few segments to keep up. With [automation.Shards] every bucket
+	// is a candidate, so empty buckets count too.
 	AutomationSegmentWaiting, _ = meter.Int64Gauge(
 		"eventsourcing.automation.segment.waiting",
 		metric.WithDescription("Automation segments waiting for an owner, as of an instance's last acquisition"),

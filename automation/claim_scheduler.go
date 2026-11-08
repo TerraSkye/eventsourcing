@@ -161,20 +161,20 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 		}
 	}
 
-	// Rotation: when others are waiting and we are at our cap, give back
-	// the segment we have held longest past the term. Work-conserving:
+	// Rotation: when others are waiting and we are at our cap, the segment
+	// we have held longest past the term makes room for one of them.
+	// Whether a waiting segment has work is only known once it is claimed
+	// (with Shards every bucket is a candidate, empty or not), so the
+	// segment to rotate out is kept while one waiting segment is acquired
+	// on top of the cap and claimed first: with work, it takes the place;
+	// empty, it is given back and nothing rotates. Work-conserving:
 	// nothing is released while no segment is waiting, and a segment
 	// whose batch still runs is not released at all.
+	var rotate *heldSegment
 	if s.lastEligible > 0 && len(s.held) >= s.maxSegments {
-		var oldest *heldSegment
 		for _, h := range s.held {
-			if !h.busy && now.Sub(h.since) >= s.term && (oldest == nil || h.since.Before(oldest.since)) {
-				oldest = h
-			}
-		}
-		if oldest != nil {
-			if err := s.release(ctx, oldest, 0); err != nil {
-				return nil, err
+			if !h.busy && now.Sub(h.since) >= s.term && (rotate == nil || h.since.Before(rotate.since)) {
+				rotate = h
 			}
 		}
 	}
@@ -188,6 +188,9 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 	if max < 0 {
 		max = 0
 	}
+	if rotate != nil {
+		max++ // the one that may take rotate's place
+	}
 	res, err := s.store.Acquire(ctx, s.name, s.owner, cands, max, s.ttl)
 	if err != nil {
 		return nil, fmt.Errorf("acquire: %w", err)
@@ -196,6 +199,21 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 	for _, l := range res.Granted {
 		s.held[l.Key] = &heldSegment{lease: l, since: now}
 	}
+
+	var batches []Batch[T]
+	if rotate != nil && len(res.Granted) > 0 {
+		got, err := s.claimOrRelease(ctx, []string{res.Granted[0].Key})
+		if err != nil {
+			return nil, err
+		}
+		if len(got) > 0 {
+			if err := s.release(ctx, rotate, 0); err != nil {
+				return nil, err
+			}
+			s.lastEligible++ // rotate is waiting now: nobody holds it, unpaused
+		}
+		batches = got
+	}
 	var free []string
 	for k, h := range s.held {
 		if !h.busy {
@@ -203,24 +221,31 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 		}
 	}
 	if len(free) == 0 {
-		return nil, nil
+		return batches, nil
 	}
-
-	batches, err := s.claimHeld(ctx, free)
+	got, err := s.claimOrRelease(ctx, free)
 	if err != nil {
 		return nil, err
 	}
+	return append(batches, got...), nil
+}
 
-	// A held segment with nothing to claim is idle: give it back now, so
-	// the slot goes to a segment that has work, and do not take it again
-	// before the next poll (the churn guard: with Shards, most buckets are
-	// empty most of the time).
+// claimOrRelease claims for the held segments keys in one call. A segment
+// with items is busy with its batch from now on. A segment with nothing
+// to claim is idle: it is given back at once, so the slot goes to a
+// segment that has work, and not taken again before the next poll (the
+// churn guard: with Shards, most buckets are empty most of the time).
+func (s *claimScheduler[T]) claimOrRelease(ctx context.Context, keys []string) ([]Batch[T], error) {
+	batches, err := s.claimHeld(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
 	got := map[string]time.Time{}
 	for _, b := range batches {
 		got[b.Key] = b.Items[0].Deadline
 	}
 	var idle []*heldSegment
-	for _, k := range free {
+	for _, k := range keys {
 		h := s.held[k]
 		if end, ok := got[k]; ok {
 			h.served = true
