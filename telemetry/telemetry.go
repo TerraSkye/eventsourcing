@@ -52,7 +52,7 @@ const (
 	// AttrResult labels an outcome: "success" or "failure", and also
 	// "rejected" for a command, "skipped" for an event handler,
 	// "claim_lost" for a projection batch, "acquired" or "held" for a
-	// projection claim, and "deferred" for automation work.
+	// projection claim, and "deferred" or "canceled" for automation work.
 	AttrResult = attribute.Key("eventsourcing.result")
 
 	// AttrErrorType classifies a failure, following the OpenTelemetry
@@ -238,8 +238,13 @@ var (
 	// AutomationWorkDuration records how long an automation's work took for
 	// one item, in seconds, labelled by [AttrAutomationName] and
 	// [AttrResult]: "success", "deferred" for an automation.Deferred
-	// return, or "failure" with [AttrErrorType]. Its count is the number of
-	// items worked. See [WithWorkTelemetry].
+	// return, "canceled" for work that returned the cancellation of its
+	// context while the run was stopping, or "failure" with
+	// [AttrErrorType]. Its count is the number of items the work ran, which
+	// differs from [AutomationItems]: an item whose lease expired before
+	// its work started is counted there as a failure but never reaches the
+	// work, so it is not recorded here, and a cancelled item is recorded
+	// here but not counted there. See [WithWorkTelemetry].
 	AutomationWorkDuration, _ = meter.Float64Histogram(
 		"eventsourcing.automation.work.duration",
 		metric.WithDescription("Duration of an automation's work for one item, labelled by eventsourcing.result"),
@@ -257,10 +262,10 @@ var (
 		metric.WithUnit("{acquisition}"),
 	)
 
-	// AutomationSegmentGrants counts the segments granted to an instance of
+	// AutomationSegmentGranted counts the segments granted to an instance of
 	// an automation, labelled by [AttrAutomationName].
-	AutomationSegmentGrants, _ = meter.Int64Counter(
-		"eventsourcing.automation.segment.grants",
+	AutomationSegmentGranted, _ = meter.Int64Counter(
+		"eventsourcing.automation.segment.granted",
 		metric.WithDescription("Automation segments granted to an instance"),
 		metric.WithUnit("{segment}"),
 	)

@@ -644,6 +644,46 @@ func TestClaimScheduler_LostSegmentKeepsItsDeferral(t *testing.T) {
 	}
 }
 
+// TestClaimScheduler_LostSegmentGetsNoSecondBatch covers a segment whose
+// lease is lost while its batch still runs: the segment stays busy, so
+// Next neither takes it again nor claims a second batch for it before the
+// batch drains, which would run items of one chain twice at once. Once
+// the batch has drained, the segment is a candidate again.
+func TestClaimScheduler_LostSegmentGetsNoSecondBatch(t *testing.T) {
+	ctx := context.Background()
+	clk := newClock()
+	store := newFakeStore(clk)
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: endlessList{"a"}, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: time.Second,
+	})
+	s.now = clk.now
+
+	batches, err := s.Next(ctx)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next = %d batches, %v; want one", len(batches), err)
+	}
+	clk.tick(s.ttl + time.Second) // the batch hangs past the segment lease
+	again, err := s.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("Next after the lease was lost = %d batches, want none: the first batch of the segment is still running", len(again))
+	}
+	if store.owner("sync", "a") != "" {
+		t.Fatal("the lost segment was taken again while its batch still runs")
+	}
+
+	if err := s.Drained(ctx, "a"); err != nil {
+		t.Fatalf("Drained of a lost segment: %v", err)
+	}
+	batches, err = s.Next(ctx)
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next after the batch drained = %d batches, %v; want one", len(batches), err)
+	}
+}
+
 // itemsList is an unsegmented list that always has one more item.
 type itemsList struct{}
 

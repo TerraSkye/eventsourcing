@@ -1,6 +1,6 @@
 # How to add OpenTelemetry tracing
 
-Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware.
+Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware. This guide shows the wiring; the [telemetry reference](../reference/telemetry.md) lists every span, metric and attribute the package produces.
 
 ## Prerequisites
 
@@ -136,19 +136,23 @@ defer reg.Unregister()
 
 Each item runs in a `process item` span, tagged with
 `eventsourcing.automation.name`. When the work dispatches a command through a bus with
-`telemetry.CommandTelemetry`, the command's span is its child. A deferral
-adds a `segment deferred` event to the span; pausing and resuming from
-the dashboard are `pause automation` and `resume automation` spans. Segment
-keys go on spans only, never on metrics, since one series per tenant would
-grow without bound.
+`telemetry.CommandTelemetry`, the command's span is its child. Work that
+returns `automation.Deferred` adds a `segment_deferred` event to the span,
+with the time the segment is paused until as
+`eventsourcing.automation.deferred_until` when the deferral names one.
+Work that returns its context's cancellation while the run is stopping is
+recorded as `canceled`, which the runner does not count. Pausing and
+resuming from the dashboard are `pause automation` and `resume automation`
+spans. Segment keys go on spans only, never on metrics, since one series
+per tenant would grow without bound.
 
 | Metric | Type | What it reports |
 |---|---|---|
 | `eventsourcing.automation.phase` | gauge | 1 for the current phase, per `eventsourcing.automation.phase`, on this instance |
 | `eventsourcing.automation.items` | counter | Items worked on this instance, by `eventsourcing.result` (`success`, `failure`, `deferred`) |
-| `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `failure` with `error.type`) |
+| `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `canceled`, `failure` with `error.type`). Its count differs from `items`: an item whose lease expired before its work started is a failure there but never reaches the work, and a cancelled item is recorded here only |
 | `eventsourcing.automation.acquisitions` | counter | Calls to acquire segments, by `eventsourcing.result`; while they fail the instance gets no new segments |
-| `eventsourcing.automation.segment.grants` | counter | Segments granted to this instance |
+| `eventsourcing.automation.segment.granted` | counter | Segments granted to this instance |
 | `eventsourcing.automation.segment.waiting` | gauge | Segments with no owner whose pause has passed. With `Query` these have work; with `Shards` empty buckets count too. Every instance reports it: aggregate with max |
 | `eventsourcing.automation.segment.lost` | counter | Segment leases this instance lost to expiry or another instance |
 

@@ -55,7 +55,8 @@ type Store interface {
 	// SaveStatus publishes status as what instance status.Owner of the
 	// automation name is doing now, so other instances and a dashboard can
 	// follow it. The status is live for ttl; LoadStatuses leaves out
-	// statuses older than that, and a store may delete them.
+	// statuses older than that, and a store may delete them. A ttl of 0
+	// withdraws the instance's status: a stopping runner publishes that.
 	SaveStatus(ctx context.Context, name string, status Status, ttl time.Duration) error
 
 	// LoadStatuses returns the status of every live instance of the
