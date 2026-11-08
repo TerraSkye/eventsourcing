@@ -9,6 +9,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `AppendResult.Successful` is removed. It duplicated the error: stores set
+  it to false next to a non-nil error and to true when nothing was saved,
+  so it never told a caller more than `err == nil` does. Check the error
+  instead; `StreamID`, `NextExpectedVersion` and `GlobalPosition` stay.
 - `automation`: `Definition.TodoList` is now the list itself, a
   `TodoList[T]` (anything with `Claim(ctx, ClaimRequest) ([]T, error)`),
   and the projection that keeps it moves to `Definition.Projection`. The

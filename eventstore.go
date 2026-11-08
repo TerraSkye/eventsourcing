@@ -59,10 +59,9 @@ type EventStore interface {
 	Close() error
 }
 
-// AppendResult describes the outcome of an [EventStore.Save] call.
+// AppendResult describes the outcome of an [EventStore.Save] call. Whether
+// the events were persisted is reported by Save's error, not by the result.
 type AppendResult struct {
-	// Successful reports whether the events were persisted.
-	Successful bool
 	// StreamID is the stream the events were saved to.
 	StreamID string
 	// NextExpectedVersion is the version the stream's next [Revision] should
