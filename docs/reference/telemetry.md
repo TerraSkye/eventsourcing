@@ -46,7 +46,7 @@ func WithAttributeGetter(fn func(ctx context.Context) []attribute.KeyValue) Opti
 ```
 
 - `WithOperation` sets a fixed span name. `WithOperationGetter` derives it at call time from the context and the current name; an empty result keeps the current name. Both apply to the command, query, event handler and work spans, and to the event store's `append events` span. `WithProjectionStoreTelemetry` and `WithAutomationStoreTelemetry` ignore them.
-- `WithAttributes` adds attributes to every span of the wrapper. `WithAttributeGetter` adds attributes derived from the context at call time; it is not applied to the event store's spans.
+- `WithAttributes` adds attributes to every span of the wrapper. `WithAttributeGetter` adds attributes derived from the context at call time to every span of the wrapper.
 - Only `WithAttributes` reaches the metrics, and only for the event store: an `AttrDBSystemName` set with it is added to the store's metrics as well as its spans.
 
 ## Spans

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/terraskye/eventsourcing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // TestSave_ConcurrentCallsSharingMetadataMapRace verifies that
@@ -422,6 +423,75 @@ func TestEventStore_Metrics(t *testing.T) {
 				t.Errorf("recorded %d %s increments, want %d", n, appended, tt.wantAppended)
 			}
 		})
+	}
+}
+
+// TestEventStore_AttributeGetter covers what WithEventStoreTelemetry's doc
+// comment promises of [WithAttributeGetter]: an attribute it derives from
+// the context is on the append, load and read all spans, and on none of
+// the store's metrics.
+func TestEventStore_AttributeGetter(t *testing.T) {
+	type tenantKey struct{}
+	tenant := attribute.Key("tenant.id")
+	ctx := context.WithValue(context.Background(), tenantKey{}, "acme")
+	rec := durationRecorder
+	metrics := []string{
+		"eventsourcing.event_store.duration",
+		"eventsourcing.event_store.appended.events",
+		"eventsourcing.event_store.loaded.events",
+	}
+	from := make(map[string]int, len(metrics))
+	for _, name := range metrics {
+		from[name] = len(rec.recordsFor(name))
+	}
+	before := spanNameRecorder.len()
+
+	stub := &stubStore{events: []*eventsourcing.Envelope{{StreamID: "agg-1", Event: stubEvent{}, Version: 1, GlobalPosition: 1}}}
+	store := WithEventStoreTelemetry(stub, WithAttributeGetter(func(ctx context.Context) []attribute.KeyValue {
+		if id, ok := ctx.Value(tenantKey{}).(string); ok {
+			return []attribute.KeyValue{tenant.String(id)}
+		}
+		return nil
+	}))
+	if _, err := store.Save(ctx, []eventsourcing.Envelope{{StreamID: "agg-1", Event: stubEvent{}}}, eventsourcing.Any{}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	it, err := store.LoadStream(ctx, "agg-1")
+	if err != nil {
+		t.Fatalf("LoadStream() error = %v", err)
+	}
+	for it.Next() {
+	}
+	if err := it.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := store.(eventsourcing.GlobalReader).ReadAll(ctx, 0, eventsourcing.ReadOptions{}); err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+
+	spans := spanNameRecorder.spansSince(before)
+	var names []string
+	for _, s := range spans {
+		names = append(names, s.name)
+		if got := attrString(s.attrs, tenant); got != "acme" {
+			t.Errorf("span %q has %s = %q, want %q from the attribute getter", s.name, tenant, got, "acme")
+		}
+	}
+	if want := []string{"append events", "load events", "read all events"}; !slices.Equal(names, want) {
+		t.Fatalf("spans started = %v, want %v", names, want)
+	}
+
+	var n int
+	for _, name := range metrics {
+		for _, r := range rec.recordsFor(name)[from[name]:] {
+			n++
+			if v, ok := r.attrs.Value(tenant); ok {
+				t.Errorf("%s recorded with %s = %q, want no attribute from the getter on a metric", r.name, tenant, v.AsString())
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no metrics were recorded")
 	}
 }
 

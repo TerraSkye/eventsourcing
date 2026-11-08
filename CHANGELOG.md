@@ -160,6 +160,12 @@ release may break the API; every break is listed under **Breaking**.
   The `eventsourcing.automation.segment.waiting` gauge is documented as
   what it reports, segments with no owner whose pause has passed, which
   with `Shards` includes empty buckets.
+- `telemetry`: `WithAttributeGetter` was ignored by `WithEventStoreTelemetry`
+  and `EventStoreTelemetry`, so an attribute derived from the context never
+  reached the store's spans while every other wrapper applied it. The
+  `append events`, `load events` and `read all events` spans now carry the
+  getter's attributes; as before, only `WithAttributes` reaches the
+  metrics.
 
 ## [0.5.0] - 2026-10-29
 
