@@ -61,7 +61,7 @@ func (liveDep) IsLive(context.Context) (bool, error) { return true, nil }
 // and item counts.
 func TestAutomationTelemetry_Runner(t *testing.T) {
 	name := newAutomationName()
-	list := &items{pending: []string{"ok", "later", "bad"}}
+	list := &items{pending: []string{"ok", "bad", "later"}}
 	work := WithWorkTelemetry(name, func(_ context.Context, id string) error {
 		switch id {
 		case "later":
@@ -88,8 +88,8 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 	t.Cleanup(func() { _ = reg.Unregister() })
 
 	before := spanNameRecorder.len()
-	// RunOnce stops at the deferral: the unsegmented list is paused for an
-	// hour. Run the rest with a second RunOnce once the pause is lifted.
+	// The deferral comes last: it pauses the unsegmented list for an hour,
+	// so RunOnce stops there and nothing after it would be worked.
 	if _, err := r.RunOnce(t.Context()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -111,8 +111,8 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 			t.Errorf("failure without error.type: %v", rec.attrs)
 		}
 	}
-	if want := []string{"success", "deferred"}; !slices.Equal(results, want) {
-		t.Errorf("work results = %v, want %v: the deferral stops the run before bad", results, want)
+	if want := []string{"success", "failure", "deferred"}; !slices.Equal(results, want) {
+		t.Errorf("work results = %v, want %v", results, want)
 	}
 
 	observed := map[string]float64{}
@@ -129,7 +129,7 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 	want := map[string]float64{
 		"eventsourcing.automation.items/success":  1,
 		"eventsourcing.automation.items/deferred": 1,
-		"eventsourcing.automation.items/failure":  0,
+		"eventsourcing.automation.items/failure":  1,
 		"eventsourcing.automation.phase/idle":     1,
 		"eventsourcing.automation.phase/working":  0,
 		"eventsourcing.automation.phase/paused":   0,

@@ -185,11 +185,11 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 	if err != nil {
 		return nil, fmt.Errorf("segments: %w", err)
 	}
-	max := s.maxSegments - len(s.held)
-	if max < 0 {
-		max = 0
+	room := s.maxSegments - len(s.held)
+	if room < 0 {
+		room = 0
 	}
-	res, err := s.store.Acquire(ctx, s.name, s.owner, cands, max, s.ttl)
+	res, err := s.store.Acquire(ctx, s.name, s.owner, cands, room, s.ttl)
 	if err != nil {
 		return nil, fmt.Errorf("acquire: %w", err)
 	}
