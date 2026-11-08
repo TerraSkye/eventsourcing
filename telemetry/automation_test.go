@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -94,14 +95,23 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
-	var spans []string
+	var spans, events []string
 	for _, s := range spanNameRecorder.spansSince(before) {
 		if attrString(s.attrs, AttrAutomationName) == name {
 			spans = append(spans, s.name)
+			for _, ev := range s.events {
+				events = append(events, s.name+": "+ev.name)
+			}
 		}
 	}
 	if len(spans) == 0 || spans[0] != "process item" {
 		t.Errorf("spans for the automation = %v, want process item spans", spans)
+	}
+	// The runner defers the segment through the store after the work
+	// returned, outside the work's span; only the work's own event records
+	// the deferral.
+	if want := []string{"process item: segment_deferred"}; !slices.Equal(events, want) {
+		t.Errorf("span events = %v, want %v", events, want)
 	}
 
 	var results []string
@@ -144,23 +154,87 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 
 // TestWithWorkTelemetry_Results checks the result label for each kind of
 // return, the error type on a failure, and that the error passes through.
+// Work that returns the cancellation of its context is "canceled", as the
+// run is stopping; a lease deadline it ran past, or a cancellation it
+// returns while its context is live, is a failure like any other.
 func TestWithWorkTelemetry_Results(t *testing.T) {
 	name := newAutomationName()
 	boom := errors.New("boom")
-	work := WithWorkTelemetry(name, func(_ context.Context, ret error) error { return ret })
-	ctx := t.Context()
-	for _, ret := range []error{nil, automation.Deferred(time.Time{}), boom, context.DeadlineExceeded} {
-		if err := work(ctx, ret); !errors.Is(err, ret) && err != ret {
-			t.Fatalf("work(%v) = %v, want it passed through", ret, err)
+	work := WithWorkTelemetry(name, func(ctx context.Context, ret error) error {
+		if errors.Is(ret, errFromContext) {
+			return fmt.Errorf("send: %w", ctx.Err())
+		}
+		return ret
+	})
+	live := t.Context()
+	canceled, cancel := context.WithCancel(live)
+	cancel()
+	expired, cancel := context.WithDeadline(live, time.Now().Add(-time.Second))
+	defer cancel()
+	for _, tc := range []struct {
+		ctx context.Context
+		ret error
+	}{
+		{live, nil},
+		{live, automation.Deferred(time.Time{})},
+		{live, boom},
+		{live, context.DeadlineExceeded},
+		{live, context.Canceled},
+		{canceled, errFromContext},
+		{expired, errFromContext},
+		{canceled, boom},
+	} {
+		err := work(tc.ctx, tc.ret)
+		if tc.ret == errFromContext {
+			if !errors.Is(err, tc.ctx.Err()) {
+				t.Fatalf("work(ctx.Err()) = %v, want it passed through", err)
+			}
+		} else if !errors.Is(err, tc.ret) && err != tc.ret {
+			t.Fatalf("work(%v) = %v, want it passed through", tc.ret, err)
 		}
 	}
 	var got []string
 	for _, rec := range forAutomation(durationRecorder.recordsFor("eventsourcing.automation.work.duration"), name) {
 		got = append(got, attrString(rec.attrs, AttrResult)+"/"+attrString(rec.attrs, AttrErrorType))
 	}
-	want := []string{"success/", "deferred/", "failure/_OTHER", "failure/deadline_exceeded"}
+	want := []string{
+		"success/", "deferred/", "failure/_OTHER", "failure/deadline_exceeded", "failure/canceled",
+		"canceled/", "failure/deadline_exceeded", "failure/_OTHER",
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("results = %v, want %v", got, want)
+	}
+}
+
+// errFromContext tells the work of TestWithWorkTelemetry_Results to return
+// its context's error.
+var errFromContext = errors.New("return ctx.Err()")
+
+// TestWithWorkTelemetry_DeferredEvent checks that a deferral adds the
+// segment_deferred event to the work's span, with the time deferred until
+// when the deferral names one.
+func TestWithWorkTelemetry_DeferredEvent(t *testing.T) {
+	name := newAutomationName()
+	until := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	work := WithWorkTelemetry(name, func(_ context.Context, ret error) error { return ret })
+	before := spanNameRecorder.len()
+	for _, ret := range []error{automation.Deferred(until), automation.Deferred(time.Time{}), nil} {
+		_ = work(t.Context(), ret)
+	}
+	var got []string
+	for _, s := range spanNameRecorder.spansSince(before) {
+		if attrString(s.attrs, AttrAutomationName) != name {
+			continue
+		}
+		var events []string
+		for _, ev := range s.events {
+			events = append(events, ev.name+"/"+attrString(ev.attrs, "eventsourcing.automation.deferred_until"))
+		}
+		got = append(got, fmt.Sprint(events))
+	}
+	want := []string{"[segment_deferred/2026-11-08T12:00:00Z]", "[segment_deferred/]", "[]"}
+	if !slices.Equal(got, want) {
+		t.Errorf("events per span = %v, want %v", got, want)
 	}
 }
 

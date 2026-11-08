@@ -45,9 +45,9 @@ var (
 	)
 )
 
-// StatusReporter is what [ObserveAutomation] reads: an *automation.Runner
-// of any item type.
-type StatusReporter interface {
+// AutomationStatusReporter is what [ObserveAutomation] reads: an
+// *automation.Runner of any item type.
+type AutomationStatusReporter interface {
 	Name() string
 	Status() automation.Status
 }
@@ -58,7 +58,7 @@ type StatusReporter interface {
 // read each time the metrics are collected.
 //
 // Call Unregister on the returned registration when r is no longer run.
-func ObserveAutomation(r StatusReporter) (metric.Registration, error) {
+func ObserveAutomation(r AutomationStatusReporter) (metric.Registration, error) {
 	name := AttrAutomationName.String(r.Name())
 	return meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		st := r.Status()
@@ -87,9 +87,16 @@ func ObserveAutomation(r StatusReporter) (metric.Registration, error) {
 // automation's name, so a command the work dispatches through a bus with
 // [CommandTelemetry] shows up as its child. It records
 // [AutomationWorkDuration] for every item, labelled by [AttrResult]. A
-// returned automation.Deferred is not an error: it marks the span OK and
-// is recorded with result "deferred". Any other error marks the span as
-// failed and is recorded with result "failure" and an [AttrErrorType].
+// returned automation.Deferred is not an error: it marks the span OK,
+// adds a "segment_deferred" event to it, with the time the segment is
+// paused until as eventsourcing.automation.deferred_until when the
+// deferral names one, and is recorded with result "deferred". Work that
+// returns the cancellation of its context, because the run is stopping,
+// is recorded with result "canceled" and leaves the span's status unset,
+// as the runner does not count it either. Any other error marks the span
+// as failed and is recorded with result "failure" and an [AttrErrorType];
+// so is a lease deadline the work ran past, which the runner counts as a
+// failure.
 //
 // [WithOperation] and [WithOperationGetter] rename the span, and
 // [WithAttributes] and [WithAttributeGetter] add attributes to it.
@@ -137,8 +144,12 @@ func WithWorkTelemetry[T any](name string, work automation.WorkFunc[T], options 
 			if !deferred.Until.IsZero() {
 				evAttrs = append(evAttrs, attribute.String("eventsourcing.automation.deferred_until", deferred.Until.Format(time.RFC3339)))
 			}
-			span.AddEvent("deferred", trace.WithAttributes(evAttrs...))
+			span.AddEvent("segment_deferred", trace.WithAttributes(evAttrs...))
 			span.SetStatus(codes.Ok, "")
+		case ctx.Err() == context.Canceled && errors.Is(err, context.Canceled):
+			// The run is stopping: the runner does not count the item, so
+			// it is neither a success nor a failure here.
+			metricAttrs = append(metricAttrs, AttrResult.String("canceled"))
 		default:
 			errType := AttrErrorType.String(errorType(err))
 			metricAttrs = append(metricAttrs, AttrResult.String("failure"), errType)
