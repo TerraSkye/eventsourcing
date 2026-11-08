@@ -33,7 +33,7 @@ type claimScheduler[T any] struct {
 	maxPerKey    int
 	maxSegments  int
 	term         time.Duration // how long a segment is kept while others wait
-	pollInterval time.Duration // idle churn guard: an empty segment is not re-acquired sooner
+	pollInterval time.Duration // idle churn guard: an empty segment is not taken again sooner
 	now          func() time.Time
 
 	owner string
@@ -47,8 +47,12 @@ type claimScheduler[T any] struct {
 }
 
 type heldSegment struct {
-	lease  SegmentLease
-	since  time.Time
+	lease SegmentLease
+	since time.Time
+
+	// served is set once the segment has been claimed for, with work or
+	// without: it had its turn, and goes to the back of the fairness
+	// order when it is given back.
 	served bool
 
 	// busy is set while the segment's batch runs. leaseEnd is when the
@@ -252,11 +256,17 @@ func (s *claimScheduler[T]) nextSegmented(ctx context.Context) ([]Batch[T], erro
 	return batches, nil
 }
 
-// claimOrRelease claims for the held segments keys in one call. A segment
-// with nothing to claim is idle: it is given back at once, so the slot
-// goes to a segment that has work, and not taken again before the next
-// poll (the churn guard: with Shards, most buckets are empty most of the
-// time). The segments with a batch are left for [claimScheduler.markBusy].
+// claimOrRelease claims for the held segments keys in one call. Every
+// one of them had its turn, work or not. A segment with nothing to claim
+// is idle: it is given back at once, so the slot goes to a segment that
+// has work, and it is not taken again before the next poll (the churn
+// guard: with Shards, most buckets are empty most of the time). Given
+// back as served, it goes to the back of the fairness order: with more
+// buckets than MaxSegments, each poll then probes the next bucket, and
+// one with work is reached within one poll per bucket. Released in place
+// it would keep its turn, as the pause is over by the next poll, and the
+// same empty bucket would be probed on every poll. The segments with a
+// batch are left for [claimScheduler.markBusy].
 func (s *claimScheduler[T]) claimOrRelease(ctx context.Context, keys []string) ([]Batch[T], error) {
 	batches, err := s.claimHeld(ctx, keys)
 	if err != nil {
@@ -267,10 +277,12 @@ func (s *claimScheduler[T]) claimOrRelease(ctx context.Context, keys []string) (
 		got[b.Key] = true
 	}
 	for _, k := range keys {
+		h := s.held[k]
+		h.served = true
 		if got[k] {
 			continue
 		}
-		if err := s.release(ctx, s.held[k], s.pollInterval); err != nil {
+		if err := s.release(ctx, h, s.pollInterval); err != nil {
 			return nil, err
 		}
 	}
@@ -285,7 +297,6 @@ func (s *claimScheduler[T]) claimOrRelease(ctx context.Context, keys []string) (
 func (s *claimScheduler[T]) markBusy(batches []Batch[T]) {
 	for _, b := range batches {
 		h := s.held[b.Key]
-		h.served = true
 		h.busy = true
 		h.leaseEnd = b.Items[0].Deadline
 	}

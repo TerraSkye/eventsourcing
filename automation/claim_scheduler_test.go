@@ -12,10 +12,20 @@ import (
 )
 
 // clock is a fake clock for the scheduler tests.
-type clock struct{ t time.Time }
+// clock is the fake clock of these tests. It stands still unless step is
+// set, which advances it on every reading, as a real clock does between
+// two statements of one Next.
+type clock struct {
+	t    time.Time
+	step time.Duration
+}
 
-func newClock() *clock                { return &clock{t: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)} }
-func (c *clock) now() time.Time       { return c.t }
+func newClock() *clock { return &clock{t: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)} }
+func (c *clock) now() time.Time {
+	t := c.t
+	c.t = c.t.Add(c.step)
+	return t
+}
 func (c *clock) tick(d time.Duration) { c.t = c.t.Add(d) }
 
 // fakeStore is a [Store] on a fake clock for the scheduler tests. The real
@@ -483,6 +493,54 @@ func TestClaimScheduler_ShardsRotateOnlyForABucketWithWork(t *testing.T) {
 	if store.owner("sync", "3") != "" {
 		t.Fatal("shard 3 was not given back for shard 0")
 	}
+}
+
+// TestClaimScheduler_PollingReachesEveryBucket covers polling alone with
+// more buckets than the instance may hold: nothing is busy, so no batch
+// nudges, and every poll probes one bucket. An empty bucket must go to
+// the back of the fairness order, so the bucket with work is reached
+// within one poll per bucket; released in place, it kept its turn and
+// was probed on every poll, and the bucket with work never came up.
+// The clock steps on every reading: the stores stamp a release later
+// than the acquire before it, and a clock that stood still would rank
+// the released bucket level with the others and first again by key.
+func TestClaimScheduler_PollingReachesEveryBucket(t *testing.T) {
+	ctx := context.Background()
+	c := newClock()
+	c.step = time.Microsecond
+	store := newFakeStore(c)
+	list := &shardedList{n: 4, work: []string{"3"}}
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: list, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 1, PollInterval: 10 * time.Second,
+	})
+	s.now = c.now
+
+	var probed []string
+	for poll := 1; poll <= list.n; poll++ {
+		if poll > 1 {
+			c.tick(10 * time.Second)
+		}
+		list.reqs = nil
+		batches, err := s.Next(ctx)
+		if err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+		for _, req := range list.reqs {
+			probed = append(probed, req.Segments...)
+		}
+		if len(batches) == 0 {
+			continue
+		}
+		if len(batches) != 1 || batches[0].Key != "3" {
+			t.Fatalf("poll %d: batches %+v, want one from shard 3", poll, batches)
+		}
+		if got := strings.Join(probed, ","); got != "0,1,2,3" {
+			t.Fatalf("probed %s, want 0,1,2,3: each bucket once", got)
+		}
+		return
+	}
+	t.Fatalf("shard 3 with work was not claimed in %d polls; probed %s", list.n, strings.Join(probed, ","))
 }
 
 // flakyStore is a fakeStore whose Release fails the next failures times.

@@ -171,6 +171,13 @@ release may break the API; every break is listed under **Breaking**.
   `append events`, `load events` and `read all events` spans now carry the
   getter's attributes; as before, only `WithAttributes` reaches the
   metrics.
+- `automation`: with `Shards` and more buckets than `MaxSegments`, an
+  instance that only polled probed the same empty bucket on every poll
+  and never reached a later bucket with work: a bucket found empty was
+  given back in place, and as its pause is over by the next poll, it was
+  first in line again. The scheduler now gives an empty bucket back as
+  served, so it goes to the back of the fairness order and each poll
+  probes the next bucket (#289).
 
 ## [0.5.0] - 2026-10-29
 
