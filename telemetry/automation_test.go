@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/memory"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // newAutomationName returns an automation name no other test uses, so the
@@ -62,7 +63,7 @@ func (liveDep) IsLive(context.Context) (bool, error) { return true, nil }
 // and item counts.
 func TestAutomationTelemetry_Runner(t *testing.T) {
 	name := newAutomationName()
-	list := &items{pending: []string{"ok", "later", "bad"}}
+	list := &items{pending: []string{"ok", "bad", "later"}}
 	work := WithWorkTelemetry(name, func(_ context.Context, id string) error {
 		switch id {
 		case "later":
@@ -89,8 +90,8 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 	t.Cleanup(func() { _ = reg.Unregister() })
 
 	before := spanNameRecorder.len()
-	// RunOnce stops at the deferral: the unsegmented list is paused for an
-	// hour. Run the rest with a second RunOnce once the pause is lifted.
+	// The deferral comes last: it pauses the unsegmented list for an hour,
+	// so RunOnce stops there and nothing after it would be worked.
 	if _, err := r.RunOnce(t.Context()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -121,8 +122,8 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 			t.Errorf("failure without error.type: %v", rec.attrs)
 		}
 	}
-	if want := []string{"success", "deferred"}; !slices.Equal(results, want) {
-		t.Errorf("work results = %v, want %v: the deferral stops the run before bad", results, want)
+	if want := []string{"success", "failure", "deferred"}; !slices.Equal(results, want) {
+		t.Errorf("work results = %v, want %v", results, want)
 	}
 
 	observed := map[string]float64{}
@@ -139,7 +140,7 @@ func TestAutomationTelemetry_Runner(t *testing.T) {
 	want := map[string]float64{
 		"eventsourcing.automation.items/success":  1,
 		"eventsourcing.automation.items/deferred": 1,
-		"eventsourcing.automation.items/failure":  0,
+		"eventsourcing.automation.items/failure":  1,
 		"eventsourcing.automation.phase/idle":     1,
 		"eventsourcing.automation.phase/working":  0,
 		"eventsourcing.automation.phase/paused":   0,
@@ -248,5 +249,35 @@ func TestWithWorkTelemetry_Operation(t *testing.T) {
 	}
 	if got := spanNameRecorder.since(before); !slices.Contains(got, "ship order") {
 		t.Errorf("spans = %v, want ship order", got)
+	}
+}
+
+// TestWithWorkTelemetry_SpanStatus covers the span status: a success, a
+// deferral and the cancellation of a stopping run leave it unset, as the
+// OpenTelemetry Trace API asks of instrumentation, and any other error
+// sets it to Error.
+func TestWithWorkTelemetry_SpanStatus(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	tests := map[string]struct {
+		ctx  context.Context
+		err  error
+		want codes.Code
+	}{
+		"success":  {t.Context(), nil, codes.Unset},
+		"deferred": {t.Context(), automation.Deferred(time.Time{}), codes.Unset},
+		"canceled": {canceled, context.Canceled, codes.Unset},
+		"failure":  {t.Context(), errors.New("boom"), codes.Error},
+	}
+	work := WithWorkTelemetry(newAutomationName(), func(_ context.Context, ret error) error { return ret })
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := spanNameRecorder.len()
+			_ = work(tt.ctx, tt.err)
+			spans := spanNameRecorder.spansSince(before)
+			if len(spans) != 1 || spans[0].status != tt.want {
+				t.Errorf("spans = %+v, want one with status %v", spans, tt.want)
+			}
+		})
 	}
 }

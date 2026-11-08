@@ -22,7 +22,7 @@ tracedHandler := telemetry.WithCommandTelemetry(createTaskHandler)
 
 Each command execution creates a span named `handle` and the command type, such as `handle CreateTask`, under the current trace. `telemetry.WithOperation("…")` sets another name. `telemetry.CommandTelemetry()` does the same for every handler on a bus, registered with `CommandBus.Use`.
 
-A command rejected with a `BusinessRuleViolationError` leaves the span OK and is recorded with `eventsourcing.result="rejected"`; any other error fails the span and is recorded as `failure`.
+A command rejected with a `BusinessRuleViolationError` leaves the span's status unset, as a success does, and is recorded with `eventsourcing.result="rejected"`; any other error fails the span and is recorded as `failure`.
 
 ## Wrap a query handler
 

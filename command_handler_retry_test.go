@@ -170,7 +170,7 @@ func (s *conflictOnceStore) Save(_ context.Context, envs []eventsourcing.Envelop
 	if s.saves.Add(1) == 1 {
 		return eventsourcing.AppendResult{}, &eventsourcing.StreamRevisionConflictError{Stream: envs[0].StreamID, ExpectedRevision: rev, ActualRevision: eventsourcing.Revision(1)}
 	}
-	return eventsourcing.AppendResult{Successful: true, StreamID: envs[0].StreamID}, nil
+	return eventsourcing.AppendResult{StreamID: envs[0].StreamID}, nil
 }
 
 func (s *conflictOnceStore) LoadStreamFrom(ctx context.Context, _ string, _ eventsourcing.StreamState) (*eventsourcing.Iterator[*eventsourcing.Envelope], error) {
