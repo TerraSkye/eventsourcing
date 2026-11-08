@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/terraskye/eventsourcing/automation"
@@ -17,13 +16,13 @@ var _ automation.Store = AutomationStore{}
 // automation's instances share its segments. Create one with
 // [WithAutomationStoreTelemetry].
 //
-// Acquire records [AutomationAcquisitions], [AutomationSegmentGrants] and
+// Acquire records [AutomationAcquisitions], [AutomationSegmentGranted] and
 // [AutomationSegmentWaiting]; Renew and Release record
-// [AutomationSegmentLost]. They run on every poll, so they are not traced.
-// A deferral (Defer, or a Release with DeferFor) adds a "segment deferred"
-// event to the current span, which is the work's span when the work is
-// wrapped with [WithWorkTelemetry]. SetPaused, an operator's action, runs
-// inside a "pause automation" or "resume automation" span.
+// [AutomationSegmentLost]. They run on every poll, so they are not traced,
+// and neither are Defer and a Release with DeferFor: the runner calls them
+// outside the work's span, and [WithWorkTelemetry] already notes the
+// deferral on that span. SetPaused, an operator's action, runs inside a
+// "pause automation" or "resume automation" span.
 type AutomationStore struct {
 	next automation.Store
 	cfg  *config
@@ -50,7 +49,7 @@ func (t AutomationStore) Acquire(ctx context.Context, name, owner string, candid
 	}
 	AutomationAcquisitions.Add(ctx, 1, metric.WithAttributes(nameAttr, AttrResult.String("success")))
 	if n := len(res.Granted); n > 0 {
-		AutomationSegmentGrants.Add(ctx, int64(n), metric.WithAttributes(nameAttr))
+		AutomationSegmentGranted.Add(ctx, int64(n), metric.WithAttributes(nameAttr))
 	}
 	AutomationSegmentWaiting.Record(ctx, int64(res.Eligible), metric.WithAttributes(nameAttr))
 	return res, nil
@@ -66,33 +65,13 @@ func (t AutomationStore) Renew(ctx context.Context, held []automation.SegmentLea
 // Release implements [automation.Store].
 func (t AutomationStore) Release(ctx context.Context, rel []automation.ReleaseRequest) ([]automation.SegmentLease, error) {
 	lost, err := t.next.Release(ctx, rel)
-	if err == nil {
-		span := trace.SpanFromContext(ctx)
-		for _, rr := range rel {
-			if rr.DeferFor > 0 && !slices.Contains(lost, rr.Lease) {
-				span.AddEvent("segment deferred", trace.WithAttributes(
-					AttrAutomationName.String(rr.Lease.Name),
-					AttrAutomationSegment.String(rr.Lease.Key),
-					attribute.Float64("eventsourcing.automation.deferred_for", rr.DeferFor.Seconds()),
-				))
-			}
-		}
-	}
 	countLost(ctx, lost)
 	return lost, err
 }
 
 // Defer implements [automation.Store].
 func (t AutomationStore) Defer(ctx context.Context, name, key string, d time.Duration) error {
-	err := t.next.Defer(ctx, name, key, d)
-	if err == nil {
-		trace.SpanFromContext(ctx).AddEvent("segment deferred", trace.WithAttributes(
-			AttrAutomationName.String(name),
-			AttrAutomationSegment.String(key),
-			attribute.Float64("eventsourcing.automation.deferred_for", d.Seconds()),
-		))
-	}
-	return err
+	return t.next.Defer(ctx, name, key, d)
 }
 
 // DeferredFor implements [automation.Store].
