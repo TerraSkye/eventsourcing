@@ -111,6 +111,16 @@ release may break the API; every break is listed under **Breaking**.
   the release at the end of a deferred batch failed, the pause the batch
   asked for was lost; it is now written with `Store.Defer`, as for a lost
   lease.
+- An automation's published status was late or missing when it mattered.
+  A phase change was only published at the top of the next round, so
+  after a pause each instance showed its old phase for up to two poll
+  intervals; a stalled instance dropped out of `Store.LoadStatuses`
+  during the outage, since its status was live for three poll intervals
+  while the backoff sleeps up to 30 seconds; and a stopped instance kept
+  showing its last phase until that expired. `Run` now publishes a phase
+  before it waits or backs off, publishes a stalled status with a ttl
+  that covers the sleep, and withdraws its status when it stops: a
+  `SaveStatus` with a ttl of 0 (#261).
 - `automation`: a segment whose lease was lost while its batch still ran
   (a `Renew` past the segment TTL) was forgotten at once, so the same
   `Next` could take it again and hand out a second batch for it while

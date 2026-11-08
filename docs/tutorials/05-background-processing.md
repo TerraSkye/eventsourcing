@@ -256,7 +256,7 @@ The automation only claims while its projection is **live**. While the projectio
 
 `NewRunner` also needs a `Store`, which keeps which instance holds which segment, and pauses. Like the projection store, it is chosen in `main` (Step 4): `memory.NewAutomationStore()` for one process, `sqlite.NewAutomationStore(db)` or `postgres.NewAutomationStore(pool)` when instances share a database.
 
-That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the package documentation.
+That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the [automation reference](../reference/automation.md).
 
 ## Step 4: Wire it up
 
