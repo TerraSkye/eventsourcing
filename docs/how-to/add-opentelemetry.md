@@ -1,6 +1,6 @@
 # How to add OpenTelemetry tracing
 
-Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware.
+Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware. This guide shows the wiring; the [telemetry reference](../reference/telemetry.md) lists every span, metric and attribute the package produces.
 
 ## Prerequisites
 
