@@ -71,12 +71,18 @@ nav:
       - Event registry: reference/event-registry.md
       - Serialization: reference/serialization.md
       - Iterator: reference/iterator.md
+      - GlobalReader: reference/global-reader.md
+      - projection: reference/projection.md
+      - automation: reference/automation.md
+      - dashboard: reference/dashboard.md
+      - telemetry: reference/telemetry.md
       - Context helpers: reference/context.md
       - Errors: reference/errors.md
       - Implementations:
           - memory.EventStore: reference/implementations/memory-store.md
           - postgres.EventStore: reference/implementations/postgres-store.md
           - sqlite: reference/implementations/sqlite.md
+          - kurrentdb.EventStore: reference/implementations/kurrentdb.md
   - Explanation:
       - Event sourcing concepts: explanation/event-sourcing.md
       - CQRS: explanation/cqrs.md
