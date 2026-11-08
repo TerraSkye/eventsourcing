@@ -160,6 +160,13 @@ release may break the API; every break is listed under **Breaking**.
   The `eventsourcing.automation.segment.waiting` gauge is documented as
   what it reports, segments with no owner whose pause has passed, which
   with `Shards` includes empty buckets.
+- `automation`: with `Shards` and more buckets than `MaxSegments`, an
+  instance that only polled probed the same empty bucket on every poll
+  and never reached a later bucket with work: a bucket found empty was
+  given back in place, and as its pause is over by the next poll, it was
+  first in line again. The scheduler now gives an empty bucket back as
+  served, so it goes to the back of the fairness order and each poll
+  probes the next bucket (#289).
 
 ## [0.5.0] - 2026-10-29
 
