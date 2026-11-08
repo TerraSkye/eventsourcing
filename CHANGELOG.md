@@ -88,6 +88,19 @@ release may break the API; every break is listed under **Breaking**.
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
 
+### Fixed
+
+- An automation's published status was late or missing when it mattered.
+  A phase change was only published at the top of the next round, so
+  after a pause each instance showed its old phase for up to two poll
+  intervals; a stalled instance dropped out of `Store.LoadStatuses`
+  during the outage, since its status was live for three poll intervals
+  while the backoff sleeps up to 30 seconds; and a stopped instance kept
+  showing its last phase until that expired. `Run` now publishes a phase
+  before it waits or backs off, publishes a stalled status with a ttl
+  that covers the sleep, and withdraws its status when it stops: a
+  `SaveStatus` with a ttl of 0 (#261).
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking
