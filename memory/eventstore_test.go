@@ -83,8 +83,8 @@ func TestSave_EmptySlice(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
-	if !result.Successful {
-		t.Error("expected successful result")
+	if result != (eventsourcing.AppendResult{}) {
+		t.Errorf("expected an empty result for an empty batch, got %+v", result)
 	}
 }
 
@@ -97,9 +97,6 @@ func TestSave_SingleEvent(t *testing.T) {
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
-	}
-	if !result.Successful {
-		t.Error("expected successful result")
 	}
 	if result.StreamID != "order-1" {
 		t.Errorf("expected StreamID 'order-1', got %q", result.StreamID)
@@ -138,16 +135,13 @@ func TestSave_MixedStreamIDs_Fails(t *testing.T) {
 		newEnvelope("order-2", &OrderCreated{OrderID: "order-2", CustomerID: "cust-2"}),
 	}
 
-	result, err := store.Save(context.Background(), events, eventsourcing.Any{})
+	_, err := store.Save(context.Background(), events, eventsourcing.Any{})
 
 	if err == nil {
 		t.Fatal("expected error for mixed stream IDs")
 	}
 	if !errors.Is(err, eventsourcing.ErrInvalidEventBatch) {
 		t.Errorf("expected ErrInvalidEventBatch, got %v", err)
-	}
-	if result.Successful {
-		t.Error("expected unsuccessful result")
 	}
 }
 
@@ -163,8 +157,8 @@ func TestSave_NoStream_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if !result.Successful {
-		t.Error("expected successful result")
+	if result.NextExpectedVersion != 1 {
+		t.Errorf("expected NextExpectedVersion 1, got %d", result.NextExpectedVersion)
 	}
 }
 
@@ -203,8 +197,8 @@ func TestSave_StreamExists_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if !result.Successful {
-		t.Error("expected successful result")
+	if result.NextExpectedVersion != 2 {
+		t.Errorf("expected NextExpectedVersion 2, got %d", result.NextExpectedVersion)
 	}
 }
 
@@ -760,8 +754,8 @@ func TestCommandHandler_CreateAggregateWithRevisionZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating a brand new aggregate at Revision(0) must succeed, got: %v", err)
 	}
-	if !result.Successful {
-		t.Errorf("expected successful result, got %+v", result)
+	if result.NextExpectedVersion != 1 {
+		t.Errorf("expected NextExpectedVersion 1, got %+v", result)
 	}
 	if errors.Is(err, eventsourcing.ErrInvalidRevision) {
 		t.Errorf("load of the empty stream rejected the initial revision")

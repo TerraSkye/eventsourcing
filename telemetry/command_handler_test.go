@@ -120,7 +120,7 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 			invoke: func(t *testing.T) {
 				h := CommandTelemetry()(func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
 					time.Sleep(work)
-					return eventsourcing.AppendResult{Successful: true}, nil
+					return eventsourcing.AppendResult{}, nil
 				})
 				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
 					t.Fatalf("command: %v", err)
@@ -132,7 +132,7 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 			invoke: func(t *testing.T) {
 				h := WithCommandTelemetry(func(ctx context.Context, cmd durationTestCommand) (eventsourcing.AppendResult, error) {
 					time.Sleep(work)
-					return eventsourcing.AppendResult{Successful: true}, nil
+					return eventsourcing.AppendResult{}, nil
 				})
 				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
 					t.Fatalf("command: %v", err)

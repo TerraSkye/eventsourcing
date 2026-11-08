@@ -153,7 +153,6 @@ Processes a single event. Use `OnEvent[T]` to create a strongly-typed handler, o
 
 ```go
 type AppendResult struct {
-    Successful          bool
     StreamID            string
     NextExpectedVersion uint64
 }

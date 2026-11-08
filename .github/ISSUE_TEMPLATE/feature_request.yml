@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a change to the API or a new capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the problem, not the solution. A request that explains what you could not do, and what you tried, is much easier to act on than one that names a feature.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what stops you today? Say what workaround you use, if any, and what it does not cover.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API shape
+      description: How would you like to call it? A sketch of the types, functions or options, and how existing code would change.
+      render: go
+    validations:
+      required: false
+  - type: checkboxes
+    id: non-goals
+    attributes:
+      label: Non-goals
+      options:
+        - label: I have read [What the library does not do](https://terraskye.github.io/eventsourcing/explanation/non-goals/), and this request is either not listed there or says what the workaround on that page does not cover.
+          required: true

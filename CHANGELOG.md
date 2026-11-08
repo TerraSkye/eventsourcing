@@ -9,6 +9,10 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `AppendResult.Successful` is removed. It duplicated the error: stores set
+  it to false next to a non-nil error and to true when nothing was saved,
+  so it never told a caller more than `err == nil` does. Check the error
+  instead; `StreamID`, `NextExpectedVersion` and `GlobalPosition` stay.
 - `automation`: `Definition.TodoList` is now the list itself, a
   `TodoList[T]` (anything with `Claim(ctx, ClaimRequest) ([]T, error)`),
   and the projection that keeps it moves to `Definition.Projection`. The
@@ -96,6 +100,17 @@ release may break the API; every break is listed under **Breaking**.
   operation still sets `Error`. A command rejection, a skipped event and
   a deferred automation item are not failures and leave the status unset
   too. A trace backend that filtered on status `Ok` sees `Unset` instead.
+### Fixed
+
+- `automation`: a failed `Store.Release` in the default scheduler left
+  its state wrong in two ways. When giving back an idle segment failed,
+  the segments with work had already been marked busy for batches that
+  the error then dropped, so they were renewed forever and never claimed
+  for or rotated out again while the runner reported `Idle`; they are now
+  marked busy only once the batches are certain to be handed out. When
+  the release at the end of a deferred batch failed, the pause the batch
+  asked for was lost; it is now written with `Store.Defer`, as for a lost
+  lease.
 
 ## [0.5.0] - 2026-10-29
 
