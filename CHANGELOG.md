@@ -88,6 +88,18 @@ release may break the API; every break is listed under **Breaking**.
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
 
+### Fixed
+
+- `automation`: a failed `Store.Release` in the default scheduler left
+  its state wrong in two ways. When giving back an idle segment failed,
+  the segments with work had already been marked busy for batches that
+  the error then dropped, so they were renewed forever and never claimed
+  for or rotated out again while the runner reported `Idle`; they are now
+  marked busy only once the batches are certain to be handed out. When
+  the release at the end of a deferred batch failed, the pause the batch
+  asked for was lost; it is now written with `Store.Defer`, as for a lost
+  lease.
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking
