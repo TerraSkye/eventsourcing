@@ -104,7 +104,7 @@ func eventContext() context.Context {
 func TestWithCommandLogging_Success(t *testing.T) {
 	logger, records := newTestLogger(t, slog.LevelDebug)
 	h := WithCommandLogging(logger, func(ctx context.Context, cmd testCommand) (eventsourcing.AppendResult, error) {
-		return eventsourcing.AppendResult{Successful: true}, nil
+		return eventsourcing.AppendResult{}, nil
 	})
 
 	if _, err := h(context.Background(), testCommand{}); err != nil {
@@ -170,7 +170,7 @@ func TestWithCommandLogging_BusinessRuleViolation(t *testing.T) {
 func TestWithCommandLogging_DisabledLevelSkipsAttributes(t *testing.T) {
 	logger, records := newTestLogger(t, slog.LevelError)
 	h := WithCommandLogging(logger, func(ctx context.Context, cmd testCommand) (eventsourcing.AppendResult, error) {
-		return eventsourcing.AppendResult{Successful: true}, nil
+		return eventsourcing.AppendResult{}, nil
 	})
 
 	calls := 0

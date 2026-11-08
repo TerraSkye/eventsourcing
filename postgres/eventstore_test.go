@@ -47,9 +47,6 @@ func TestSave_AndLoadStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	if !result.Successful {
-		t.Fatal("expected successful result")
-	}
 	if result.NextExpectedVersion != 2 {
 		t.Errorf("expected next version 2, got %d", result.NextExpectedVersion)
 	}
