@@ -131,7 +131,6 @@ func handleCommand(ctx context.Context, cfg *config, commandType, aggregateID st
 	switch {
 	case err == nil:
 		metricAttrs = append(metricAttrs, AttrResult.String("success"))
-		span.SetStatus(codes.Ok, "")
 	// A conflict is checked first: it is a failure even when it is wrapped
 	// in a violation.
 	case !errors.As(err, &conflict) && errors.As(err, &violation):
@@ -142,7 +141,6 @@ func handleCommand(ctx context.Context, cfg *config, commandType, aggregateID st
 			causeMessage = cause.Error()
 		}
 		span.SetAttributes(AttrErrorMessage.String(causeMessage))
-		span.SetStatus(codes.Ok, "")
 		span.AddEvent("business_rule_violation", trace.WithAttributes(
 			typeAttr,
 			AttrAggregateID.String(aggregateID),

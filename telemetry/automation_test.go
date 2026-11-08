@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/memory"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // newAutomationName returns an automation name no other test uses, so the
@@ -174,5 +175,30 @@ func TestWithWorkTelemetry_Operation(t *testing.T) {
 	}
 	if got := spanNameRecorder.since(before); !slices.Contains(got, "ship order") {
 		t.Errorf("spans = %v, want ship order", got)
+	}
+}
+
+// TestWithWorkTelemetry_SpanStatus covers the span status: a success and
+// a deferral leave it unset, as the OpenTelemetry Trace API asks of
+// instrumentation, and any other error sets it to Error.
+func TestWithWorkTelemetry_SpanStatus(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"success":  {nil, codes.Unset},
+		"deferred": {automation.Deferred(time.Time{}), codes.Unset},
+		"failure":  {errors.New("boom"), codes.Error},
+	}
+	work := WithWorkTelemetry(newAutomationName(), func(_ context.Context, ret error) error { return ret })
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			before := spanNameRecorder.len()
+			_ = work(t.Context(), tt.err)
+			spans := spanNameRecorder.spansSince(before)
+			if len(spans) != 1 || spans[0].status != tt.want {
+				t.Errorf("spans = %+v, want one with status %v", spans, tt.want)
+			}
+		})
 	}
 }

@@ -2,10 +2,12 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/terraskye/eventsourcing"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -108,5 +110,32 @@ func TestWithEventTelemetry_SkippedResult(t *testing.T) {
 	}
 	if r := attrString(got[0].attrs, AttrResult); r != "skipped" {
 		t.Errorf("%s = %q, want skipped", AttrResult, r)
+	}
+}
+
+// TestWithEventTelemetry_SpanStatus covers the span status: a success and
+// a skipped event leave it unset, as the OpenTelemetry Trace API asks of
+// instrumentation, and any other error sets it to Error.
+func TestWithEventTelemetry_SpanStatus(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"success": {nil, codes.Unset},
+		"skipped": {&eventsourcing.SkippedEventError{}, codes.Unset},
+		"failure": {errors.New("boom"), codes.Error},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			handler := WithEventTelemetry(eventsourcing.NewEventHandlerFunc(func(context.Context, eventsourcing.Event) error {
+				return tt.err
+			}))
+			before := spanNameRecorder.len()
+			_ = handler.Handle(context.Background(), stubEvent{})
+			spans := spanNameRecorder.spansSince(before)
+			if len(spans) != 1 || spans[0].status != tt.want {
+				t.Errorf("spans = %+v, want one with status %v", spans, tt.want)
+			}
+		})
 	}
 }
