@@ -2,7 +2,7 @@
 
 A projection keeps a read model up to date from the global event log. Unlike the [live read model](../tutorials/02-first-query.md), which replays events on every query, a projection processes each event once, remembers how far it got, and survives restarts.
 
-The `projection` package provides a `Runner` that does the reading, checkpointing, retrying and coordination between instances. You write the handler.
+The `projection` package provides a `Runner` that does the reading, checkpointing, retrying and coordination between instances. You write the handler. This guide walks through the choices; the [projection reference](../reference/projection.md) lists every field, default and error.
 
 ## How it works
 

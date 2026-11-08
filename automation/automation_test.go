@@ -339,10 +339,14 @@ func (l countingList) Claim(ctx context.Context, req automation.ClaimRequest) ([
 	return l.memTodoList.Claim(ctx, req)
 }
 
-// failingList is a todo list whose database is down.
-type failingList struct{}
+// failingList is a todo list whose database is down. It counts its claims
+// when calls is set.
+type failingList struct{ calls *atomic.Int32 }
 
-func (failingList) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+func (l failingList) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+	if l.calls != nil {
+		l.calls.Add(1)
+	}
 	return nil, errors.New("database down")
 }
 
@@ -1095,6 +1099,150 @@ func TestRun_PauseThroughTheStore(t *testing.T) {
 		sts, _ := store.LoadStatuses(ctx, "ship-orders")
 		return len(sts) == 1 && sts[0].Phase == automation.Idle && sts[0].Processed == 1
 	})
+}
+
+// publishingStore wraps a store and records every status it was asked to
+// save, with the ttl and the time of the write.
+type publishingStore struct {
+	automation.Store
+	mu     sync.Mutex
+	writes []statusWrite
+}
+
+type statusWrite struct {
+	status automation.Status
+	ttl    time.Duration
+	at     time.Time
+}
+
+func (s *publishingStore) SaveStatus(ctx context.Context, name string, st automation.Status, ttl time.Duration) error {
+	s.mu.Lock()
+	s.writes = append(s.writes, statusWrite{status: st, ttl: ttl, at: time.Now()})
+	s.mu.Unlock()
+	return s.Store.SaveStatus(ctx, name, st, ttl)
+}
+
+func (s *publishingStore) written() []statusWrite {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]statusWrite{}, s.writes...)
+}
+
+// published returns the phase the store shows for the one instance of
+// name, or -1 when it shows none.
+func published(t *testing.T, store automation.Store, name string) automation.Phase {
+	t.Helper()
+	sts, err := store.LoadStatuses(t.Context(), name)
+	if err != nil {
+		t.Fatalf("LoadStatuses: %v", err)
+	}
+	if len(sts) != 1 {
+		return -1
+	}
+	return sts[0].Phase
+}
+
+// TestRun_PublishesPhaseChangesAtOnce covers that a new phase reaches the
+// store before the runner waits for its next poll, not after: the poll
+// interval is an hour, so a phase that is only published at the top of
+// the next round never shows up.
+func TestRun_PublishesPhaseChangesAtOnce(t *testing.T) {
+	ctx := t.Context()
+	store := memory.NewAutomationStore()
+	todo := newDep("orders-to-ship", true)
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   todo,
+		Store:        store,
+		TodoList:     newTodoList(),
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: time.Hour,
+		Logger:       quiet,
+	})
+	start(t, a)
+	eventually(t, "Idle published", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+
+	todo.live.Store(false)
+	a.Nudge()
+	eventually(t, "Waiting published", func() bool { return published(t, store, "ship-orders") == automation.Waiting })
+
+	todo.live.Store(true)
+	if err := store.SetPaused(ctx, "ship-orders", true); err != nil {
+		t.Fatal(err)
+	}
+	a.Nudge()
+	eventually(t, "Paused published", func() bool { return published(t, store, "ship-orders") == automation.Paused })
+
+	if err := store.SetPaused(ctx, "ship-orders", false); err != nil {
+		t.Fatal(err)
+	}
+	a.Nudge()
+	eventually(t, "Idle published after resuming", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+}
+
+// TestRun_StalledStatusOutlivesTheBackoff covers a stalled runner: the
+// Stalled phase is published before the backoff sleep, and the status is
+// live for that sleep on top of the usual ttl, so the instance does not
+// drop out of LoadStatuses while it backs off.
+func TestRun_StalledStatusOutlivesTheBackoff(t *testing.T) {
+	store := &publishingStore{Store: memory.NewAutomationStore()}
+	claims := &atomic.Int32{}
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		Store:        store,
+		TodoList:     failingList{calls: claims},
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, a)
+
+	eventually(t, "Stalled published", func() bool { return published(t, store, "ship-orders") == automation.Stalled })
+	if n := claims.Load(); n != 1 {
+		t.Fatalf("Stalled was published after %d claims, want before the retry", n)
+	}
+
+	// The write after the Stalled one comes once the backoff has slept.
+	var stalled int
+	eventually(t, "the publish after the backoff", func() bool {
+		ws := store.written()
+		for i, w := range ws {
+			if w.status.Phase == automation.Stalled {
+				stalled = i
+				return len(ws) > i+1
+			}
+		}
+		return false
+	})
+	ws := store.written()
+	usual := ws[0].ttl // published while Starting
+	slept := ws[stalled+1].at.Sub(ws[stalled].at)
+	if got := ws[stalled].ttl; got < usual+slept-100*time.Millisecond {
+		t.Fatalf("Stalled status ttl = %s, want the usual %s plus the %s backoff", got, usual, slept)
+	}
+}
+
+// TestRun_WithdrawsItsStatusWhenStopped covers that a stopped instance
+// leaves LoadStatuses at once rather than when its last status expires.
+func TestRun_WithdrawsItsStatusWhenStopped(t *testing.T) {
+	store := memory.NewAutomationStore()
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		Store:        store,
+		TodoList:     newTodoList(),
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	stop := start(t, a)
+	eventually(t, "Idle published", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+
+	stop()
+	if got := published(t, store, "ship-orders"); got != -1 {
+		t.Fatalf("a stopped instance still shows %s", got)
+	}
 }
 
 // TestRun_PauseLetsRunningWorkFinish covers pausing while an item is being

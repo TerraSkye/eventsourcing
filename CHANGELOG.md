@@ -124,6 +124,32 @@ release may break the API; every break is listed under **Breaking**.
   the release at the end of a deferred batch failed, the pause the batch
   asked for was lost; it is now written with `Store.Defer`, as for a lost
   lease.
+- An automation's published status was late or missing when it mattered.
+  A phase change was only published at the top of the next round, so
+  after a pause each instance showed its old phase for up to two poll
+  intervals; a stalled instance dropped out of `Store.LoadStatuses`
+  during the outage, since its status was live for three poll intervals
+  while the backoff sleeps up to 30 seconds; and a stopped instance kept
+  showing its last phase until that expired. `Run` now publishes a phase
+  before it waits or backs off, publishes a stalled status with a ttl
+  that covers the sleep, and withdraws its status when it stops: a
+  `SaveStatus` with a ttl of 0 (#261).
+- `automation`: a segment whose lease was lost while its batch still ran
+  (a `Renew` past the segment TTL) was forgotten at once, so the same
+  `Next` could take it again and hand out a second batch for it while
+  the first was still running, with items of one ordering chain worked
+  twice in parallel. The segment now stays busy until its batch drains:
+  it is not renewed, taken or claimed for meanwhile, and a deferral its
+  batch asks for is still recorded in the store.
+- The Postgres `AutomationStore` could deadlock an instance's `Renew` or
+  `Release` against another's `Acquire`, which locks the segment rows in
+  key order: `Renew` and `Release` updated the rows in one statement
+  that locked them in whatever order the planner visited them, the
+  runner's map order or the table's. Postgres then aborted one of the two
+  with `40P01`, and that runner backed off as stalled. Both now run in a
+  transaction that locks the rows in key order before updating them.
+  The SQLite store needs no change: it writes under the database's one
+  write lock, so there is no row order to deadlock on.
 
 ## [0.5.0] - 2026-10-29
 

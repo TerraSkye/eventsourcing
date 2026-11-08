@@ -275,7 +275,7 @@ if err := probe.WaitUntil(ctx, res.GlobalPosition); err != nil {
 - **Rebuilds.** Give the projection a `Version` and a `Reset`; bumping the version rebuilds the read model from the start of the log.
 - **Several instances.** Run the same projection in every instance of the service; one processes the events and the others stand by to take over.
 
-[Build a projection](../how-to/cached-projection.md) covers each of these.
+[Build a projection](../how-to/cached-projection.md) covers each of these. The [projection reference](../reference/projection.md) lists every field of `Definition` with its default, the phases, the `Store` contract and the errors.
 
 ---
 

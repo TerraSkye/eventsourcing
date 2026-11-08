@@ -47,14 +47,15 @@ func TestMain(m *testing.M) {
 }
 
 // spanRecorder captures the name of every span started through a
-// recTracerProvider, and the status it was last set to, for tests that
-// need to assert on the actual span name a tracer.Start call used or on
-// how the span ended.
+// recTracerProvider, the events added to it and the status it was last
+// set to, for tests that need to assert on the actual span name a
+// tracer.Start call used or on how the span ended.
 type spanRecorder struct {
 	mu     sync.Mutex
 	names  []string
 	attrs  []attribute.Set // attributes each span was started with, by index
 	links  [][]trace.Link  // links each span was started with, by index
+	events [][]recEvent    // events added to each span, by index
 	status []codes.Code    // status each span was last set to, by index
 }
 
@@ -65,14 +66,21 @@ func (r *spanRecorder) add(name string, attrs []attribute.KeyValue, links []trac
 	r.names = append(r.names, name)
 	r.attrs = append(r.attrs, attribute.NewSet(attrs...))
 	r.links = append(r.links, links)
+	r.events = append(r.events, nil)
 	r.status = append(r.status, codes.Unset)
 	return len(r.names) - 1
 }
 
-func (r *spanRecorder) setStatus(i int, code codes.Code) {
+func (r *spanRecorder) addEvent(index int, ev recEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.status[i] = code
+	r.events[index] = append(r.events[index], ev)
+}
+
+func (r *spanRecorder) setStatus(index int, code codes.Code) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.status[index] = code
 }
 
 // recSpan is a span started through a recTracerProvider.
@@ -80,7 +88,14 @@ type recSpan struct {
 	name   string
 	attrs  attribute.Set
 	links  []trace.Link
+	events []recEvent
 	status codes.Code // codes.Unset when SetStatus was never called
+}
+
+// recEvent is an event added to a recSpan.
+type recEvent struct {
+	name  string
+	attrs attribute.Set
 }
 
 // spansSince returns the spans recorded since from, as [spanRecorder.since]
@@ -90,7 +105,7 @@ func (r *spanRecorder) spansSince(from int) []recSpan {
 	defer r.mu.Unlock()
 	out := make([]recSpan, 0, len(r.names)-from)
 	for i := from; i < len(r.names); i++ {
-		out = append(out, recSpan{name: r.names[i], attrs: r.attrs[i], links: r.links[i], status: r.status[i]})
+		out = append(out, recSpan{name: r.names[i], attrs: r.attrs[i], links: r.links[i], events: r.events[i], status: r.status[i]})
 	}
 	return out
 }
@@ -118,21 +133,27 @@ type recTracer struct {
 
 func (t recTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	cfg := trace.NewSpanStartConfig(opts...)
-	i := t.rec.add(spanName, cfg.Attributes(), cfg.Links())
+	index := t.rec.add(spanName, cfg.Attributes(), cfg.Links())
 	ctx, span := t.Tracer.Start(ctx, spanName, opts...)
-	return ctx, recStatusSpan{Span: span, rec: t.rec, i: i}
+	rs := recordingSpan{Span: span, rec: t.rec, index: index}
+	return trace.ContextWithSpan(ctx, rs), rs
 }
 
-// recStatusSpan is the span a recTracer hands out: a no-op span that
-// records the status it is set to.
-type recStatusSpan struct {
+// recordingSpan is the span a recTracer starts: the no-op span, with the
+// events added to it and the status it is set to kept by the recorder.
+type recordingSpan struct {
 	trace.Span
-	rec *spanRecorder
-	i   int
+	rec   *spanRecorder
+	index int
 }
 
-func (s recStatusSpan) SetStatus(code codes.Code, _ string) {
-	s.rec.setStatus(s.i, code)
+func (s recordingSpan) AddEvent(name string, opts ...trace.EventOption) {
+	cfg := trace.NewEventConfig(opts...)
+	s.rec.addEvent(s.index, recEvent{name: name, attrs: attribute.NewSet(cfg.Attributes()...)})
+}
+
+func (s recordingSpan) SetStatus(code codes.Code, _ string) {
+	s.rec.setStatus(s.index, code)
 }
 
 // recTracerProvider is a [trace.TracerProvider] that records the name of

@@ -271,7 +271,8 @@ type Runner[T any] struct {
 }
 
 // publishEvery is how often a runner publishes its status while nothing
-// changes. A phase change is published at once.
+// changes. A phase change is published at once: before the runner waits or
+// backs off, and when it leaves the loop.
 const publishEvery = time.Second
 
 // NewRunner creates the runner d describes.
@@ -352,9 +353,11 @@ func (r *Runner[T]) Name() string { return r.d.Name }
 // When a dependency implements [Watcher], Run registers the runner's
 // Nudge with it, so the automation wakes up when the todo list changes.
 // Call Run once per Runner. When ctx is done, Run waits for the running
-// batches to stop, then closes the scheduler and returns.
+// batches to stop, closes the scheduler, withdraws the status it published
+// so the instance leaves [Store.LoadStatuses] at once, and returns.
 func (r *Runner[T]) Run(ctx context.Context) error {
 	f := &flight{}
+	defer r.withdrawStatus(ctx)
 	defer r.closeScheduler(ctx)
 	defer f.wg.Wait()
 	for _, dep := range r.waitFor {
@@ -503,9 +506,10 @@ func (r *Runner[T]) paused(ctx context.Context) (bool, error) {
 
 // saveStatus writes the status to the Store when the phase changed since the
 // last write, or publishEvery has passed. A failed write is logged; the
-// automation goes on.
+// automation goes on. Nothing is written once ctx is done: Run then
+// withdraws the status instead.
 func (r *Runner[T]) saveStatus(ctx context.Context) {
-	if r.d.Store == nil {
+	if r.d.Store == nil || ctx.Err() != nil {
 		return
 	}
 	st := r.Status()
@@ -513,20 +517,33 @@ func (r *Runner[T]) saveStatus(ctx context.Context) {
 		time.Since(r.publishedAt) < publishEvery {
 		return
 	}
-	r.writeStatus(ctx, st)
+	r.writeStatus(ctx, st, r.statusTTL())
 }
 
 // saveStatusNow writes the status regardless of when it was last written.
 func (r *Runner[T]) saveStatusNow(ctx context.Context) {
 	if r.d.Store != nil {
-		r.writeStatus(ctx, r.Status())
+		r.writeStatus(ctx, r.Status(), r.statusTTL())
 	}
 }
 
-func (r *Runner[T]) writeStatus(ctx context.Context, st Status) {
-	// Live for three poll intervals: a runner waiting between polls
-	// publishes once per poll.
-	ttl := 3 * max(r.d.PollInterval, publishEvery)
+// withdrawStatus publishes the status with no ttl, so the instance leaves
+// LoadStatuses at once instead of when its last status expires. It uses
+// its own short context, since ctx is done when Run stops.
+func (r *Runner[T]) withdrawStatus(ctx context.Context) {
+	if r.d.Store != nil {
+		r.writeStatus(context.WithoutCancel(ctx), r.Status(), 0)
+	}
+}
+
+// statusTTL is how long a published status stays live: three poll
+// intervals, since a runner that waits between polls publishes once per
+// poll. A stall sleeps longer than that and adds its sleep, see stall.
+func (r *Runner[T]) statusTTL() time.Duration {
+	return 3 * max(r.d.PollInterval, publishEvery)
+}
+
+func (r *Runner[T]) writeStatus(ctx context.Context, st Status, ttl time.Duration) {
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := r.d.Store.SaveStatus(pctx, r.d.Name, st, ttl); err != nil {
@@ -784,12 +801,19 @@ func classify(err error, lease time.Duration) Outcome {
 	return Outcome{Kind: Failed, Err: err}
 }
 
-// stall reports err, logs it, and backs off.
+// stall reports err, logs it, publishes the Stalled phase and backs off.
+// The status is published before the sleep, live for the sleep on top of
+// the usual ttl: the backoff grows well past the ttl, and a status that
+// expired while the runner slept would show the instance as gone during
+// the outage it is reporting.
 func (r *Runner[T]) stall(ctx context.Context, err error, retry *backoff.ExponentialBackOff) {
 	r.setPhase(Stalled, err.Error())
 	wait := retry.NextBackOff()
 	r.d.Logger.LogAttrs(ctx, slog.LevelError, "automation stalled",
 		slog.String("automation", r.d.Name), slog.String("error", err.Error()), slog.Duration("retry_in", wait))
+	if r.d.Store != nil && ctx.Err() == nil {
+		r.writeStatus(ctx, r.Status(), r.statusTTL()+wait)
+	}
 	sleepCtx(ctx, wait)
 }
 
@@ -819,8 +843,11 @@ func (r *Runner[T]) setPhase(p Phase, lastErr string) {
 	}
 }
 
-// wait blocks until a nudge, the poll interval, or ctx is done.
+// wait publishes the status, so a phase set just before is seen at once
+// rather than after the wait, and then blocks until a nudge, the poll
+// interval, or ctx is done.
 func (r *Runner[T]) wait(ctx context.Context) {
+	r.saveStatus(ctx)
 	t := time.NewTimer(r.d.PollInterval)
 	defer t.Stop()
 	select {
