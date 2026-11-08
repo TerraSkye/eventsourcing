@@ -4,13 +4,13 @@ package taskstoarchive
 
 import (
 	"context"
-	"github.com/terraskye/eventsourcing/automation"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
+	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/examples/todolist/events"
 	"github.com/terraskye/eventsourcing/projection"
 )

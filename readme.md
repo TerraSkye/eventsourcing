@@ -115,7 +115,7 @@ func main() {
 
 	id := uuid.New()
 	res, err := bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Write a README"})
-	fmt.Println(res.Successful, err) // true <nil>
+	fmt.Println(res.NextExpectedVersion, err) // 1 <nil>
 
 	_, err = bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Again"})
 	var violation *eventsourcing.BusinessRuleViolationError
@@ -288,7 +288,7 @@ mkdocs build --strict   # what CI runs on pull requests
 
 The repository's `go.work` points the nested modules at the local root; outside the repository they resolve the published version.
 
-Issues and pull requests are welcome. If you're adding a backend, run it against `eventsourcingtest.AcceptanceTest` and `eventsourcingtest.GlobalReaderAcceptanceTest` first; if it passes those, projections and automations work on top of it unchanged.
+Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how the repository works. If you're adding a backend, run it against `eventsourcingtest.AcceptanceTest` and `eventsourcingtest.GlobalReaderAcceptanceTest` first; if it passes those, projections and automations work on top of it unchanged.
 
 ## License
 

@@ -89,9 +89,10 @@ func ObserveAutomation(r StatusReporter) (metric.Registration, error) {
 // automation's name, so a command the work dispatches through a bus with
 // [CommandTelemetry] shows up as its child. It records
 // [AutomationWorkDuration] for every item, labelled by [AttrResult]. A
-// returned automation.Deferred is not an error: it marks the span OK and
-// is recorded with result "deferred". Any other error marks the span as
-// failed and is recorded with result "failure" and an [AttrErrorType].
+// returned automation.Deferred is not an error: it leaves the span's
+// status unset, as a success does, and is recorded with result
+// "deferred". Any other error marks the span as failed and is recorded
+// with result "failure" and an [AttrErrorType].
 //
 // [WithOperation] and [WithOperationGetter] rename the span, and
 // [WithAttributes] and [WithAttributeGetter] add attributes to it.
@@ -132,7 +133,6 @@ func WithWorkTelemetry[T any](name string, work automation.WorkFunc[T], options 
 		switch {
 		case err == nil:
 			metricAttrs = append(metricAttrs, AttrResult.String("success"))
-			span.SetStatus(codes.Ok, "")
 		case errors.As(err, &deferred):
 			metricAttrs = append(metricAttrs, AttrResult.String("deferred"))
 			var evAttrs []attribute.KeyValue
@@ -140,7 +140,6 @@ func WithWorkTelemetry[T any](name string, work automation.WorkFunc[T], options 
 				evAttrs = append(evAttrs, attribute.String("eventsourcing.automation.deferred_until", deferred.Until.Format(time.RFC3339)))
 			}
 			span.AddEvent("deferred", trace.WithAttributes(evAttrs...))
-			span.SetStatus(codes.Ok, "")
 		default:
 			errType := AttrErrorType.String(errorType(err))
 			metricAttrs = append(metricAttrs, AttrResult.String("failure"), errType)
