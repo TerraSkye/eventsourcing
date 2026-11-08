@@ -128,6 +128,15 @@ release may break the API; every break is listed under **Breaking**.
   twice in parallel. The segment now stays busy until its batch drains:
   it is not renewed, taken or claimed for meanwhile, and a deferral its
   batch asks for is still recorded in the store.
+- The Postgres `AutomationStore` could deadlock an instance's `Renew` or
+  `Release` against another's `Acquire`, which locks the segment rows in
+  key order: `Renew` and `Release` updated the rows in one statement
+  that locked them in whatever order the planner visited them, the
+  runner's map order or the table's. Postgres then aborted one of the two
+  with `40P01`, and that runner backed off as stalled. Both now run in a
+  transaction that locks the rows in key order before updating them.
+  The SQLite store needs no change: it writes under the database's one
+  write lock, so there is no row order to deadlock on.
 
 ## [0.5.0] - 2026-10-29
 

@@ -151,34 +151,45 @@ func (s *AutomationStore) Acquire(ctx context.Context, name, owner string, candi
 	return res, nil
 }
 
-// Renew implements [automation.Store] in one statement. A lease is renewed
-// only while its owner and epoch are current and it has not expired.
+// Renew implements [automation.Store]. A lease is renewed only while its
+// owner and epoch are current and it has not expired. It runs in one
+// transaction that locks the rows in key order, as Acquire does, before
+// it updates them, so a renewal and an acquisition that meet wait for
+// each other instead of deadlocking.
 func (s *AutomationStore) Renew(ctx context.Context, held []automation.SegmentLease, ttl time.Duration) ([]automation.SegmentLease, error) {
 	if len(held) == 0 {
 		return nil, nil
 	}
 	names, keys, owners, epochs := leaseColumns(held)
-	rows, err := s.db.Query(ctx, `
-		UPDATE automation_segments s
-		SET lease_until = now() + $5 * interval '1 millisecond'
-		FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[]) AS h(name, key, owner, epoch)
-		WHERE s.name = h.name AND s.segment_key = h.key AND s.owner = h.owner AND s.epoch = h.epoch
-		  AND s.lease_until > now()
-		RETURNING s.name, s.segment_key, s.owner, s.epoch`,
-		names, keys, owners, epochs, ttl.Milliseconds(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: renew: %w", err)
-	}
-	lost, err := unmatched(rows, held)
+	var lost []automation.SegmentLease
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if err := lockSegments(ctx, tx, names, keys); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
+			UPDATE automation_segments s
+			SET lease_until = now() + $5 * interval '1 millisecond'
+			FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[]) AS h(name, key, owner, epoch)
+			WHERE s.name = h.name AND s.segment_key = h.key AND s.owner = h.owner AND s.epoch = h.epoch
+			  AND s.lease_until > now()
+			RETURNING s.name, s.segment_key, s.owner, s.epoch`,
+			names, keys, owners, epochs, ttl.Milliseconds(),
+		)
+		if err != nil {
+			return err
+		}
+		lost, err = unmatched(rows, held)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: renew: %w", err)
 	}
 	return lost, nil
 }
 
-// Release implements [automation.Store] in one statement. Each release is
-// fenced on owner and epoch; a lost one changes nothing.
+// Release implements [automation.Store]. Each release is fenced on owner
+// and epoch; a lost one changes nothing. Like Renew, it locks the rows in
+// key order before it updates them.
 func (s *AutomationStore) Release(ctx context.Context, rel []automation.ReleaseRequest) ([]automation.SegmentLease, error) {
 	if len(rel) == 0 {
 		return nil, nil
@@ -192,28 +203,54 @@ func (s *AutomationStore) Release(ctx context.Context, rel []automation.ReleaseR
 		served[i] = rr.Served
 	}
 	names, keys, owners, epochs := leaseColumns(leases)
-	// GREATEST ignores NULL, so a first pause needs no special case.
-	rows, err := s.db.Query(ctx, `
-		UPDATE automation_segments s
-		SET owner = '', lease_until = NULL,
-		    paused_until = CASE WHEN h.defer_ms > 0
-		                        THEN greatest(s.paused_until, now() + h.defer_ms * interval '1 millisecond')
-		                        ELSE s.paused_until END,
-		    last_served = CASE WHEN h.served THEN now() ELSE s.last_served END
-		FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::bool[])
-		     AS h(name, key, owner, epoch, defer_ms, served)
-		WHERE s.name = h.name AND s.segment_key = h.key AND s.owner = h.owner AND s.epoch = h.epoch
-		RETURNING s.name, s.segment_key, h.owner, h.epoch`,
-		names, keys, owners, epochs, deferMS, served,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: release: %w", err)
-	}
-	lost, err := unmatched(rows, leases)
+	var lost []automation.SegmentLease
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if err := lockSegments(ctx, tx, names, keys); err != nil {
+			return err
+		}
+		// GREATEST ignores NULL, so a first pause needs no special case.
+		rows, err := tx.Query(ctx, `
+			UPDATE automation_segments s
+			SET owner = '', lease_until = NULL,
+			    paused_until = CASE WHEN h.defer_ms > 0
+			                        THEN greatest(s.paused_until, now() + h.defer_ms * interval '1 millisecond')
+			                        ELSE s.paused_until END,
+			    last_served = CASE WHEN h.served THEN now() ELSE s.last_served END
+			FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::bigint[], $6::bool[])
+			     AS h(name, key, owner, epoch, defer_ms, served)
+			WHERE s.name = h.name AND s.segment_key = h.key AND s.owner = h.owner AND s.epoch = h.epoch
+			RETURNING s.name, s.segment_key, h.owner, h.epoch`,
+			names, keys, owners, epochs, deferMS, served,
+		)
+		if err != nil {
+			return err
+		}
+		lost, err = unmatched(rows, leases)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: release: %w", err)
 	}
 	return lost, nil
+}
+
+// lockSegments locks the rows of the given (name, key) pairs in key
+// order, the order Acquire locks them in, so that Renew, Release and
+// Acquire calls that meet wait for each other instead of deadlocking. The
+// locks are taken after the sort, so the order does not depend on how
+// the planner joins the arrays to the table: an UPDATE FROM unnest on its
+// own visits the rows in its plan's order, which may be the table's.
+func lockSegments(ctx context.Context, tx pgx.Tx, names, keys []string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT FROM automation_segments s
+		JOIN unnest($1::text[], $2::text[]) AS h(name, key) ON s.name = h.name AND s.segment_key = h.key
+		ORDER BY s.name COLLATE "C", s.segment_key COLLATE "C"
+		FOR UPDATE OF s`,
+		names, keys,
+	); err != nil {
+		return fmt.Errorf("lock: %w", err)
+	}
+	return nil
 }
 
 // Defer implements [automation.Store]. It records key if it is new, and
