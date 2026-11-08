@@ -124,6 +124,11 @@ release may break the API; every break is listed under **Breaking**.
   the release at the end of a deferred batch failed, the pause the batch
   asked for was lost; it is now written with `Store.Defer`, as for a lost
   lease.
+- `automation`: when the default scheduler's `Close` failed to give back
+  its segments, every pause a deferred batch had asked for was dropped
+  with them, so another instance could claim those segments at once. The
+  pauses are now written with `Store.Defer`, as when the release at the
+  end of a deferred batch fails (#278).
 - An automation's published status was late or missing when it mattered.
   A phase change was only published at the top of the next round, so
   after a pause each instance showed its old phase for up to two poll
@@ -160,6 +165,12 @@ release may break the API; every break is listed under **Breaking**.
   The `eventsourcing.automation.segment.waiting` gauge is documented as
   what it reports, segments with no owner whose pause has passed, which
   with `Shards` includes empty buckets.
+- `telemetry`: `WithAttributeGetter` was ignored by `WithEventStoreTelemetry`
+  and `EventStoreTelemetry`, so an attribute derived from the context never
+  reached the store's spans while every other wrapper applied it. The
+  `append events`, `load events` and `read all events` spans now carry the
+  getter's attributes; as before, only `WithAttributes` reaches the
+  metrics.
 - `automation`: with `Shards` and more buckets than `MaxSegments`, an
   instance that only polled probed the same empty bucket on every poll
   and never reached a later bucket with work: a bucket found empty was

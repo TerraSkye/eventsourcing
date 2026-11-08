@@ -669,6 +669,43 @@ func TestClaimScheduler_FailedReleaseAtDrainedKeepsItsDeferral(t *testing.T) {
 	}
 }
 
+// TestClaimScheduler_FailedReleaseAtCloseKeepsItsDeferrals covers a Close
+// whose bulk release fails while deferred batches wait to be given back:
+// every pending pause must still be written, so the instances that take
+// the segments over honour them.
+func TestClaimScheduler_FailedReleaseAtCloseKeepsItsDeferrals(t *testing.T) {
+	ctx := context.Background()
+	clk := newClock()
+	store := &flakyStore{fakeStore: newFakeStore(clk)}
+	s := newTestScheduler(Definition[string]{
+		Name: "sync", TodoList: endlessList{"a", "b"}, Store: store, Logger: quietLogger(),
+		Lease: time.Minute, BatchSize: 1, MaxSegments: 2, PollInterval: time.Second,
+	})
+	s.now = clk.now
+
+	batches, err := s.Next(ctx)
+	if err != nil || len(batches) != 2 {
+		t.Fatalf("Next = %d batches, %v; want two", len(batches), err)
+	}
+	for _, b := range batches {
+		if err := s.Done(ctx, b.Items[0], Outcome{Kind: DeferredOutcome, Until: clk.now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.failures = 1
+	if err := s.Close(ctx); err == nil {
+		t.Fatal("Close = nil, want the release error")
+	}
+	if len(s.held) != 0 {
+		t.Fatalf("after Close %d segments are still held, want none", len(s.held))
+	}
+	for _, key := range []string{"a", "b"} {
+		if d, _ := store.DeferredFor(ctx, "sync", key); d < 50*time.Minute {
+			t.Fatalf("after the failed release segment %s is paused for %s, want the deferral", key, d)
+		}
+	}
+}
+
 // TestClaimScheduler_LostSegmentKeepsItsDeferral covers a segment whose
 // lease is lost while a deferral waits for its batch to drain: the pause
 // is written anyway, so the instance that takes the segment over honours

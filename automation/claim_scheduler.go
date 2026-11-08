@@ -453,7 +453,19 @@ func (s *claimScheduler[T]) Close(ctx context.Context) error {
 		return nil
 	}
 	if _, err := s.store.Release(ctx, rel); err != nil {
-		return fmt.Errorf("release: %w", err)
+		// The segments stay the store's until their leases run out, but
+		// each pause must still reach whoever takes its segment then;
+		// Defer is not fenced, as for a lost lease.
+		err = fmt.Errorf("release: %w", err)
+		for _, rr := range rel {
+			if rr.DeferFor <= 0 {
+				continue
+			}
+			if derr := s.store.Defer(ctx, s.name, rr.Lease.Key, rr.DeferFor); derr != nil {
+				err = errors.Join(err, fmt.Errorf("defer %s: %w", rr.Lease.Key, derr))
+			}
+		}
+		return err
 	}
 	return nil
 }

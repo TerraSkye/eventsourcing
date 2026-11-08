@@ -729,7 +729,7 @@ func TestNewCommandHandler_PinnedRevisionFoldsFullState(t *testing.T) {
 	store := &testStore{}
 
 	// Simulate a real backend: the stream already has 3 events. Every real
-	// EventStore implementation in this repo (memory, file, postgres)
+	// EventStore implementation in this repo (memory, sqlite, postgres, kurrentdb)
 	// returns only events with Version > N from LoadStreamFrom(id,
 	// Revision(N)) — this loadFn mirrors that exclusive convention exactly.
 	allEvents := []*Envelope{
