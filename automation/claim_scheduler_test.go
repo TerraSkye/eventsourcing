@@ -186,9 +186,13 @@ func TestClaimScheduler_RotatesUnderContention(t *testing.T) {
 		}
 		served = append(served, batches[0].Key)
 		for _, it := range batches[0].Items {
-			s.Done(ctx, it, Outcome{Kind: Done})
+			if err := s.Done(ctx, it, Outcome{Kind: Done}); err != nil {
+				t.Fatal(err)
+			}
 		}
-		s.Drained(ctx, batches[0].Key)
+		if err := s.Drained(ctx, batches[0].Key); err != nil {
+			t.Fatal(err)
+		}
 		c.tick(11 * time.Second) // past the term
 	}
 	if got := strings.Join(served, ","); got != "a,b,a,b" {
@@ -230,7 +234,9 @@ func TestClaimScheduler_KeepsAnUncontendedSegment(t *testing.T) {
 			t.Fatalf("round %d: epoch %d, want %d; the uncontended key was re-acquired", i, e, epoch)
 		}
 		epoch = e
-		s.Drained(ctx, "a")
+		if err := s.Drained(ctx, "a"); err != nil {
+			t.Fatal(err)
+		}
 		c.tick(11 * time.Second)
 	}
 }
@@ -357,7 +363,9 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if store.owner("sync", "3") == "" {
 		t.Fatal("shard 3 with work was released")
 	}
-	s.Drained(ctx, "3")
+	if err := s.Drained(ctx, "3"); err != nil {
+		t.Fatal(err)
+	}
 	list.reqs = nil
 	c.tick(time.Second)
 	if _, err := s.Next(ctx); err != nil {
@@ -366,7 +374,9 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 1 || list.reqs[0].Segments[0] != "3" {
 		t.Fatalf("second poll claimed %v, want only shard 3 while the others are paused", list.reqs)
 	}
-	s.Drained(ctx, "3")
+	if err := s.Drained(ctx, "3"); err != nil {
+		t.Fatal(err)
+	}
 
 	// After the interval the empty shards are candidates again.
 	c.tick(10 * time.Second)

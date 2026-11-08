@@ -219,7 +219,7 @@ import (
     "task-management/slices/taskstoarchive"
 )
 
-type ArchiveTasks struct {
+type Automation struct {
     list *taskstoarchive.TasksToArchive
     todo automation.Dependency
     bus  eventsourcing.Dispatcher
@@ -229,11 +229,11 @@ func New(
     list *taskstoarchive.TasksToArchive,
     todo automation.Dependency,
     bus eventsourcing.Dispatcher,
-) *ArchiveTasks {
-    return &ArchiveTasks{list: list, todo: todo, bus: bus}
+) *Automation {
+    return &Automation{list: list, todo: todo, bus: bus}
 }
 
-func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
+func (a *Automation) Definition() automation.Definition[uuid.UUID] {
     return automation.Definition[uuid.UUID]{
         Name:       "archive-tasks",
         TodoList:   a.list, // the repository: anything with Claim
@@ -244,7 +244,7 @@ func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
 
 // Work archives one due task. A task archived meanwhile is no error: the
 // decider appends nothing.
-func (a *ArchiveTasks) Work(ctx context.Context, taskID uuid.UUID) error {
+func (a *Automation) Work(ctx context.Context, taskID uuid.UUID) error {
     _, err := a.bus.Dispatch(ctx, archivetask.ArchiveTask{TaskID: taskID})
     return err
 }
