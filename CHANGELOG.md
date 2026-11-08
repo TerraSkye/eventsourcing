@@ -88,6 +88,18 @@ release may break the API; every break is listed under **Breaking**.
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
 
+### Fixed
+
+- The Postgres `AutomationStore` could deadlock an instance's `Renew` or
+  `Release` against another's `Acquire`, which locks the segment rows in
+  key order: `Renew` and `Release` updated the rows in one statement
+  that locked them in whatever order the planner visited them, the
+  runner's map order or the table's. Postgres then aborted one of the two
+  with `40P01`, and that runner backed off as stalled. Both now run in a
+  transaction that locks the rows in key order before updating them.
+  The SQLite store needs no change: it writes under the database's one
+  write lock, so there is no row order to deadlock on.
+
 ## [0.5.0] - 2026-10-29
 
 ### Breaking
