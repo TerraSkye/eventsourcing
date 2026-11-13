@@ -1,0 +1,25 @@
+name: Release Check
+
+# Nested modules require a released root version, so between releases they
+# build only inside the workspace. This checks each one alone, with
+# GOWORK=off, when it is tagged; run it by hand before tagging.
+on:
+  push:
+    tags: ["*/v*"]
+  workflow_dispatch:
+
+jobs:
+  modules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.work
+          cache: true
+
+      - name: Build, vet and test every nested module without the workspace
+        run: scripts/release.sh check
