@@ -1,5 +1,37 @@
 # How to test event-sourced code
 
+The `slicetest` package gives each kind of slice one test shape, over the
+public API and the memory stores: `slicetest.Command` for a command
+handler (given events, when a command, then events or a rejection),
+`slicetest.View` for a projection (given events, then the read model), and
+`slicetest.New` for a scenario that crosses slices (given events, run the
+automations, then the events they caused). The sections below show the
+same tests written by hand, which is still right when a test needs
+something the fixtures do not cover.
+
+```go
+func TestCreateTask_RejectsDuplicate(t *testing.T) {
+    id := uuid.New()
+    slicetest.Command(t, createtask.NewHandler).
+        Given(&events.TaskCreated{TaskID: id, Title: "Write docs"}).
+        When(createtask.CreateTask{TaskID: id, Title: "Write docs"}).
+        ThenRejected()
+}
+
+func TestArchiveTasks_ArchivesAfterSevenDays(t *testing.T) {
+    s := slicetest.New(t)
+    list := taskstoarchive.NewTasksToArchive(7 * 24 * time.Hour)
+    todo := s.Projection(taskstoarchive.NewProjection(list))
+    slicetest.Handle(s, archivetask.NewHandler(s.Store()))
+    slicetest.Automation(s, archivetasks.New(list, todo, s.Bus()).Definition())
+
+    id := uuid.New()
+    s.Given(&events.TaskCompleted{TaskID: id, CompletedAt: time.Now().Add(-8 * 24 * time.Hour)})
+    s.Run()
+    s.Then(&events.TaskArchived{TaskID: id})
+}
+```
+
 Test commands, queries, and projectors using the in-memory stores.
 
 ## Testing the decide function directly
