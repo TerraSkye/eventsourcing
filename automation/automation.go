@@ -114,8 +114,11 @@ type Summary struct {
 
 	// NextEligible is the earliest time a segment paused by [Deferred]
 	// during the run becomes eligible again, or zero when none was
-	// paused. A scheduler that runs the automation on a timer can use it
-	// to decide whether to come back sooner.
+	// paused. It is the pause the scheduler applied, as returned by
+	// [Scheduler.Drained], which for the default scheduler is at least
+	// the end of the batch's item leases. A scheduler that runs the
+	// automation on a timer can use it to decide whether to come back
+	// sooner.
 	NextEligible time.Time
 }
 
@@ -626,9 +629,13 @@ func (r *Runner[T]) start(ctx context.Context, f *flight, b Batch[T]) {
 		// The segment must be given back even when the run is stopping,
 		// with any pause it asked for, so this does not use ctx.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		if err := r.sched.Drained(dctx, b.Key); err != nil {
+		until, err := r.sched.Drained(dctx, b.Key)
+		if err != nil {
 			r.d.Logger.LogAttrs(dctx, slog.LevelWarn, "automation scheduler drained failed",
 				slog.String("automation", r.d.Name), slog.String("segment", b.Key), slog.String("error", err.Error()))
+		}
+		if !until.IsZero() {
+			s.NextEligible = until
 		}
 		cancel()
 

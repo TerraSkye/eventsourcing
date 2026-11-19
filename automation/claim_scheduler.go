@@ -44,6 +44,10 @@ type claimScheduler[T any] struct {
 	held         map[string]*heldSegment
 	lastEligible int
 	busy         bool // unsegmented: a batch is running
+
+	// listUntil is, unsegmented, the latest pause a Done of the running
+	// batch wrote to the store; Drained returns it and clears it.
+	listUntil time.Time
 }
 
 type heldSegment struct {
@@ -372,6 +376,9 @@ func (s *claimScheduler[T]) Done(ctx context.Context, item Item[T], out Outcome)
 		if err := s.store.Defer(ctx, s.name, "", until.Sub(s.now())); err != nil {
 			return fmt.Errorf("defer: %w", err)
 		}
+		if until.After(s.listUntil) {
+			s.listUntil = until
+		}
 		return nil
 	}
 	h, ok := s.held[item.Key]
@@ -393,26 +400,32 @@ func (s *claimScheduler[T]) Done(ctx context.Context, item Item[T], out Outcome)
 // leases: items the batch did not start stay leased until then, and a
 // later item of their chain must not be claimed elsewhere before them.
 // Any other segment stays held and is claimed for again on the next Next.
-func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
+//
+// It returns the end of the pause it recorded. Unsegmented, that is the
+// latest pause Done wrote. A segment lost while its batch ran returns the
+// zero time: Next recorded its pause, not Drained.
+func (s *claimScheduler[T]) Drained(ctx context.Context, key string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.segmenter == nil {
 		s.busy = false
-		return nil
+		until := s.listUntil
+		s.listUntil = time.Time{}
+		return until, nil
 	}
 	h, ok := s.held[key]
 	if !ok {
-		return nil // lost meanwhile; Next recorded any pause
+		return time.Time{}, nil // lost meanwhile; Next recorded any pause
 	}
 	if h.lost {
 		// Lost while the batch ran; Next recorded any pause, and the
 		// segment may be taken again from the next Next on.
 		delete(s.held, key)
-		return nil
+		return time.Time{}, nil
 	}
 	h.busy = false
 	if h.deferUntil.IsZero() {
-		return nil
+		return time.Time{}, nil
 	}
 	until := h.deferUntil
 	if h.leaseEnd.After(until) {
@@ -423,11 +436,11 @@ func (s *claimScheduler[T]) Drained(ctx context.Context, key string) error {
 		// pause must still reach whoever takes it then; Defer is not
 		// fenced, as for a lost lease.
 		if derr := s.store.Defer(ctx, s.name, key, until.Sub(s.now())); derr != nil {
-			return errors.Join(err, fmt.Errorf("defer %s: %w", key, derr))
+			return time.Time{}, errors.Join(err, fmt.Errorf("defer %s: %w", key, derr))
 		}
-		return err
+		return until, err
 	}
-	return nil
+	return until, nil
 }
 
 // Close implements [Scheduler]: it gives back every held segment, with any

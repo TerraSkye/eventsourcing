@@ -934,8 +934,10 @@ func (nopScheduler[T]) Next(context.Context) ([]automation.Batch[T], error) { re
 func (nopScheduler[T]) Done(context.Context, automation.Item[T], automation.Outcome) error {
 	return nil
 }
-func (nopScheduler[T]) Drained(context.Context, string) error { return nil }
-func (nopScheduler[T]) Close(context.Context) error           { return nil }
+func (nopScheduler[T]) Drained(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (nopScheduler[T]) Close(context.Context) error { return nil }
 
 // TestCustomScheduler covers that a Scheduler replaces the default
 // claiming entirely: the runner works what it hands out and reports back.
@@ -1013,11 +1015,11 @@ func (s *scriptedScheduler) Done(_ context.Context, it automation.Item[string], 
 	return nil
 }
 
-func (s *scriptedScheduler) Drained(_ context.Context, key string) error {
+func (s *scriptedScheduler) Drained(_ context.Context, key string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drained = append(s.drained, key)
-	return nil
+	return time.Time{}, nil
 }
 
 func (s *scriptedScheduler) Close(context.Context) error { s.closed = true; return nil }

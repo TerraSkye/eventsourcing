@@ -43,6 +43,10 @@ release may break the API; every break is listed under **Breaking**.
   lease expired before its work started is skipped and counted as failed
   (in `Status.Failed`, with `LastError` "lease expired before work
   started") instead of run late.
+- `automation`: `Scheduler.Drained` returns `(time.Time, error)`: the time
+  the segment becomes eligible again when its batch deferred, or the zero
+  time. `Summary.NextEligible` reports that time when it is set. A custom
+  scheduler that applies no pause of its own returns `time.Time{}`.
 
 ### Added
 
@@ -115,6 +119,14 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Fixed
 
+- `automation`: `Summary.NextEligible` reported the time `Work` asked for
+  in `Deferred`, not the pause the scheduler applied, which is at least
+  the end of the batch's item leases, and a lease from now for a zero or
+  past deferral. A cron caller using `RunOnce` could come back before the
+  segment was claimable, and a zero deferral left `NextEligible` empty
+  while the list was paused. `Scheduler.Drained` now returns the
+  effective pause and the summary reports that, for segmented and
+  unsegmented lists alike (#262).
 - `automation`: a failed `Store.Release` in the default scheduler left
   its state wrong in two ways. When giving back an idle segment failed,
   the segments with work had already been marked busy for batches that
