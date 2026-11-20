@@ -124,13 +124,19 @@ func Query(fn func(ctx context.Context) ([]Segment, error)) Segmenter { return q
 //
 // Returning nil marks the item done. Returning an error leaves the item
 // where it is; it is claimed again once its lease expires. Returning
-// [Deferred] pauses the item's whole segment until the given time without
-// counting a failure: that is what a 429 with Retry-After means. Work can
+// [Deferred] pauses the item's whole segment until at least the given time
+// without counting a failure: that is what a 429 with Retry-After means. Work can
 // be repeated, so it must be idempotent; see the package documentation.
 type WorkFunc[T any] func(ctx context.Context, item T) error
 
 // DeferredError is returned by [WorkFunc] to report that the item's
 // segment is throttled until Until. It is not counted as a failure.
+//
+// Until is the earliest the segment may resume; the scheduler may pause
+// it longer. The default scheduler pauses the segment until the later of
+// Until and the end of the batch's item leases, so that items the batch
+// did not start are not claimed elsewhere before the ones ahead of them
+// in their chain. [Summary.NextEligible] reports the pause applied.
 //
 // On an unsegmented list there is one segment, so a DeferredError pauses
 // the whole automation on every instance. For a 429 from one integration
@@ -146,8 +152,8 @@ func (e *DeferredError) Error() string {
 	return fmt.Sprintf("deferred until %s", e.Until.Format(time.RFC3339))
 }
 
-// Deferred returns a *DeferredError. A zero until means "back off for the
-// automation's Lease".
+// Deferred returns a *DeferredError. A zero or past until means "back off
+// for the automation's Lease" with the default scheduler.
 func Deferred(until time.Time) error { return &DeferredError{Until: until} }
 
 // Item is one claimed item as a [Scheduler] hands it to the runner.
@@ -184,7 +190,7 @@ const (
 	Failed
 
 	// DeferredOutcome means Work returned [Deferred]: the item's segment is
-	// paused until Outcome.Until.
+	// paused until at least Outcome.Until.
 	DeferredOutcome
 )
 
@@ -224,7 +230,11 @@ type Scheduler[T any] interface {
 	Next(ctx context.Context) ([]Batch[T], error)
 
 	// Done reports an item's outcome. For [DeferredOutcome] the scheduler
-	// pauses the item's segment until Outcome.Until for every instance.
+	// pauses the item's segment for every instance. Outcome.Until is the
+	// earliest the segment may resume; the scheduler may pause it longer,
+	// for instance until its batch's item leases end or, for a zero or
+	// past Until, for a lease. Drained returns the pause it applied, and
+	// [Summary.NextEligible] reports it.
 	Done(ctx context.Context, item Item[T], out Outcome) error
 
 	// Drained reports that the batch Next returned for segment key ("" for

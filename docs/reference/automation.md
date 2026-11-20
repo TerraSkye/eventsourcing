@@ -184,7 +184,7 @@ type DeferredError struct {
 func Deferred(until time.Time) error
 ```
 
-`Work` does the work for one claimed item. Returning `nil` marks the item done. Returning an error leaves the item where it is; it is claimed again once its lease expires. Returning `Deferred(until)` pauses the item's whole segment until `until` without counting a failure, which is what a 429 with `Retry-After` means; a zero `until` means "back off for `Lease`". On an unsegmented list there is one segment, so a deferral pauses the whole automation on every instance.
+`Work` does the work for one claimed item. Returning `nil` marks the item done. Returning an error leaves the item where it is; it is claimed again once its lease expires. Returning `Deferred(until)` pauses the item's whole segment until at least `until` without counting a failure, which is what a 429 with `Retry-After` means; a zero or past `until` means "back off for `Lease`". The default scheduler pauses until the later of `until` and the end of the batch's item leases, so that items the batch did not start are not claimed elsewhere before the ones ahead of them in their chain; `Summary.NextEligible` reports the pause applied. On an unsegmented list there is one segment, so a deferral pauses the whole automation on every instance.
 
 The runner gives `Work` a context whose deadline is the item's lease end (`Item.Deadline`), with the correlation and causation IDs cleared: every item starts a new chain. To continue the chain of the event the item comes from, set them in `Work` with `eventsourcing.WithCorrelationID` and `eventsourcing.WithCausationID` before sending the command. An error that matches the runner's own cancelled context is not counted as a failure.
 
@@ -321,7 +321,7 @@ type Scheduler[T any] interface {
 The pluggable half of an automation: it decides which items this instance works now, for which segments, and what happens when an item finishes. The runner keeps the other half: ordering-key dispatch, `Work` deadlines, outcomes, `Run` and `RunOnce`. This interface may still change in minor releases before v1.0.
 
 - `Next` returns the items this instance may work now, grouped by segment, or nothing. It must not block waiting for work, and must not return a batch for a segment whose previous batch has not drained.
-- `Done` reports an item's outcome. For `DeferredOutcome` the scheduler pauses the item's segment until `Outcome.Until` for every instance.
+- `Done` reports an item's outcome. For `DeferredOutcome` the scheduler pauses the item's segment for every instance. `Outcome.Until` is the earliest the segment may resume; the scheduler may pause it longer, for instance until its batch's item leases end or, for a zero or past `Until`, for a lease. `Drained` returns the pause it applied.
 - `Drained` reports that the batch for segment `key` (`""` for an unsegmented list) has finished. When the batch deferred, it returns the time the segment becomes eligible again: the pause the scheduler applied, which may be later than the `Outcome.Until` a `Done` asked for. It returns the zero time otherwise, and `Summary.NextEligible` then reports the `Until` of the deferral.
 - `Close` releases whatever the scheduler holds. The runner calls it once `Run` or `RunOnce` returns, with a 5s timeout.
 
