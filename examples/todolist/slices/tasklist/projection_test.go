@@ -1,42 +1,68 @@
 package tasklist_test
 
 import (
-	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/terraskye/eventsourcing"
 	"github.com/terraskye/eventsourcing/examples/todolist/events"
 	"github.com/terraskye/eventsourcing/examples/todolist/slices/tasklist"
+	"github.com/terraskye/eventsourcing/slicetest"
 )
 
-func TestProjection_KeepsTheTaskList(t *testing.T) {
-	ctx := t.Context()
-	list := tasklist.NewTaskList()
-	p := tasklist.NewProjection(list)
-	if want := []string{"TaskArchived", "TaskCompleted", "TaskCreated"}; !slices.Equal(p.EventTypes, want) {
-		t.Fatalf("EventTypes = %v, want %v", p.EventTypes, want)
-	}
+// TestTaskList covers the task-list view: a created task is listed open,
+// a completed one is marked completed, and an archived one leaves the list.
+func TestTaskList(t *testing.T) {
+	groceries, taxes := uuid.New(), uuid.New()
+	createGroceries := &events.TaskCreated{TaskID: groceries, Title: "Buy groceries"}
+	createTaxes := &events.TaskCreated{TaskID: taxes, Title: "File taxes"}
 
-	keep, done := uuid.New(), uuid.New()
-	for _, e := range []eventsourcing.Event{
-		&events.TaskCreated{TaskID: keep, Title: "Buy groceries"},
-		&events.TaskCreated{TaskID: done, Title: "File taxes"},
-		&events.TaskCompleted{TaskID: keep},
-		&events.TaskCompleted{TaskID: done},
-		&events.TaskArchived{TaskID: done},
-	} {
-		if err := p.Handler.Handle(ctx, e); err != nil {
-			t.Fatalf("Handle(%T): %v", e, err)
-		}
+	tests := []struct {
+		name  string
+		given []eventsourcing.Event
+		want  []tasklist.Task
+	}{
+		{name: "empty"},
+		{
+			name:  "lists created tasks open",
+			given: []eventsourcing.Event{createGroceries, createTaxes},
+			want: []tasklist.Task{
+				{ID: groceries.String(), Title: "Buy groceries"},
+				{ID: taxes.String(), Title: "File taxes"},
+			},
+		},
+		{
+			name:  "marks a completed task",
+			given: []eventsourcing.Event{createGroceries, &events.TaskCompleted{TaskID: groceries}},
+			want:  []tasklist.Task{{ID: groceries.String(), Title: "Buy groceries", Completed: true}},
+		},
+		{
+			name: "drops an archived task",
+			given: []eventsourcing.Event{
+				createGroceries, createTaxes,
+				&events.TaskCompleted{TaskID: taxes}, &events.TaskArchived{TaskID: taxes},
+			},
+			want: []tasklist.Task{{ID: groceries.String(), Title: "Buy groceries"}},
+		},
 	}
-
-	got, err := tasklist.NewQueryHandler(list).HandleQuery(context.Background(), tasklist.ListTasks{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ID != keep.String() || got[0].Title != "Buy groceries" || !got[0].Completed {
-		t.Fatalf("list = %+v, want only the completed, unarchived task %s", got, keep)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			list := tasklist.NewTaskList()
+			slicetest.View(t, tasklist.NewProjection(list)).
+				Given(tt.given...).
+				Then(func(t testing.TB) {
+					got, err := tasklist.NewQueryHandler(list).HandleQuery(t.Context(), tasklist.ListTasks{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					slices.SortFunc(got, func(a, b tasklist.Task) int { return strings.Compare(a.Title, b.Title) })
+					if !slices.Equal(got, tt.want) {
+						t.Fatalf("list = %+v, want %+v", got, tt.want)
+					}
+				})
+		})
 	}
 }

@@ -55,6 +55,20 @@ go test ./...
 `main_test.go` runs the walkthrough above against the wired service, with
 a 100ms archive delay.
 
+Each slice is tested on its own with
+[`slicetest`](https://pkg.go.dev/github.com/terraskye/eventsourcing/slicetest),
+as a table of cases on memory stores:
+
+- the command slices (`createtask`, `completetask`, `archivetask`) with
+  `slicetest.Command`: given events, when a command, then the events it
+  records or the rejection;
+- the views (`tasklist`, `taskstoarchive`) with `slicetest.View`: given
+  events, then the read model or the todo list's claim;
+- the `archivetasks` automation with `slicetest.NewScenario`, which wires
+  the todo list, the automation and the archive-task handler to a command
+  bus: given completed tasks, run the automation, then the tasks it
+  archived.
+
 ## Layout
 
 ```
