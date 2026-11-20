@@ -8,6 +8,7 @@ import (
 
 	"github.com/terraskye/eventsourcing/automation"
 	"github.com/terraskye/eventsourcing/memory"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // TestWithAutomationStoreTelemetry_Segments checks acquisitions, grants,
@@ -38,8 +39,8 @@ func TestWithAutomationStoreTelemetry_Segments(t *testing.T) {
 	if n, results := sum("eventsourcing.automation.acquisitions"); n != 1 || !slices.Equal(results, []string{"success"}) {
 		t.Errorf("acquisitions = %v %v, want one success", n, results)
 	}
-	if n, _ := sum("eventsourcing.automation.segment.grants"); n != 2 {
-		t.Errorf("grants = %v, want 2", n)
+	if n, _ := sum("eventsourcing.automation.segment.granted"); n != 2 {
+		t.Errorf("granted = %v, want 2", n)
 	}
 	if n, _ := sum("eventsourcing.automation.segment.waiting"); n != 1 {
 		t.Errorf("waiting = %v, want 1: c had work and no owner", n)
@@ -49,8 +50,36 @@ func TestWithAutomationStoreTelemetry_Segments(t *testing.T) {
 	}
 }
 
+// TestWithAutomationStoreTelemetry_DeferralsNotTraced checks that Defer
+// and a Release with DeferFor leave the span in their context alone: the
+// runner calls them with Run's context, not the work's, so an event there
+// would land on an unrelated span. WithWorkTelemetry records the deferral.
+func TestWithAutomationStoreTelemetry_DeferralsNotTraced(t *testing.T) {
+	name := newAutomationName()
+	store := WithAutomationStoreTelemetry(memory.NewAutomationStore())
+	before := spanNameRecorder.len()
+	ctx, span := tracer.Start(t.Context(), name)
+	defer span.End()
+	res, err := store.Acquire(ctx, name, "o1", []automation.Segment{{Key: "a"}, {Key: "b"}}, 2, time.Minute)
+	if err != nil || len(res.Granted) != 2 {
+		t.Fatalf("Acquire = %+v, %v; want two grants", res, err)
+	}
+	if err := store.Defer(ctx, name, "a", time.Minute); err != nil {
+		t.Fatalf("Defer: %v", err)
+	}
+	if _, err := store.Release(ctx, []automation.ReleaseRequest{{Lease: res.Granted[1], DeferFor: time.Minute}}); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	for _, s := range spanNameRecorder.spansSince(before) {
+		if s.name == name && len(s.events) > 0 {
+			t.Errorf("the store added events %v to the caller's span", s.events)
+		}
+	}
+}
+
 // TestWithAutomationStoreTelemetry_PauseSpans checks that pausing and
-// resuming are traced.
+// resuming are traced, and that the spans' status is left unset when they
+// succeed.
 func TestWithAutomationStoreTelemetry_PauseSpans(t *testing.T) {
 	name := newAutomationName()
 	store := WithAutomationStoreTelemetry(memory.NewAutomationStore())
@@ -65,6 +94,9 @@ func TestWithAutomationStoreTelemetry_PauseSpans(t *testing.T) {
 	for _, s := range spanNameRecorder.spansSince(before) {
 		if attrString(s.attrs, AttrAutomationName) == name {
 			got = append(got, s.name)
+			if s.status != codes.Unset {
+				t.Errorf("span %s has status %v, want Unset", s.name, s.status)
+			}
 		}
 	}
 	sort.Strings(got)

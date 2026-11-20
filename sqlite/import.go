@@ -11,8 +11,9 @@ import (
 // each event's ID, stream, order within its stream, metadata and time. It
 // returns the number of events copied.
 //
-// It moves a log from another store to SQLite, such as the file store
-// v0.2.0 still has.
+// It moves a log from another store to SQLite: src is any
+// [eventsourcing.GlobalReader], so the memory, Postgres and KurrentDB stores
+// and another SQLite database all serve as a source.
 // Run it from the program that defines the events, after registering them
 // with [eventsourcing.RegisterEvent], since reading src decodes every event. dst
 // should be empty: an event whose stream position is already taken in dst

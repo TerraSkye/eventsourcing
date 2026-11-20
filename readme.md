@@ -115,7 +115,7 @@ func main() {
 
 	id := uuid.New()
 	res, err := bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Write a README"})
-	fmt.Println(res.Successful, err) // true <nil>
+	fmt.Println(res.NextExpectedVersion, err) // 1 <nil>
 
 	_, err = bus.Dispatch(ctx, CreateTask{TaskID: id, Title: "Again"})
 	var violation *eventsourcing.BusinessRuleViolationError
@@ -211,8 +211,8 @@ Projection handlers on SQLite and Postgres write through `sqlite.Tx(ctx)` / `pos
 | `eventsourcing` (root) | `Command`, `Event`, `Envelope`, `EventStore`, `GlobalReader`, `EventHandler`, command/query buses, `NewCommandHandler`, middleware, event registry, `Iterator`, stream states and typed errors |
 | `projection` | `Definition`, `Runner`, `Store`; checkpoints, leases, segments, rebuilds, replay, error policies, dead-lettering |
 | `automation` | Background workers that claim items from a todo-list read model and act on them (process managers, scheduled follow-ups) |
-| `memory`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore` and, where supported, `NewProjectionStore` |
-| `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores and projections |
+| `memory`, `sqlite`, `postgres`, `kurrentdb` | One package per backend, each with `NewEventStore` and, where supported, `NewProjectionStore` and `NewAutomationStore` |
+| `telemetry` | OpenTelemetry spans and metrics for command handlers, query handlers, event handlers, event stores, projections and automations |
 | `logging` | `slog` middleware for commands, queries and events |
 | `eventsourcingtest`, `projection/projectiontest`, `automation/automationtest` | Acceptance suites and fakes for testing your own implementations |
 
@@ -288,7 +288,7 @@ mkdocs build --strict   # what CI runs on pull requests
 
 The repository's `go.work` points the nested modules at the local root; outside the repository they resolve the published version.
 
-Issues and pull requests are welcome. If you're adding a backend, run it against `eventsourcingtest.AcceptanceTest` and `eventsourcingtest.GlobalReaderAcceptanceTest` first; if it passes those, projections and automations work on top of it unchanged.
+Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how the repository works. If you're adding a backend, run it against `eventsourcingtest.AcceptanceTest` and `eventsourcingtest.GlobalReaderAcceptanceTest` first; if it passes those, projections and automations work on top of it unchanged.
 
 ## License
 

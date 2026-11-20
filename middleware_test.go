@@ -54,7 +54,7 @@ func TestCommandBusMiddleware(t *testing.T) {
 	bus.Use(mw.Middleware)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	t.Run("called on successful dispatch", func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestCommandBusMiddlewareExecution(t *testing.T) {
 		var out []string
 		Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
 			out = append(out, handlerLabel)
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
@@ -112,7 +112,7 @@ func TestCommandBusMiddlewareExecution(t *testing.T) {
 
 		Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
 			out = append(out, handlerLabel)
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
@@ -148,7 +148,7 @@ func TestCommandBusMiddlewareOrder(t *testing.T) {
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
 		order = append(order, "handler")
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
@@ -169,7 +169,7 @@ func TestCommandBusMiddlewareAppliedAtRegister(t *testing.T) {
 	bus.Use(mw.Middleware)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {
@@ -190,7 +190,7 @@ func TestCommandBusMiddlewareNotAppliedAfterRegister(t *testing.T) {
 	defer bus.Stop()
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	late := &mwTestCommandMiddleware{}
@@ -221,7 +221,7 @@ func TestCommandBusFuncAndStructMiddleware(t *testing.T) {
 	})
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	if _, err := bus.Dispatch(context.Background(), testCmd{ID: "x"}); err != nil {

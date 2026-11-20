@@ -3,6 +3,7 @@ package automation_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -327,27 +328,6 @@ func TestRun_WatcherNudges(t *testing.T) {
 	eventually(t, "the item processed after the nudge", func() bool { return list.pending() == 0 })
 }
 
-func TestNew_Panics(t *testing.T) {
-	list := newTodoList()
-	work := func(context.Context, string) error { return nil }
-	tests := map[string]automation.Definition[string]{
-		"no name":       {Projection: newDep("x", true), TodoList: list, Work: work},
-		"no projection": {Name: "a", TodoList: list, Work: work},
-		"no todo list":  {Name: "a", Projection: newDep("x", true), Work: work},
-		"no work":       {Name: "a", Projection: newDep("x", true), TodoList: list},
-	}
-	for name, d := range tests {
-		t.Run(name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("New did not panic")
-				}
-			}()
-			automation.NewRunner(d)
-		})
-	}
-}
-
 // countingList wraps a todo list and counts its claims.
 type countingList struct {
 	*memTodoList
@@ -359,10 +339,14 @@ func (l countingList) Claim(ctx context.Context, req automation.ClaimRequest) ([
 	return l.memTodoList.Claim(ctx, req)
 }
 
-// failingList is a todo list whose database is down.
-type failingList struct{}
+// failingList is a todo list whose database is down. It counts its claims
+// when calls is set.
+type failingList struct{ calls *atomic.Int32 }
 
-func (failingList) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+func (l failingList) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+	if l.calls != nil {
+		l.calls.Add(1)
+	}
 	return nil, errors.New("database down")
 }
 
@@ -373,7 +357,7 @@ type job struct {
 }
 
 // keyedList is an in-memory todo list with segment keys, the shape the
-// default scheduler needs when Keys is set.
+// default scheduler needs when the list is Segmented.
 type keyedList struct {
 	mu    sync.Mutex
 	seq   int
@@ -446,8 +430,8 @@ func (l *keyedList) pendingSegments(context.Context) ([]automation.Segment, erro
 	return keys, nil
 }
 
-// Claim leases up to req.MaxPerKey pending items per key in req.Keys, in
-// insertion order; all keys when req.Keys is empty.
+// Claim leases up to req.MaxPerKey pending items per key in req.Segments,
+// in insertion order; all keys when req.Segments is empty.
 func (l *keyedList) Claim(_ context.Context, req automation.ClaimRequest) ([]job, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -856,26 +840,36 @@ func TestSegmented_DeferredPausesOnlyThatKey(t *testing.T) {
 	}
 }
 
+// TestNewRunner_Panics covers each rejected definition. Every case has a
+// valid store except "list without store", so the panic names the field
+// that is actually missing.
 func TestNewRunner_Panics(t *testing.T) {
 	dep := newDep("todo", true)
 	work := func(context.Context, string) error { return nil }
 	list := newTodoList()
-	cases := map[string]automation.Definition[string]{
-		"no list and no scheduler": {Name: "x", Projection: dep, Work: work},
-		"list and scheduler":       {Name: "x", Projection: dep, Work: work, TodoList: list, Scheduler: nopScheduler[string]{}},
-		"no projection":            {Name: "x", Work: work, TodoList: list},
-		"no work":                  {Name: "x", Projection: dep, TodoList: list},
-		"list without store":       {Name: "x", Projection: dep, Work: work, TodoList: list},
-		"scheduler and store":      {Name: "x", Projection: dep, Work: work, Scheduler: nopScheduler[string]{}, Store: memory.NewAutomationStore()},
+	store := memory.NewAutomationStore()
+	sched := nopScheduler[string]{}
+	cases := map[string]struct {
+		def  automation.Definition[string]
+		want string
+	}{
+		"no name":                  {automation.Definition[string]{Projection: dep, Work: work, TodoList: list, Store: store}, "Name is required"},
+		"no projection":            {automation.Definition[string]{Name: "x", Work: work, TodoList: list, Store: store}, "Projection is required"},
+		"no work":                  {automation.Definition[string]{Name: "x", Projection: dep, TodoList: list, Store: store}, "Work is required"},
+		"no list and no scheduler": {automation.Definition[string]{Name: "x", Projection: dep, Work: work, Store: store}, "TodoList or Scheduler is required"},
+		"list and scheduler":       {automation.Definition[string]{Name: "x", Projection: dep, Work: work, TodoList: list, Store: store, Scheduler: sched}, "Scheduler excludes TodoList and Store"},
+		"scheduler and store":      {automation.Definition[string]{Name: "x", Projection: dep, Work: work, Scheduler: sched, Store: store}, "Scheduler excludes TodoList and Store"},
+		"list without store":       {automation.Definition[string]{Name: "x", Projection: dep, Work: work, TodoList: list}, "Store is required"},
 	}
-	for name, d := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
-				if recover() == nil {
-					t.Fatal("NewRunner did not panic")
+				got := fmt.Sprint(recover())
+				if !strings.Contains(got, tc.want) {
+					t.Fatalf("NewRunner panicked with %q, want %q", got, tc.want)
 				}
 			}()
-			automation.NewRunner(d)
+			automation.NewRunner(tc.def)
 		})
 	}
 }
@@ -940,8 +934,10 @@ func (nopScheduler[T]) Next(context.Context) ([]automation.Batch[T], error) { re
 func (nopScheduler[T]) Done(context.Context, automation.Item[T], automation.Outcome) error {
 	return nil
 }
-func (nopScheduler[T]) Drained(context.Context, string) error { return nil }
-func (nopScheduler[T]) Close(context.Context) error           { return nil }
+func (nopScheduler[T]) Drained(context.Context, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (nopScheduler[T]) Close(context.Context) error { return nil }
 
 // TestCustomScheduler covers that a Scheduler replaces the default
 // claiming entirely: the runner works what it hands out and reports back.
@@ -976,7 +972,7 @@ func TestCustomScheduler(t *testing.T) {
 	}
 	sort.Strings(worked)
 	if strings.Join(worked, ",") != "a,b,c" {
-		t.Fatalf("worked %v", worked)
+		t.Fatalf("worked %v, want a, b and c", worked)
 	}
 	if !s.closed {
 		t.Fatal("scheduler was not closed")
@@ -1019,11 +1015,11 @@ func (s *scriptedScheduler) Done(_ context.Context, it automation.Item[string], 
 	return nil
 }
 
-func (s *scriptedScheduler) Drained(_ context.Context, key string) error {
+func (s *scriptedScheduler) Drained(_ context.Context, key string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drained = append(s.drained, key)
-	return nil
+	return time.Time{}, nil
 }
 
 func (s *scriptedScheduler) Close(context.Context) error { s.closed = true; return nil }
@@ -1107,6 +1103,150 @@ func TestRun_PauseThroughTheStore(t *testing.T) {
 	})
 }
 
+// publishingStore wraps a store and records every status it was asked to
+// save, with the ttl and the time of the write.
+type publishingStore struct {
+	automation.Store
+	mu     sync.Mutex
+	writes []statusWrite
+}
+
+type statusWrite struct {
+	status automation.Status
+	ttl    time.Duration
+	at     time.Time
+}
+
+func (s *publishingStore) SaveStatus(ctx context.Context, name string, st automation.Status, ttl time.Duration) error {
+	s.mu.Lock()
+	s.writes = append(s.writes, statusWrite{status: st, ttl: ttl, at: time.Now()})
+	s.mu.Unlock()
+	return s.Store.SaveStatus(ctx, name, st, ttl)
+}
+
+func (s *publishingStore) written() []statusWrite {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]statusWrite{}, s.writes...)
+}
+
+// published returns the phase the store shows for the one instance of
+// name, or -1 when it shows none.
+func published(t *testing.T, store automation.Store, name string) automation.Phase {
+	t.Helper()
+	sts, err := store.LoadStatuses(t.Context(), name)
+	if err != nil {
+		t.Fatalf("LoadStatuses: %v", err)
+	}
+	if len(sts) != 1 {
+		return -1
+	}
+	return sts[0].Phase
+}
+
+// TestRun_PublishesPhaseChangesAtOnce covers that a new phase reaches the
+// store before the runner waits for its next poll, not after: the poll
+// interval is an hour, so a phase that is only published at the top of
+// the next round never shows up.
+func TestRun_PublishesPhaseChangesAtOnce(t *testing.T) {
+	ctx := t.Context()
+	store := memory.NewAutomationStore()
+	todo := newDep("orders-to-ship", true)
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   todo,
+		Store:        store,
+		TodoList:     newTodoList(),
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: time.Hour,
+		Logger:       quiet,
+	})
+	start(t, a)
+	eventually(t, "Idle published", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+
+	todo.live.Store(false)
+	a.Nudge()
+	eventually(t, "Waiting published", func() bool { return published(t, store, "ship-orders") == automation.Waiting })
+
+	todo.live.Store(true)
+	if err := store.SetPaused(ctx, "ship-orders", true); err != nil {
+		t.Fatal(err)
+	}
+	a.Nudge()
+	eventually(t, "Paused published", func() bool { return published(t, store, "ship-orders") == automation.Paused })
+
+	if err := store.SetPaused(ctx, "ship-orders", false); err != nil {
+		t.Fatal(err)
+	}
+	a.Nudge()
+	eventually(t, "Idle published after resuming", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+}
+
+// TestRun_StalledStatusOutlivesTheBackoff covers a stalled runner: the
+// Stalled phase is published before the backoff sleep, and the status is
+// live for that sleep on top of the usual ttl, so the instance does not
+// drop out of LoadStatuses while it backs off.
+func TestRun_StalledStatusOutlivesTheBackoff(t *testing.T) {
+	store := &publishingStore{Store: memory.NewAutomationStore()}
+	claims := &atomic.Int32{}
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		Store:        store,
+		TodoList:     failingList{calls: claims},
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	start(t, a)
+
+	eventually(t, "Stalled published", func() bool { return published(t, store, "ship-orders") == automation.Stalled })
+	if n := claims.Load(); n != 1 {
+		t.Fatalf("Stalled was published after %d claims, want before the retry", n)
+	}
+
+	// The write after the Stalled one comes once the backoff has slept.
+	var stalled int
+	eventually(t, "the publish after the backoff", func() bool {
+		ws := store.written()
+		for i, w := range ws {
+			if w.status.Phase == automation.Stalled {
+				stalled = i
+				return len(ws) > i+1
+			}
+		}
+		return false
+	})
+	ws := store.written()
+	usual := ws[0].ttl // published while Starting
+	slept := ws[stalled+1].at.Sub(ws[stalled].at)
+	if got := ws[stalled].ttl; got < usual+slept-100*time.Millisecond {
+		t.Fatalf("Stalled status ttl = %s, want the usual %s plus the %s backoff", got, usual, slept)
+	}
+}
+
+// TestRun_WithdrawsItsStatusWhenStopped covers that a stopped instance
+// leaves LoadStatuses at once rather than when its last status expires.
+func TestRun_WithdrawsItsStatusWhenStopped(t *testing.T) {
+	store := memory.NewAutomationStore()
+	a := automation.NewRunner(automation.Definition[string]{
+		Name:         "ship-orders",
+		Projection:   newDep("orders-to-ship", true),
+		Store:        store,
+		TodoList:     newTodoList(),
+		Work:         func(context.Context, string) error { return nil },
+		PollInterval: 10 * time.Millisecond,
+		Logger:       quiet,
+	})
+	stop := start(t, a)
+	eventually(t, "Idle published", func() bool { return published(t, store, "ship-orders") == automation.Idle })
+
+	stop()
+	if got := published(t, store, "ship-orders"); got != -1 {
+		t.Fatalf("a stopped instance still shows %s", got)
+	}
+}
+
 // TestRun_PauseLetsRunningWorkFinish covers pausing while an item is being
 // worked: the item finishes, nothing more is claimed, and the segment the
 // instance held is given back.
@@ -1155,7 +1295,9 @@ func TestRun_PauseLetsRunningWorkFinish(t *testing.T) {
 func TestRunOnce_PausedDoesNothing(t *testing.T) {
 	ctx := t.Context()
 	store := memory.NewAutomationStore()
-	store.SetPaused(ctx, "ship-orders", true)
+	if err := store.SetPaused(ctx, "ship-orders", true); err != nil {
+		t.Fatal(err)
+	}
 	list := newTodoList()
 	list.Add(ctx, "a")
 	a := automation.NewRunner(automation.Definition[string]{
@@ -1173,4 +1315,80 @@ func TestRunOnce_PausedDoesNothing(t *testing.T) {
 	if a.Status().Phase != automation.Paused {
 		t.Fatalf("phase %s, want paused", a.Status().Phase)
 	}
+}
+
+// The types of ExampleDefinition: a todo list of orders to ship, and the
+// automation that ships them, laid out as the Definition doc describes.
+type shippingTodo struct{ OrderID, Address string }
+
+// ordersToShip is the todo list. A projection fills it; Claim leases from
+// it.
+type ordersToShip struct {
+	mu      sync.Mutex
+	pending map[string]shippingTodo
+	leased  map[string]time.Time // until when each pending item is leased
+}
+
+func (l *ordersToShip) Claim(_ context.Context, req automation.ClaimRequest) ([]shippingTodo, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	var out []shippingTodo
+	for id, t := range l.pending {
+		if len(out) == req.MaxPerKey {
+			break
+		}
+		if l.leased[id].After(now) {
+			continue
+		}
+		l.leased[id] = now.Add(req.Lease)
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+// shipOrder is the command the automation sends for one item.
+type shipOrder struct{ OrderID string }
+
+func (c shipOrder) AggregateID() string { return c.OrderID }
+func (c shipOrder) CommandType() string { return "ShipOrder" }
+
+// shipOrders is the automation as a type: the todo list it claims from, the
+// projection that keeps that list, and the dispatcher its commands go to.
+type shipOrders struct {
+	list *ordersToShip
+	todo automation.Dependency
+	bus  eventsourcing.Dispatcher
+}
+
+func newShipOrders(list *ordersToShip, todo automation.Dependency, bus eventsourcing.Dispatcher) *shipOrders {
+	return &shipOrders{list: list, todo: todo, bus: bus}
+}
+
+func (a *shipOrders) Definition() automation.Definition[shippingTodo] {
+	return automation.Definition[shippingTodo]{
+		Name:       "ship-orders",
+		TodoList:   a.list,
+		Projection: a.todo, // work only while the list is live
+		Work:       a.Work,
+	}
+}
+
+func (a *shipOrders) Work(ctx context.Context, t shippingTodo) error {
+	_, err := a.bus.Dispatch(ctx, shipOrder{OrderID: t.OrderID})
+	return err
+}
+
+// ExampleDefinition is main's side of the Definition doc: the automation
+// describes itself, main chooses where its leases live and runs it.
+func ExampleDefinition() {
+	list := &ordersToShip{pending: map[string]shippingTodo{}, leased: map[string]time.Time{}}
+	todoRunner := newDep("orders-to-ship", true) // the *projection.Runner that keeps list
+	commandBus := eventsourcing.NewCommandBus(20, 1)
+	defer commandBus.Stop()
+
+	ship := newShipOrders(list, todoRunner, commandBus).Definition()
+	ship.Store = memory.NewAutomationStore() // one process; sqlite or postgres to share leases
+	runner := automation.NewRunner(ship)
+	_ = runner.Run // go runner.Run(ctx)
 }

@@ -1,6 +1,6 @@
 # How to add OpenTelemetry tracing
 
-Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware.
+Wrap command handlers, query handlers, event handlers, and the event store with OpenTelemetry middleware. This guide shows the wiring; the [telemetry reference](../reference/telemetry.md) lists every span, metric and attribute the package produces.
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ tracedHandler := telemetry.WithCommandTelemetry(createTaskHandler)
 
 Each command execution creates a span named `handle` and the command type, such as `handle CreateTask`, under the current trace. `telemetry.WithOperation("…")` sets another name. `telemetry.CommandTelemetry()` does the same for every handler on a bus, registered with `CommandBus.Use`.
 
-A command rejected with a `BusinessRuleViolationError` leaves the span OK and is recorded with `eventsourcing.result="rejected"`; any other error fails the span and is recorded as `failure`.
+A command rejected with a `BusinessRuleViolationError` leaves the span's status unset, as a success does, and is recorded with `eventsourcing.result="rejected"`; any other error fails the span and is recorded as `failure`.
 
 ## Wrap a query handler
 
@@ -103,7 +103,7 @@ projection makes on every poll, are counted in metrics but get no span.
 
 | Metric | Type | What it shows |
 |---|---|---|
-| `eventsourcing.projection.lag` | gauge | Head of the log minus the checkpoint. Events on Postgres, memory and file; log bytes on KurrentDB |
+| `eventsourcing.projection.lag` | gauge | Head of the log minus the checkpoint. Events on memory, SQLite and Postgres; log bytes on KurrentDB |
 | `eventsourcing.projection.position` | gauge | The checkpoint |
 | `eventsourcing.projection.phase` | gauge | 1 for the current phase, per `eventsourcing.projection.phase` |
 | `eventsourcing.projection.dead_lettered.events` | counter | Events dead-lettered under `SkipWhenLive` or `SkipAlways` |
@@ -136,26 +136,30 @@ defer reg.Unregister()
 
 Each item runs in a `process item` span, tagged with
 `eventsourcing.automation.name`. When the work dispatches a command through a bus with
-`telemetry.CommandTelemetry`, the command's span is its child. A deferral
-adds a `segment deferred` event to the span; pausing and resuming from
-the dashboard are `pause automation` and `resume automation` spans. Segment
-keys go on spans only, never on metrics, since one series per tenant would
-grow without bound.
+`telemetry.CommandTelemetry`, the command's span is its child. Work that
+returns `automation.Deferred` adds a `segment_deferred` event to the span,
+with the time the segment is paused until as
+`eventsourcing.automation.deferred_until` when the deferral names one.
+Work that returns its context's cancellation while the run is stopping is
+recorded as `canceled`, which the runner does not count. Pausing and
+resuming from the dashboard are `pause automation` and `resume automation`
+spans. Segment keys go on spans only, never on metrics, since one series
+per tenant would grow without bound.
 
 | Metric | Type | What it reports |
 |---|---|---|
 | `eventsourcing.automation.phase` | gauge | 1 for the current phase, per `eventsourcing.automation.phase`, on this instance |
 | `eventsourcing.automation.items` | counter | Items worked on this instance, by `eventsourcing.result` (`success`, `failure`, `deferred`) |
-| `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `failure` with `error.type`) |
+| `eventsourcing.automation.work.duration` | histogram | Work time per item, by `eventsourcing.result` (`success`, `deferred`, `canceled`, `failure` with `error.type`). Its count differs from `items`: an item whose lease expired before its work started is a failure there but never reaches the work, and a cancelled item is recorded here only |
 | `eventsourcing.automation.acquisitions` | counter | Calls to acquire segments, by `eventsourcing.result`; while they fail the instance gets no new segments |
-| `eventsourcing.automation.segment.grants` | counter | Segments granted to this instance |
-| `eventsourcing.automation.segment.waiting` | gauge | Segments with work and no owner. Every instance reports it: aggregate with max |
+| `eventsourcing.automation.segment.granted` | counter | Segments granted to this instance |
+| `eventsourcing.automation.segment.waiting` | gauge | Segments with no owner whose pause has passed. With `Query` these have work; with `Shards` empty buckets count too. Every instance reports it: aggregate with max |
 | `eventsourcing.automation.segment.lost` | counter | Segment leases this instance lost to expiry or another instance |
 
 Alert on `phase{eventsourcing.automation.phase="stalled"} == 1`, on
-`segment.waiting` that stays above zero (the instances hold too few
-segments to keep up), and on a rising `segment.lost`, which means work
-outlives its leases.
+`segment.waiting` that stays above zero with `Query` segments (the
+instances hold too few segments to keep up), and on a rising
+`segment.lost`, which means work outlives its leases.
 
 ## Add custom attributes
 

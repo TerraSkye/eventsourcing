@@ -21,7 +21,7 @@ var phases = []projection.Phase{
 var (
 	// ProjectionLag reports how far a projection lags behind the head of
 	// the global log: its Head minus its Position, in GlobalPosition units.
-	// On stores that number events densely (memory, file, Postgres) that is
+	// On stores that number events densely (memory, SQLite, Postgres) that is
 	// a count of events; on KurrentDB GlobalPosition is a commit position,
 	// so the lag is in bytes of log and only its trend is meaningful.
 	ProjectionLag, _ = meter.Int64ObservableGauge(

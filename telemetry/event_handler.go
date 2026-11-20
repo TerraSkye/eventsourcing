@@ -24,9 +24,9 @@ import (
 // and stream position, and stream ID. It records [EventHandlerDuration] for
 // every invocation, labelled by [AttrResult]. A returned
 // [eventsourcing.SkippedEventError] is treated as an intentional, non-error
-// skip: it marks the span OK and is recorded with result "skipped". Any
-// other error marks the span as failed and is recorded with result
-// "failure" and an [AttrErrorType].
+// skip: it leaves the span's status unset, as a success does, and is
+// recorded with result "skipped". Any other error marks the span as failed
+// and is recorded with result "failure" and an [AttrErrorType].
 //
 // When next is a [projection.Definition]'s handler and the runner commits
 // through a store wrapped with [WithProjectionStoreTelemetry], the span is a
@@ -115,10 +115,8 @@ func WithEventTelemetry(next eventsourcing.EventHandler, options ...Option) even
 		switch {
 		case err == nil:
 			metricAttr = append(metricAttr, AttrResult.String("success"))
-			span.SetStatus(codes.Ok, "")
 		case errors.As(err, &skipped):
 			metricAttr = append(metricAttr, AttrResult.String("skipped"))
-			span.SetStatus(codes.Ok, "")
 		default:
 			errType := AttrErrorType.String(errorType(err))
 			metricAttr = append(metricAttr, AttrResult.String("failure"), errType)

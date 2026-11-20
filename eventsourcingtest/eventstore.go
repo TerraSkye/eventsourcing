@@ -111,8 +111,8 @@ func (a *acceptance) saveEmptyBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save(nil): %v", err)
 	}
-	if !res.Successful {
-		t.Errorf("Save(nil).Successful = false, want true")
+	if res.GlobalPosition != 0 {
+		t.Errorf("Save(nil).GlobalPosition = %d, want 0 because nothing was appended", res.GlobalPosition)
 	}
 }
 
@@ -121,9 +121,6 @@ func (a *acceptance) saveNoStreamCreatesStream(t *testing.T) {
 	res, err := a.store.Save(t.Context(), envelopes(id, 1, 3), eventsourcing.NoStream{})
 	if err != nil {
 		t.Fatalf("Save(eventsourcing.NoStream) on a new stream: %v", err)
-	}
-	if !res.Successful {
-		t.Errorf("Successful = false, want true")
 	}
 	if res.StreamID != id {
 		t.Errorf("StreamID = %q, want %q", res.StreamID, id)

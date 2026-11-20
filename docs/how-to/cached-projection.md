@@ -2,7 +2,7 @@
 
 A projection keeps a read model up to date from the global event log. Unlike the [live read model](../tutorials/02-first-query.md), which replays events on every query, a projection processes each event once, remembers how far it got, and survives restarts.
 
-The `projection` package provides a `Runner` that does the reading, checkpointing, retrying and coordination between instances. You write the handler.
+The `projection` package provides a `Runner` that does the reading, checkpointing, retrying and coordination between instances. You write the handler. This guide walks through the choices; the [projection reference](../reference/projection.md) lists every field, default and error.
 
 ## How it works
 
@@ -19,7 +19,7 @@ log ───► │ ReadAll(after checkpoint, EventTypes) ─►│
 A runner needs three things:
 
 1. A `projection.Definition`: the projection's name, its handler, and the event types it handles.
-2. An `eventsourcing.GlobalReader` to read the log from. The memory, file, Postgres and KurrentDB event stores all implement it.
+2. An `eventsourcing.GlobalReader` to read the log from. The memory, SQLite, Postgres and KurrentDB event stores all implement it.
 3. A `projection.Store` that holds checkpoints, claims and status. Use `memory` for in-memory read models and tests, and `postgres` for read models in Postgres.
 
 ## Step 1: Define the projection

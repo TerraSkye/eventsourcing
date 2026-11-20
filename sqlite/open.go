@@ -11,9 +11,10 @@ import (
 
 // Schema creates every table the package uses: the events table of
 // [EventStore], the segment and dead-letter tables of [ProjectionStore],
-// and the segment table of [AutomationStore]. It is idempotent; run it with
-// your migrations, or once at startup. The same SQL ships as schema.sql in
-// this package's directory.
+// and the three tables of [AutomationStore]: automation_segments,
+// automation_controls and automation_instances. It is idempotent; run it
+// with your migrations, or once at startup. The same SQL ships as
+// schema.sql in this package's directory.
 //
 // Schema has the tables as this release uses them, and only creates what
 // is missing: it adds no column to a table an earlier release created.

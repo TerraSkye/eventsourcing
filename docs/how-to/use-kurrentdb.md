@@ -28,7 +28,7 @@ store := kdb.NewEventStore(client)
 defer store.Close()
 ```
 
-`NewEventStore(db *kurrentdb.Client, opts ...Option) *EventStore` returns the concrete store, which implements both `EventStore` and `GlobalReader`. The connection string follows the EventStoreDB URI format. Pass your existing `EventStore` consumers (command handlers, query handlers) the `store` as usual — no changes needed.
+`NewEventStore(db *kurrentdb.Client, opts ...Option) *EventStore` returns the concrete store, which implements both `EventStore` and `GlobalReader`. The connection string follows the EventStoreDB URI format. Pass your existing `EventStore` consumers (command handlers, query handlers) the `store` as usual — no changes needed. See the [kurrentdb.EventStore reference](../reference/implementations/kurrentdb.md) for the options, the version mapping, the retry policy and how errors are reported.
 
 ## Register events before using the store
 

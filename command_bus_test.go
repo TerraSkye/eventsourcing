@@ -38,17 +38,14 @@ func TestCommandBus_Success(t *testing.T) {
 	bus := NewCommandBus(10, 2)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	ctx := context.Background()
-	res, err := bus.Dispatch(ctx, testCmd{ID: "abc"})
+	_, err := bus.Dispatch(ctx, testCmd{ID: "abc"})
 
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
-	}
-	if !res.Successful {
-		t.Fatalf("expected successful result")
 	}
 
 	bus.Stop()
@@ -112,7 +109,7 @@ func TestCommandBus_ContextCancelBeforeEnqueue(t *testing.T) {
 	bus := NewCommandBus(0, 1) // zero buffer so enqueue blocks
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	// Cancel immediately
@@ -132,7 +129,7 @@ func TestCommandBus_ContextCancelWhileWaiting(t *testing.T) {
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
 		time.Sleep(200 * time.Millisecond)
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -165,7 +162,7 @@ func TestCommandBus_ContextCancelWhileQueued(t *testing.T) {
 		case "queued":
 			handled.Add(1)
 		}
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	blockerErr := make(chan error, 1)
@@ -211,7 +208,7 @@ func TestRegister_DuplicateHandlerPanics(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	defer func() {
@@ -221,7 +218,7 @@ func TestRegister_DuplicateHandlerPanics(t *testing.T) {
 	}()
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 }
 
@@ -235,7 +232,7 @@ func TestRegister_HandlerTypeMismatchReturnsError(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	cmdName := testCmd{}.CommandType()
@@ -259,7 +256,7 @@ func TestCommandBus_Stop(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	// Dispatch something before stopping
@@ -342,7 +339,7 @@ func TestCommandBus_StopDoesNotPanicPendingDispatch(t *testing.T) {
 	var once sync.Once
 	Register(bus, func(ctx context.Context, cmd stopProbeCmd) (AppendResult, error) {
 		<-release // occupy the single worker
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	const dispatchers = 32
@@ -385,7 +382,7 @@ func TestCommandBus_StopIsIdempotent(t *testing.T) {
 	bus := NewCommandBus(10, 1)
 
 	Register(bus, func(ctx context.Context, cmd testCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	bus.Stop()
@@ -436,7 +433,7 @@ func TestCommandBus_RegisterWhileDispatching(t *testing.T) {
 		bus := NewCommandBus(64, 1)
 
 		Register(bus, func(ctx context.Context, cmd raceCmdA) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		// Keep the worker busy reading b.handlers, and signal once it is
@@ -465,16 +462,16 @@ func TestCommandBus_RegisterWhileDispatching(t *testing.T) {
 
 		// Concurrently register further handlers, each writing b.handlers.
 		Register(bus, func(ctx context.Context, cmd raceCmdB) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 		Register(bus, func(ctx context.Context, cmd raceCmdC) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 		Register(bus, func(ctx context.Context, cmd raceCmdD) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 		Register(bus, func(ctx context.Context, cmd raceCmdE) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		close(stop)
@@ -498,7 +495,7 @@ func benchmarkDispatch(b *testing.B, shards, parallelism int) {
 	defer bus.Stop()
 
 	Register(bus, func(ctx context.Context, cmd benchCmd) (AppendResult, error) {
-		return AppendResult{Successful: true}, nil
+		return AppendResult{}, nil
 	})
 
 	ids := make([]string, 512)
@@ -564,7 +561,7 @@ func TestCommandBus_BufferedStopRaceHangsDispatch(t *testing.T) {
 	for i := range trials {
 		bus := NewCommandBus(1, 1) // buffered shard queue, matches doc example shape
 		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		var dispatchDone int32
@@ -613,7 +610,7 @@ func TestCommandBus_BufferedStopRaceParallel(t *testing.T) {
 	for i := 0; i < trials; i++ {
 		bus := NewCommandBus(dispatchersPerTrial, 1)
 		Register(bus, func(ctx context.Context, cmd bufferedRaceCmd) (AppendResult, error) {
-			return AppendResult{Successful: true}, nil
+			return AppendResult{}, nil
 		})
 
 		var wg sync.WaitGroup

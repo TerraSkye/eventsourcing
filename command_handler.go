@@ -49,10 +49,10 @@ var DefaultStreamNamer StreamNamer = func(ctx context.Context, cmd Command) stri
 //
 //	func HandleReserveSeat(ctx context.Context, cmd ReserveSeat) (AppendResult, error) {
 //	    if seatAlreadyReserved(cmd.SeatNumber) {
-//	        return AppendResult{Successful: false}, fmt.Errorf("seat already reserved")
+//	        return AppendResult{}, fmt.Errorf("seat already reserved")
 //	    }
 //	    // persist a SeatReserved event via an EventStore, then:
-//	    return AppendResult{Successful: true, StreamID: cmd.AggregateID()}, nil
+//	    return AppendResult{StreamID: cmd.AggregateID()}, nil
 //	}
 type CommandHandler[C Command] func(ctx context.Context, command C) (AppendResult, error)
 
@@ -200,7 +200,7 @@ func NewCommandHandler[T any, C Command](
 				// applies once the stream is confirmed to exist — this load
 				// error means it doesn't (yet), which is not something a
 				// save-conflict retry cycle can resolve.
-				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
+				return AppendResult{StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): load failed: %w", command, command.AggregateID(), streamID, err))
 			}
 			defer iter.Close()
@@ -214,7 +214,7 @@ func NewCommandHandler[T any, C Command](
 			}
 
 			if err := iter.Err(); err != nil {
-				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
+				return AppendResult{StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): iter failed: %w", command, command.AggregateID(), streamID, err))
 			}
 
@@ -222,14 +222,14 @@ func NewCommandHandler[T any, C Command](
 			events, err := decide(state, command)
 
 			if err != nil {
-				return AppendResult{Successful: false, StreamID: streamID, NextExpectedVersion: lastVersion},
+				return AppendResult{StreamID: streamID, NextExpectedVersion: lastVersion},
 					backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): %w", command, command.AggregateID(), streamID, NewBusinessRuleViolation(err)))
 			}
 
 			// If no events, return success without saving
 			if len(events) == 0 {
 				// Nothing to persist
-				return AppendResult{Successful: true, StreamID: streamID, NextExpectedVersion: lastVersion}, nil
+				return AppendResult{StreamID: streamID, NextExpectedVersion: lastVersion}, nil
 			}
 
 			// --- Wrap events in envelopes ---
@@ -291,7 +291,7 @@ func NewCommandHandler[T any, C Command](
 					if autoConverge {
 						// Retry: reload from `revision` and try again.
 
-						return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
+						return AppendResult{NextExpectedVersion: uint64(actual), StreamID: streamID},
 							fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict)
 					}
 					// The caller asserted a specific Revision; a conflict
@@ -299,7 +299,7 @@ func NewCommandHandler[T any, C Command](
 					// reported back directly instead of being retried
 					// against a different target. A violated NoStream is
 					// ErrStreamExists, not a conflict, and never gets here.
-					return AppendResult{Successful: false, NextExpectedVersion: uint64(actual), StreamID: streamID},
+					return AppendResult{NextExpectedVersion: uint64(actual), StreamID: streamID},
 						backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): concurrency conflict: %w", command, command.AggregateID(), streamID, conflict))
 				}
 				return result, backoff.Permanent(fmt.Errorf("handle command %T for aggregate %q (streamID %q): failed to save event: %w", command, command.AggregateID(), streamID, err))

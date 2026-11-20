@@ -175,9 +175,9 @@ func (l *TasksToArchive) onArchived(_ context.Context, e *events.TaskArchived) e
     return nil
 }
 
-// Claim leases up to req.MaxPerKey due tasks, so that a second claim skips
-// them until the lease runs out. That one method makes the list an
-// automation.TodoList.
+// Claim leases up to req.MaxPerKey due tasks for req.Lease, so that a
+// second claim skips them until the lease runs out. That one method makes
+// the list an automation.TodoList.
 func (l *TasksToArchive) Claim(ctx context.Context, req automation.ClaimRequest) ([]uuid.UUID, error) {
     l.mu.Lock()
     defer l.mu.Unlock()
@@ -219,7 +219,7 @@ import (
     "task-management/slices/taskstoarchive"
 )
 
-type ArchiveTasks struct {
+type Automation struct {
     list *taskstoarchive.TasksToArchive
     todo automation.Dependency
     bus  eventsourcing.Dispatcher
@@ -229,11 +229,11 @@ func New(
     list *taskstoarchive.TasksToArchive,
     todo automation.Dependency,
     bus eventsourcing.Dispatcher,
-) *ArchiveTasks {
-    return &ArchiveTasks{list: list, todo: todo, bus: bus}
+) *Automation {
+    return &Automation{list: list, todo: todo, bus: bus}
 }
 
-func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
+func (a *Automation) Definition() automation.Definition[uuid.UUID] {
     return automation.Definition[uuid.UUID]{
         Name:       "archive-tasks",
         TodoList:   a.list, // the repository: anything with Claim
@@ -244,7 +244,7 @@ func (a *ArchiveTasks) Definition() automation.Definition[uuid.UUID] {
 
 // Work archives one due task. A task archived meanwhile is no error: the
 // decider appends nothing.
-func (a *ArchiveTasks) Work(ctx context.Context, taskID uuid.UUID) error {
+func (a *Automation) Work(ctx context.Context, taskID uuid.UUID) error {
     _, err := a.bus.Dispatch(ctx, archivetask.ArchiveTask{TaskID: taskID})
     return err
 }
@@ -256,7 +256,7 @@ The automation only claims while its projection is **live**. While the projectio
 
 `NewRunner` also needs a `Store`, which keeps which instance holds which segment, and pauses. Like the projection store, it is chosen in `main` (Step 4): `memory.NewAutomationStore()` for one process, `sqlite.NewAutomationStore(db)` or `postgres.NewAutomationStore(pool)` when instances share a database.
 
-That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the package documentation.
+That is the whole default: every instance claims from the list and runs items one at a time. When the work has a shape, the dials are there: `Concurrency` and `OrderingKey` on the definition for parallelism and order within one instance, `Segments()` on the list for one owner per segment across instances, `automation.Deferred` from `Work` for a 429, and `RunOnce` to run from a cron. See the [automation reference](../reference/automation.md).
 
 ## Step 4: Wire it up
 
@@ -286,7 +286,7 @@ go func() {
 }()
 ```
 
-A due task waits for the next check, every five seconds by default (`PollInterval` in the definition). `archiveTasks.Status()` reports what the automation is doing: waiting for its todo list, idle, working or stalled, with counts of processed and failed items.
+A due task waits for the next check, every five seconds by default (`PollInterval` in the definition). `archiveTasks.Status()` reports what the automation is doing: starting, waiting for its todo list, idle, working, stalled, or paused through its store, with counts of processed, failed and deferred items.
 
 ## Step 5: Test it
 

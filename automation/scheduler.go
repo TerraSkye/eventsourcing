@@ -164,7 +164,7 @@ type Item[T any] struct {
 }
 
 // Batch is the items of one segment, in the order they should be
-// dispatched. Items that share a ordering key run in that order; see
+// dispatched. Items that share an ordering key run in that order; see
 // [Definition.OrderingKey].
 type Batch[T any] struct {
 	Key   string
@@ -231,7 +231,14 @@ type Scheduler[T any] interface {
 	// an unsegmented list) has finished: every item that was started has
 	// had its Done, and the rest of the batch will not be started. The
 	// segment may have work again from now on.
-	Drained(ctx context.Context, key string) error
+	//
+	// When the batch deferred, Drained returns the time the segment
+	// becomes eligible again: the pause the scheduler applied, which may
+	// be later than the Outcome.Until a Done asked for. It returns the
+	// zero time when the batch did not defer or the scheduler applied no
+	// pause; [Summary.NextEligible] then reports the Until of the batch's
+	// deferral.
+	Drained(ctx context.Context, key string) (time.Time, error)
 
 	// Close releases whatever the scheduler holds: segments, pins,
 	// connections. The runner calls it once Run or RunOnce returns.

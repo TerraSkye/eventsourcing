@@ -9,10 +9,15 @@ release may break the API; every break is listed under **Breaking**.
 
 ### Breaking
 
+- `AppendResult.Successful` is removed. It duplicated the error: stores set
+  it to false next to a non-nil error and to true when nothing was saved,
+  so it never told a caller more than `err == nil` does. Check the error
+  instead; `StreamID`, `NextExpectedVersion` and `GlobalPosition` stay.
 - `automation`: `Definition.TodoList` is now the list itself, a
   `TodoList[T]` (anything with `Claim(ctx, ClaimRequest) ([]T, error)`),
   and the projection that keeps it moves to `Definition.Projection`. The
-  `Claim` field is gone: `Definition{TodoList: todoRunner, Claim: list.Claim}`
+  `Claim` field and `ClaimFunc[T]` are removed; a todo list now implements
+  `TodoList[T]` itself: `Definition{TodoList: todoRunner, Claim: list.Claim}`
   becomes `Definition{TodoList: list, Projection: todoRunner}`.
 - `automation`: `Claim` takes a `ClaimRequest{Segments, MaxPerKey, Lease}`
   instead of `(max, lease)`. Existing claim queries change their two
@@ -34,7 +39,14 @@ release may break the API; every break is listed under **Breaking**.
   postgres `AutomationStore` when instances share a database.
 - `automation`: `Work`'s context now carries the item lease as its
   deadline. Work that outlives its lease is cancelled instead of running
-  on while another instance may re-claim the item.
+  on while another instance may re-claim the item, and an item whose
+  lease expired before its work started is skipped and counted as failed
+  (in `Status.Failed`, with `LastError` "lease expired before work
+  started") instead of run late.
+- `automation`: `Scheduler.Drained` returns `(time.Time, error)`: the time
+  the segment becomes eligible again when its batch deferred, or the zero
+  time. `Summary.NextEligible` reports that time when it is set. A custom
+  scheduler that applies no pause of its own returns `time.Time{}`.
 
 ### Added
 
@@ -67,18 +79,21 @@ release may break the API; every break is listed under **Breaking**.
 - `automation.Deferred` / `DeferredError`: a Work result that pauses the
   item's segment until a time for every instance without counting a
   failure, for a 429 with Retry-After.
-- `Definition.Concurrency` runs items of one segment in parallel;
-  `Definition.OrderingKey` keeps items of one chain (an order, an aggregate)
-  one at a time in claim order within that parallelism, and parks the
-  chain for the rest of the batch when an item fails.
-- `Runner.RunOnce` works until nothing is eligible, releases every
-  segment and returns a `Summary`, for automations started by a timer.
-- `Status.Deferred` counts deferrals; they are not failures.
+- `automation.Definition.Concurrency` runs items of one segment in
+  parallel; `Definition.OrderingKey` keeps items of one chain (an order,
+  an aggregate) one at a time in claim order within that parallelism, and
+  parks the chain for the rest of the batch when an item fails.
+- `automation.Runner.RunOnce` works until nothing is eligible, releases
+  every segment and returns a `Summary`, for automations started by a
+  timer.
+- `automation.Status.Deferred` counts deferrals; they are not failures.
 - `memory.AutomationStore`, `sqlite.AutomationStore` and
   `postgres.AutomationStore` implement `automation.Store`: the memory one
-  for one process, the SQL ones on the new `automation_segments` table so
-  that instances sharing a database divide an automation's segments
-  between them. `Schema` creates the table; apply it again when upgrading.
+  for one process, the SQL ones on the new `automation_segments`,
+  `automation_controls` and `automation_instances` tables, so that
+  instances sharing a database divide an automation's segments between
+  them and share its pause and statuses. `Schema` creates all three;
+  apply it again when upgrading, or add them to your own migrations.
 - `automationtest.StoreAcceptanceTest` checks an `automation.Store`
   against its contract; all three stores run it.
 - `telemetry`: `WithWorkTelemetry` traces and times an automation's work
@@ -97,6 +112,94 @@ release may break the API; every break is listed under **Breaking**.
 - `dashboard.WithAutomations` shows automations as their instances
   publish them, wherever they run, and `dashboard.WithPause` adds a pause
   and a resume button to each.
+
+### Changed
+
+- `automation.Phase.String` returns `Phase(n)` for a phase it does not
+  know, instead of `unknown`.
+- `automation.Status.LastError` of a failed claim starts with `schedule:`
+  (`schedule: claim: ...`) instead of `claim:`, now that the claim runs
+  inside the scheduler.
+- `telemetry` leaves a span's status unset when the operation succeeds,
+  where it set it to `Ok`, as the OpenTelemetry Trace API asks of
+  instrumentation; `Ok` is for the application to set. A failed
+  operation still sets `Error`. A command rejection, a skipped event and
+  a deferred automation item are not failures and leave the status unset
+  too. A trace backend that filtered on status `Ok` sees `Unset` instead.
+
+### Fixed
+
+- `automation`: `Summary.NextEligible` reported the time `Work` asked for
+  in `Deferred`, not the pause the scheduler applied, which is at least
+  the end of the batch's item leases, and a lease from now for a zero or
+  past deferral. A cron caller using `RunOnce` could come back before the
+  segment was claimable, and a zero deferral left `NextEligible` empty
+  while the list was paused. `Scheduler.Drained` now returns the
+  effective pause and the summary reports that, for segmented and
+  unsegmented lists alike (#262).
+- `automation`: a failed `Store.Release` in the default scheduler left
+  its state wrong in two ways. When giving back an idle segment failed,
+  the segments with work had already been marked busy for batches that
+  the error then dropped, so they were renewed forever and never claimed
+  for or rotated out again while the runner reported `Idle`; they are now
+  marked busy only once the batches are certain to be handed out. When
+  the release at the end of a deferred batch failed, the pause the batch
+  asked for was lost; it is now written with `Store.Defer`, as for a lost
+  lease.
+- `automation`: when the default scheduler's `Close` failed to give back
+  its segments, every pause a deferred batch had asked for was dropped
+  with them, so another instance could claim those segments at once. The
+  pauses are now written with `Store.Defer`, as when the release at the
+  end of a deferred batch fails (#278).
+- An automation's published status was late or missing when it mattered.
+  A phase change was only published at the top of the next round, so
+  after a pause each instance showed its old phase for up to two poll
+  intervals; a stalled instance dropped out of `Store.LoadStatuses`
+  during the outage, since its status was live for three poll intervals
+  while the backoff sleeps up to 30 seconds; and a stopped instance kept
+  showing its last phase until that expired. `Run` now publishes a phase
+  before it waits or backs off, publishes a stalled status with a ttl
+  that covers the sleep, and withdraws its status when it stops: a
+  `SaveStatus` with a ttl of 0 (#261).
+- `automation`: a segment whose lease was lost while its batch still ran
+  (a `Renew` past the segment TTL) was forgotten at once, so the same
+  `Next` could take it again and hand out a second batch for it while
+  the first was still running, with items of one ordering chain worked
+  twice in parallel. The segment now stays busy until its batch drains:
+  it is not renewed, taken or claimed for meanwhile, and a deferral its
+  batch asks for is still recorded in the store.
+- The Postgres `AutomationStore` could deadlock an instance's `Renew` or
+  `Release` against another's `Acquire`, which locks the segment rows in
+  key order: `Renew` and `Release` updated the rows in one statement
+  that locked them in whatever order the planner visited them, the
+  runner's map order or the table's. Postgres then aborted one of the two
+  with `40P01`, and that runner backed off as stalled. Both now run in a
+  transaction that locks the rows in key order before updating them.
+  The SQLite store needs no change: it writes under the database's one
+  write lock, so there is no row order to deadlock on.
+- The automation scheduler rotated a held segment out after its term
+  whenever any other segment was eligible, and with `Shards(n)` every
+  bucket nobody holds is, empty or not: with more buckets than
+  `MaxSegments`, a segment with work was given back every term to look
+  at empty buckets. The scheduler now claims one waiting segment before
+  it gives a held one back: with work, it takes the held segment's
+  place; empty, it is released and the held segment keeps its lease.
+  The `eventsourcing.automation.segment.waiting` gauge is documented as
+  what it reports, segments with no owner whose pause has passed, which
+  with `Shards` includes empty buckets.
+- `telemetry`: `WithAttributeGetter` was ignored by `WithEventStoreTelemetry`
+  and `EventStoreTelemetry`, so an attribute derived from the context never
+  reached the store's spans while every other wrapper applied it. The
+  `append events`, `load events` and `read all events` spans now carry the
+  getter's attributes; as before, only `WithAttributes` reaches the
+  metrics.
+- `automation`: with `Shards` and more buckets than `MaxSegments`, an
+  instance that only polled probed the same empty bucket on every poll
+  and never reached a later bucket with work: a bucket found empty was
+  given back in place, and as its pause is over by the next poll, it was
+  first in line again. The scheduler now gives an empty bucket back as
+  served, so it goes to the back of the fairness order and each poll
+  probes the next bucket (#289).
 
 ## [0.5.0] - 2026-10-29
 

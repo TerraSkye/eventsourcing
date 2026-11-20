@@ -65,13 +65,18 @@ Complete API documentation.
 - [Event registry](./reference/event-registry.md) — `RegisterEvent`, `NewEventByName`
 - [Serialization](./reference/serialization.md) — the JSON contract every store follows
 - [Iterator](./reference/iterator.md) — `Iterator[T]`, `NewIteratorFunc`
+- [GlobalReader](./reference/global-reader.md) — `ReadAll`, `Head`, `ReadOptions`, the contract every store keeps
+- [projection](./reference/projection.md) — `Definition`, `Runner`, `Probe`, `Store`, phases and errors
+- [automation](./reference/automation.md) — `Definition`, `TodoList`, `Segmented`, `Deferred`, `Store`, `Scheduler`
+- [dashboard](./reference/dashboard.md) — `New`, options, routes and states
+- [telemetry](./reference/telemetry.md) — every wrapper, span, metric and attribute
 - [Context helpers](./reference/context.md) — envelope propagation through context
 - [Errors](./reference/errors.md) — error types and sentinel values
 - **Implementations**
   - [memory.EventStore](./reference/implementations/memory-store.md)
   - [postgres.EventStore](./reference/implementations/postgres-store.md)
   - [sqlite.EventStore](./reference/implementations/sqlite.md)
-  - kurrentdb.EventStore: see [Use KurrentDB as the event store](./how-to/use-kurrentdb.md)
+  - [kurrentdb.EventStore](./reference/implementations/kurrentdb.md)
 
 ---
 

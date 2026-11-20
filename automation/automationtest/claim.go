@@ -20,12 +20,13 @@ package automationtest
 import (
 	"context"
 	"fmt"
-	"github.com/terraskye/eventsourcing/automation"
 	"slices"
 	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/terraskye/eventsourcing/automation"
 )
 
 const (
@@ -221,7 +222,7 @@ func claim(t *testing.T, l TodoList, max int, lease time.Duration) []string {
 	t.Helper()
 	ids, err := l.Claim(context.Background(), automation.ClaimRequest{MaxPerKey: max, Lease: lease})
 	if err != nil {
-		t.Fatalf("claim: %v", err)
+		t.Fatalf("Claim(max %d, lease %s): %v", max, lease, err)
 	}
 	return ids
 }

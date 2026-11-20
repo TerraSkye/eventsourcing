@@ -114,8 +114,11 @@ type Summary struct {
 
 	// NextEligible is the earliest time a segment paused by [Deferred]
 	// during the run becomes eligible again, or zero when none was
-	// paused. A scheduler that runs the automation on a timer can use it
-	// to decide whether to come back sooner.
+	// paused. It is the pause the scheduler applied, as returned by
+	// [Scheduler.Drained], which for the default scheduler is at least
+	// the end of the batch's item leases. A scheduler that runs the
+	// automation on a timer can use it to decide whether to come back
+	// sooner.
 	NextEligible time.Time
 }
 
@@ -123,17 +126,32 @@ type Summary struct {
 // projection that keeps that list, how it does the work, and its tuning.
 // The zero value for every optional field picks sensible defaults.
 //
-// An automation is usually defined next to its todo list, by a constructor
-// in the same package, and handed to [NewRunner] by main:
+// An automation is usually a type next to its todo list, in the same
+// package: it holds the list, the projection that keeps it and the
+// dispatcher its commands go to, and describes itself with a Definition
+// method. Work is a method too, so a test calls it without a runner:
 //
-//	func NewShipOrders(list *OrdersToShip, runner *projection.Runner, bus eventsourcing.Dispatcher, carrier Carrier) automation.Definition[ShippingTodo] {
+//	type ShipOrders struct {
+//		list *OrdersToShip
+//		todo automation.Dependency
+//		bus  eventsourcing.Dispatcher
+//	}
+//
+//	func (a *ShipOrders) Definition() automation.Definition[ShippingTodo] {
 //		return automation.Definition[ShippingTodo]{
 //			Name:       "ship-orders",
-//			TodoList:   list,
-//			Projection: runner,
-//			Work:       ShipOrder(bus, carrier),
+//			TodoList:   a.list,
+//			Projection: a.todo, // work only while the list is live
+//			Work:       a.Work,
 //		}
 //	}
+//
+// Where the leases live is main's choice, as it is for the projection
+// store, so main sets Store and hands the definition to [NewRunner]:
+//
+//	ship := shipping.NewShipOrders(list, todoRunner, commandBus).Definition()
+//	ship.Store = postgres.NewAutomationStore(pool)
+//	go automation.NewRunner(ship).Run(ctx)
 //
 // That is the whole default: competing consumers over the list, one item
 // at a time per instance. Everything else is opt-in, and sits where it
@@ -166,7 +184,10 @@ type Definition[T any] struct {
 	Store Store
 
 	// Scheduler replaces the default scheduling with another source of
-	// keyed work; see [Scheduler]. When set, TodoList and Store stay nil.
+	// keyed work; see [Scheduler]. When set, TodoList and Store stay nil,
+	// and without a Store the automation publishes no status, cannot be
+	// paused with [Store.SetPaused], and does not appear on the dashboard.
+	// [Runner.Status] still reports what this instance is doing.
 	Scheduler Scheduler[T]
 
 	// Work processes one claimed item; see [WorkFunc].
@@ -253,16 +274,17 @@ type Runner[T any] struct {
 }
 
 // publishEvery is how often a runner publishes its status while nothing
-// changes. A phase change is published at once.
+// changes. A phase change is published at once: before the runner waits or
+// backs off, and when it leaves the loop.
 const publishEvery = time.Second
 
 // NewRunner creates the runner d describes.
 //
 // It panics on wiring mistakes: an empty Name; a nil Projection or Work;
-// neither TodoList nor Scheduler, or both; a TodoList without a Store.
-// It logs once which
-// capabilities it found on the list, so a list that was meant to be
-// segmented but is not shows up at startup rather than in production.
+// neither TodoList nor Scheduler, or both; a TodoList without a Store. It
+// logs once which capabilities it found on the list, so a list that was
+// meant to be segmented but is not shows up at startup rather than in
+// production.
 func NewRunner[T any](d Definition[T]) *Runner[T] {
 	switch {
 	case d.Name == "":
@@ -334,9 +356,11 @@ func (r *Runner[T]) Name() string { return r.d.Name }
 // When a dependency implements [Watcher], Run registers the runner's
 // Nudge with it, so the automation wakes up when the todo list changes.
 // Call Run once per Runner. When ctx is done, Run waits for the running
-// batches to stop, then closes the scheduler and returns.
+// batches to stop, closes the scheduler, withdraws the status it published
+// so the instance leaves [Store.LoadStatuses] at once, and returns.
 func (r *Runner[T]) Run(ctx context.Context) error {
 	f := &flight{}
+	defer r.withdrawStatus(ctx)
 	defer r.closeScheduler(ctx)
 	defer f.wg.Wait()
 	for _, dep := range r.waitFor {
@@ -406,11 +430,11 @@ func (r *Runner[T]) Run(ctx context.Context) error {
 
 // RunOnce works until nothing is eligible, then gives every segment back
 // and returns what it did. A paused automation does nothing and returns at
-// once. It is the entry point for an automation that a
-// timer or a cron job starts: claim and work whatever is pending, then
-// stop. A dependency that is not live makes RunOnce wait for it; a failing
-// check or scheduler call ends the run with that error; a failing work
-// call is counted and its item comes back once its lease expires.
+// once. It is the entry point for an automation that a timer or a cron job
+// starts: claim and work whatever is pending, then stop. A dependency that
+// is not live makes RunOnce wait for it; a failing check or scheduler call
+// ends the run with that error; a failing work call is counted and its
+// item comes back once its lease expires.
 //
 // RunOnce is done when the scheduler has nothing more, no batch is still
 // running, and none finished since the scheduler was last asked, since a
@@ -485,9 +509,10 @@ func (r *Runner[T]) paused(ctx context.Context) (bool, error) {
 
 // saveStatus writes the status to the Store when the phase changed since the
 // last write, or publishEvery has passed. A failed write is logged; the
-// automation goes on.
+// automation goes on. Nothing is written once ctx is done: Run then
+// withdraws the status instead.
 func (r *Runner[T]) saveStatus(ctx context.Context) {
-	if r.d.Store == nil {
+	if r.d.Store == nil || ctx.Err() != nil {
 		return
 	}
 	st := r.Status()
@@ -495,20 +520,33 @@ func (r *Runner[T]) saveStatus(ctx context.Context) {
 		time.Since(r.publishedAt) < publishEvery {
 		return
 	}
-	r.writeStatus(ctx, st)
+	r.writeStatus(ctx, st, r.statusTTL())
 }
 
 // saveStatusNow writes the status regardless of when it was last written.
 func (r *Runner[T]) saveStatusNow(ctx context.Context) {
 	if r.d.Store != nil {
-		r.writeStatus(ctx, r.Status())
+		r.writeStatus(ctx, r.Status(), r.statusTTL())
 	}
 }
 
-func (r *Runner[T]) writeStatus(ctx context.Context, st Status) {
-	// Live for three poll intervals: a runner waiting between polls
-	// publishes once per poll.
-	ttl := 3 * max(r.d.PollInterval, publishEvery)
+// withdrawStatus publishes the status with no ttl, so the instance leaves
+// LoadStatuses at once instead of when its last status expires. It uses
+// its own short context, since ctx is done when Run stops.
+func (r *Runner[T]) withdrawStatus(ctx context.Context) {
+	if r.d.Store != nil {
+		r.writeStatus(context.WithoutCancel(ctx), r.Status(), 0)
+	}
+}
+
+// statusTTL is how long a published status stays live: three poll
+// intervals, since a runner that waits between polls publishes once per
+// poll. A stall sleeps longer than that and adds its sleep, see stall.
+func (r *Runner[T]) statusTTL() time.Duration {
+	return 3 * max(r.d.PollInterval, publishEvery)
+}
+
+func (r *Runner[T]) writeStatus(ctx context.Context, st Status, ttl time.Duration) {
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := r.d.Store.SaveStatus(pctx, r.d.Name, st, ttl); err != nil {
@@ -591,9 +629,13 @@ func (r *Runner[T]) start(ctx context.Context, f *flight, b Batch[T]) {
 		// The segment must be given back even when the run is stopping,
 		// with any pause it asked for, so this does not use ctx.
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		if err := r.sched.Drained(dctx, b.Key); err != nil {
+		until, err := r.sched.Drained(dctx, b.Key)
+		if err != nil {
 			r.d.Logger.LogAttrs(dctx, slog.LevelWarn, "automation scheduler drained failed",
 				slog.String("automation", r.d.Name), slog.String("segment", b.Key), slog.String("error", err.Error()))
+		}
+		if !until.IsZero() {
+			s.NextEligible = until
 		}
 		cancel()
 
@@ -620,7 +662,7 @@ type batchRun[T any] struct {
 }
 
 // runBatch runs b's items Concurrency at a time, never two of the same
-// ordering key at once, in claim order within a ordering key. A failed item
+// ordering key at once, in claim order within an ordering key. A failed item
 // parks its ordering key for the rest of the batch, so a later item of the
 // same chain cannot overtake it; a deferral stops the batch.
 func (r *Runner[T]) runBatch(ctx context.Context, b Batch[T]) Summary {
@@ -766,12 +808,19 @@ func classify(err error, lease time.Duration) Outcome {
 	return Outcome{Kind: Failed, Err: err}
 }
 
-// stall reports err, logs it, and backs off.
+// stall reports err, logs it, publishes the Stalled phase and backs off.
+// The status is published before the sleep, live for the sleep on top of
+// the usual ttl: the backoff grows well past the ttl, and a status that
+// expired while the runner slept would show the instance as gone during
+// the outage it is reporting.
 func (r *Runner[T]) stall(ctx context.Context, err error, retry *backoff.ExponentialBackOff) {
 	r.setPhase(Stalled, err.Error())
 	wait := retry.NextBackOff()
 	r.d.Logger.LogAttrs(ctx, slog.LevelError, "automation stalled",
 		slog.String("automation", r.d.Name), slog.String("error", err.Error()), slog.Duration("retry_in", wait))
+	if r.d.Store != nil && ctx.Err() == nil {
+		r.writeStatus(ctx, r.Status(), r.statusTTL()+wait)
+	}
 	sleepCtx(ctx, wait)
 }
 
@@ -801,8 +850,11 @@ func (r *Runner[T]) setPhase(p Phase, lastErr string) {
 	}
 }
 
-// wait blocks until a nudge, the poll interval, or ctx is done.
+// wait publishes the status, so a phase set just before is seen at once
+// rather than after the wait, and then blocks until a nudge, the poll
+// interval, or ctx is done.
 func (r *Runner[T]) wait(ctx context.Context) {
+	r.saveStatus(ctx)
 	t := time.NewTimer(r.d.PollInterval)
 	defer t.Stop()
 	select {

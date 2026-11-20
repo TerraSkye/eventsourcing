@@ -117,7 +117,7 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 	select {
 	case <-b.stopCh:
 		b.mu.RUnlock()
-		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
+		return AppendResult{}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	default:
 	}
 	b.wg.Add(1)
@@ -136,10 +136,10 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 		// Wait for processing result
 	case <-b.stopCh:
 		b.enqueueWG.Done()
-		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
+		return AppendResult{}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ErrCommandBusClosed)
 	case <-ctx.Done():
 		b.enqueueWG.Done()
-		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
+		return AppendResult{}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout before enqueueing
 	}
 
 	select {
@@ -149,7 +149,7 @@ func (b *CommandBus) Dispatch(ctx context.Context, cmd Command) (AppendResult, e
 		}
 		return result.Result, nil
 	case <-ctx.Done():
-		return AppendResult{Successful: false}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
+		return AppendResult{}, fmt.Errorf("dispatch command %T for aggregate %q: %w", cmd, cmd.AggregateID(), ctx.Err()) // Context timeout/cancellation
 	}
 }
 
@@ -180,7 +180,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 		// that ends once the handler is running is left to the handler, which
 		// receives it and passes it on to the store.
 		if err := cmd.Ctx.Err(); err != nil {
-			cmd.ResponseCh <- commandResult{Result: AppendResult{Successful: false}, Err: err}
+			cmd.ResponseCh <- commandResult{Result: AppendResult{}, Err: err}
 			continue
 		}
 
@@ -188,7 +188,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 
 		if !exists {
 			cmd.ResponseCh <- commandResult{
-				Result: AppendResult{Successful: false},
+				Result: AppendResult{},
 				Err: fmt.Errorf(
 					"dispatch command %s for aggregate %q: %w",
 					cmd.Command.CommandType(), cmd.Command.AggregateID(), ErrHandlerNotRegistered,
@@ -212,7 +212,7 @@ func (b *CommandBus) worker(queue chan queuedCommand) {
 					err := errors.Join(panicErr, ErrHandlerPanicked)
 
 					cmd.ResponseCh <- commandResult{
-						Result: AppendResult{Successful: false},
+						Result: AppendResult{},
 						//TODO improve the error. should it just be "UnrecoverableErr when handling Command ?
 						Err: fmt.Errorf(
 							"handling command %s for aggregate %q: %w",
@@ -274,7 +274,7 @@ func Register[C Command](b *CommandBus, handler CommandHandler[C]) {
 	h := CommandHandler[Command](func(ctx context.Context, cmd Command) (AppendResult, error) {
 		c, ok := cmd.(C)
 		if !ok {
-			return AppendResult{Successful: false}, fmt.Errorf("expected command type %s but got %T", cmdName, cmd)
+			return AppendResult{}, fmt.Errorf("expected command type %s but got %T", cmdName, cmd)
 		}
 		return handler(ctx, c)
 	})

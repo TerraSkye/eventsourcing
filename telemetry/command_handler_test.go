@@ -10,6 +10,7 @@ import (
 
 	"github.com/terraskye/eventsourcing"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type panicProbeCmd struct{}
@@ -119,7 +120,7 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 			invoke: func(t *testing.T) {
 				h := CommandTelemetry()(func(ctx context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
 					time.Sleep(work)
-					return eventsourcing.AppendResult{Successful: true}, nil
+					return eventsourcing.AppendResult{}, nil
 				})
 				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
 					t.Fatalf("command: %v", err)
@@ -131,7 +132,7 @@ func TestCommandTelemetryDurationRecordedInSeconds(t *testing.T) {
 			invoke: func(t *testing.T) {
 				h := WithCommandTelemetry(func(ctx context.Context, cmd durationTestCommand) (eventsourcing.AppendResult, error) {
 					time.Sleep(work)
-					return eventsourcing.AppendResult{Successful: true}, nil
+					return eventsourcing.AppendResult{}, nil
 				})
 				if _, err := h(context.Background(), durationTestCommand{}); err != nil {
 					t.Fatalf("command: %v", err)
@@ -238,6 +239,33 @@ func TestCommandTelemetry_SpanName(t *testing.T) {
 			call()
 			if got := spanNameRecorder.since(before); len(got) != 1 || got[0] != want {
 				t.Errorf("spans = %v, want [%s]", got, want)
+			}
+		})
+	}
+}
+
+// TestCommandTelemetry_SpanStatus covers the span status: a success and a
+// business rule rejection leave it unset, as the OpenTelemetry Trace API
+// asks of instrumentation, and any other error sets it to Error.
+func TestCommandTelemetry_SpanStatus(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		want codes.Code
+	}{
+		"success":  {nil, codes.Unset},
+		"rejected": {&eventsourcing.BusinessRuleViolationError{}, codes.Unset},
+		"failure":  {errors.New("boom"), codes.Error},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			handler := WithCommandTelemetry(func(context.Context, durationTestCommand) (eventsourcing.AppendResult, error) {
+				return eventsourcing.AppendResult{}, tt.err
+			})
+			before := spanNameRecorder.len()
+			_, _ = handler(context.Background(), durationTestCommand{})
+			spans := spanNameRecorder.spansSince(before)
+			if len(spans) != 1 || spans[0].status != tt.want {
+				t.Errorf("spans = %+v, want one with status %v", spans, tt.want)
 			}
 		})
 	}

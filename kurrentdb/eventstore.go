@@ -97,7 +97,7 @@ func defaultSaveBackoff() backoff.BackOff {
 // expectation as the number of the stream's last event, where this package
 // numbers them from 1 and a [eventsourcing.Revision] is a count of events.
 // The conversion happens at this boundary only, so every caller sees the
-// same numbering it gets from the memory, file and postgres stores:
+// same numbering it gets from the memory, sqlite and postgres stores:
 //
 //	Envelope.Version        = EventNumber + 1
 //	Save(Revision(0))       → kurrentdb.NoStream{}
@@ -124,7 +124,7 @@ func defaultSaveBackoff() backoff.BackOff {
 // anything else is mapped by [mapError].
 func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, revision eventsourcing.StreamState) (eventsourcing.AppendResult, error) {
 	if len(events) == 0 {
-		return eventsourcing.AppendResult{Successful: true, NextExpectedVersion: 0}, nil
+		return eventsourcing.AppendResult{NextExpectedVersion: 0}, nil
 	}
 
 	var streamID = events[0].StreamID
@@ -152,7 +152,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 	for i, ev := range events {
 		eventData, err := eventsourcing.EncodeEvent(ev.Event)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
@@ -171,7 +171,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		}
 		metadataJSON, err := eventsourcing.EncodeMetadata(metadata)
 		if err != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+			return eventsourcing.AppendResult{StreamID: streamID},
 				fmt.Errorf("save events to stream %q: event %d: %w", streamID, i, err)
 		}
 
@@ -203,7 +203,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		}
 	default:
 		err := fmt.Errorf("unsupported revision type for stream %s :%w", streamID, eventsourcing.ErrInvalidRevision)
-		return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, err
+		return eventsourcing.AppendResult{StreamID: streamID}, err
 	}
 
 	// Bound to ctx, so a wait between attempts ends when ctx does.
@@ -242,7 +242,7 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 		// knowing which store is underneath.
 		if isWrongExpectedVersion(err) {
 			if rev, ok := revision.(eventsourcing.Revision); ok {
-				return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+				return eventsourcing.AppendResult{StreamID: streamID},
 					&eventsourcing.StreamRevisionConflictError{
 						Stream:           streamID,
 						ExpectedRevision: rev,
@@ -251,15 +251,14 @@ func (e EventStore) Save(ctx context.Context, events []eventsourcing.Envelope, r
 			}
 		}
 		if expectation := expectationError(streamID, revision, err); expectation != nil {
-			return eventsourcing.AppendResult{Successful: false, StreamID: streamID}, expectation
+			return eventsourcing.AppendResult{StreamID: streamID}, expectation
 		}
 
-		return eventsourcing.AppendResult{Successful: false, StreamID: streamID},
+		return eventsourcing.AppendResult{StreamID: streamID},
 			mapError(fmt.Sprintf("save events to stream %q", streamID), err)
 	}
 
 	return eventsourcing.AppendResult{
-		Successful:          true,
 		StreamID:            streamID,
 		NextExpectedVersion: result.NextExpectedVersion + 1,
 		GlobalPosition:      result.CommitPosition,
@@ -299,7 +298,7 @@ func (e EventStore) currentRevision(ctx context.Context, streamID string) events
 //
 // A stream that does not exist is a failure, not an empty read: iteration
 // ends with an error matching [eventsourcing.ErrStreamNotFound], as it does in the
-// memory and file implementations. Because the read is lazy, that error
+// memory, sqlite and postgres implementations. Because the read is lazy, that error
 // arrives through the iterator's Err rather than from LoadStream itself —
 // the server only reports the missing stream once the first event is
 // requested. Every other failure reaches Err too, mapped through
