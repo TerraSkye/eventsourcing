@@ -7,6 +7,8 @@ release may break the API; every break is listed under **Breaking**.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-20
+
 ### Breaking
 
 - `AppendResult.Successful` is removed. It duplicated the error: stores set
