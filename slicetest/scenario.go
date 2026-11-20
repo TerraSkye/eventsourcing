@@ -80,9 +80,8 @@ func Handle[C eventsourcing.Command](s *Scenario, handler eventsourcing.CommandH
 }
 
 // Projection starts def on the scenario's stores and returns its runner,
-// which is what an automation's Definition.Projection takes. It polls
-// every 10ms unless def sets a PollInterval. Given and Run wait for every
-// projection to catch up.
+// which is what an automation's Definition.Projection takes, once it is
+// live. Given and Run nudge every projection and wait for it to catch up.
 func (s *Scenario) Projection(def projection.Definition) *projection.Runner {
 	s.t.Helper()
 	r := startProjection(s.t, def, s.log.store)
@@ -91,16 +90,13 @@ func (s *Scenario) Projection(def projection.Definition) *projection.Runner {
 }
 
 // Automation adds def to the scenario. Its Store defaults to the
-// scenario's automation store and its PollInterval to 10ms; its
-// Projection must be a runner from [Scenario.Projection]. The automation
+// scenario's automation store; its Projection must be a runner from
+// [Scenario.Projection], which wakes the automation when it commits. The automation
 // does not run in the background: [Scenario.Run] runs it to completion.
 func Automation[T any](s *Scenario, def automation.Definition[T]) {
 	s.t.Helper()
 	if def.Store == nil && def.Scheduler == nil {
 		def.Store = s.autoStore
-	}
-	if def.PollInterval == 0 {
-		def.PollInterval = 10 * time.Millisecond
 	}
 	runner := automation.NewRunner(def)
 	s.automations = append(s.automations, scenarioAutomation{name: def.Name, runOnce: runner.RunOnce})

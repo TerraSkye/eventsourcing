@@ -19,9 +19,8 @@ type ViewSlice struct {
 }
 
 // View starts def on memory stores and returns the slice. The projection
-// runs in the background until the test ends, polling every 10ms unless
-// def sets a PollInterval; Given waits for it to catch up, so the read
-// model is current when Then runs.
+// runs in the background until the test ends; Given nudges it and waits
+// for it to catch up, so the read model is current when Then runs.
 //
 // Options: [StreamID]. A view slice compares no events, so [IgnoreFields]
 // has no effect on it.
@@ -33,15 +32,20 @@ func View(t testing.TB, def projection.Definition, opts ...Option) *ViewSlice {
 	return v
 }
 
-// startProjection runs def on reader until the test ends. A def without
-// a PollInterval polls every 10ms: the memory store wakes no runner, so
-// the default of a second would be paid on every catch-up.
+// startProjection runs def on reader until the test ends, and returns once
+// the runner has claimed every segment and is live. Until then
+// [projection.Runner.WaitUntil] would wait on the store at the
+// projection's PollInterval instead of on the runner's memory.
 func startProjection(t testing.TB, def projection.Definition, reader eventsourcing.GlobalReader) *projection.Runner {
 	t.Helper()
-	if def.PollInterval == 0 {
-		def.PollInterval = 10 * time.Millisecond
-	}
 	runner := projection.NewRunner(def, reader, memory.NewProjectionStore())
+	changed := make(chan struct{}, 1)
+	runner.Watch(func() { // on every phase change and committed batch
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	})
 	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	done := make(chan struct{})
 	go func() {
@@ -56,14 +60,28 @@ func startProjection(t testing.TB, def projection.Definition, reader eventsourci
 			t.Errorf("slicetest: projection %q did not stop", def.Name)
 		}
 	})
+
+	timeout := time.After(10 * time.Second)
+	for runner.Status().Phase != projection.Live {
+		select {
+		case <-changed:
+		case <-done:
+			t.Fatalf("slicetest: projection %q stopped before it was live", def.Name)
+		case <-timeout:
+			t.Fatalf("slicetest: projection %q did not become live: %+v", def.Name, runner.Status())
+		}
+	}
 	return runner
 }
 
-// waitLive blocks until runner has applied everything up to position.
+// waitLive blocks until runner has applied everything up to position. It
+// nudges the runner first: the memory store wakes no runner, so without
+// it every catch-up would wait out the projection's PollInterval.
 func waitLive(t testing.TB, runner *projection.Runner, position uint64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	runner.Nudge()
 	if err := runner.WaitUntil(ctx, position); err != nil {
 		t.Fatalf("slicetest: projection %q did not reach position %d: %v", runner.Name(), position, err)
 	}
