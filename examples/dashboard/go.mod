@@ -4,8 +4,8 @@ go 1.25.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/terraskye/eventsourcing v0.4.0
-	github.com/terraskye/eventsourcing/sqlite v0.4.0
+	github.com/terraskye/eventsourcing v0.6.0
+	github.com/terraskye/eventsourcing/sqlite v0.6.0
 )
 
 require (
