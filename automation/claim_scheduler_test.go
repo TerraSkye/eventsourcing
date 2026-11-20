@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -202,7 +203,7 @@ func TestClaimScheduler_RotatesUnderContention(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := s.Drained(ctx, batches[0].Key); err != nil {
+		if _, err := s.Drained(ctx, batches[0].Key); err != nil {
 			t.Fatal(err)
 		}
 		c.tick(11 * time.Second) // past the term
@@ -246,7 +247,7 @@ func TestClaimScheduler_KeepsAnUncontendedSegment(t *testing.T) {
 			t.Fatalf("round %d: epoch %d, want %d; the uncontended key was re-acquired", i, e, epoch)
 		}
 		epoch = e
-		if err := s.Drained(ctx, "a"); err != nil {
+		if _, err := s.Drained(ctx, "a"); err != nil {
 			t.Fatal(err)
 		}
 		c.tick(11 * time.Second)
@@ -377,7 +378,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if store.owner("sync", "3") == "" {
 		t.Fatal("shard 3 with work was released")
 	}
-	if err := s.Drained(ctx, "3"); err != nil {
+	if _, err := s.Drained(ctx, "3"); err != nil {
 		t.Fatal(err)
 	}
 	list.reqs = nil
@@ -388,7 +389,7 @@ func TestClaimScheduler_ShardsClaimInOneCallAndGuardIdleChurn(t *testing.T) {
 	if len(list.reqs) != 1 || len(list.reqs[0].Segments) != 1 || list.reqs[0].Segments[0] != "3" {
 		t.Fatalf("second poll claimed %v, want only shard 3 while the others are paused", list.reqs)
 	}
-	if err := s.Drained(ctx, "3"); err != nil {
+	if _, err := s.Drained(ctx, "3"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -586,7 +587,7 @@ func TestClaimScheduler_FailedIdleReleaseKeepsSegmentsWorkable(t *testing.T) {
 		if len(batches) != 1 || batches[0].Key != "3" {
 			t.Fatalf("Next %d after the failure = %+v, want the batch of shard 3", i+1, batches)
 		}
-		if err := s.Drained(ctx, "3"); err != nil {
+		if _, err := s.Drained(ctx, "3"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -627,7 +628,7 @@ func TestClaimScheduler_DeferralReleasesAtDrained(t *testing.T) {
 				t.Fatalf("Next while the batch runs = %d batches, %v; want none", len(again), err)
 			}
 
-			if err := s.Drained(ctx, "a"); err != nil {
+			if _, err := s.Drained(ctx, "a"); err != nil {
 				t.Fatal(err)
 			}
 			if store.owner("sync", "a") != "" {
@@ -661,7 +662,7 @@ func TestClaimScheduler_FailedReleaseAtDrainedKeepsItsDeferral(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.failures = 1
-	if err := s.Drained(ctx, "a"); err == nil {
+	if _, err := s.Drained(ctx, "a"); err == nil {
 		t.Fatal("Drained = nil, want the release error")
 	}
 	if d, _ := store.DeferredFor(ctx, "sync", "a"); d < 50*time.Minute {
@@ -734,7 +735,7 @@ func TestClaimScheduler_LostSegmentKeepsItsDeferral(t *testing.T) {
 	if d, _ := store.DeferredFor(ctx, "sync", "a"); d < 50*time.Minute {
 		t.Fatalf("after the lease was lost the segment is paused for %s, want the deferral", d)
 	}
-	if err := s.Drained(ctx, "a"); err != nil {
+	if _, err := s.Drained(ctx, "a"); err != nil {
 		t.Fatalf("Drained of a lost segment: %v", err)
 	}
 }
@@ -770,7 +771,7 @@ func TestClaimScheduler_LostSegmentGetsNoSecondBatch(t *testing.T) {
 		t.Fatal("the lost segment was taken again while its batch still runs")
 	}
 
-	if err := s.Drained(ctx, "a"); err != nil {
+	if _, err := s.Drained(ctx, "a"); err != nil {
 		t.Fatalf("Drained of a lost segment: %v", err)
 	}
 	batches, err = s.Next(ctx)
@@ -800,10 +801,121 @@ func TestClaimScheduler_UnsegmentedOneBatchAtATime(t *testing.T) {
 	if b, _ := s.Next(ctx); len(b) != 0 {
 		t.Fatalf("Next while the batch runs = %d batches, want none", len(b))
 	}
-	if err := s.Drained(ctx, ""); err != nil {
+	if _, err := s.Drained(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := s.Next(ctx); len(b) != 1 {
 		t.Fatalf("Next after Drained = %d batches, want one", len(b))
+	}
+}
+
+// oneItemList is an unsegmented TodoList that always has one item.
+type oneItemList struct{}
+
+func (oneItemList) Claim(context.Context, ClaimRequest) ([]string, error) {
+	return []string{"item"}, nil
+}
+
+// runOneBatch claims one batch and runs it the way the runner does, Drained
+// included, returning the batch's summary.
+func runOneBatch(t *testing.T, def Definition[string], sched *claimScheduler[string], edit func(*Batch[string])) Summary {
+	t.Helper()
+	batches, err := sched.Next(t.Context())
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("Next = %v, %v", batches, err)
+	}
+	if edit != nil {
+		edit(&batches[0])
+	}
+	runner := &Runner[string]{d: def, sched: sched}
+	f := &flight{}
+	runner.start(t.Context(), f, batches[0])
+	return f.finish()
+}
+
+// TestNextEligibleMatchesStorePause covers that Summary.NextEligible is
+// the pause the scheduler wrote to the store, not the Until Work asked
+// for: a zero or past deferral pauses for a lease, and a segment stays
+// paused at least until its batch's item leases end. This holds for a
+// segmented and an unsegmented list alike.
+func TestNextEligibleMatchesStorePause(t *testing.T) {
+	lists := map[string]struct {
+		list TodoList[string]
+		key  string
+	}{
+		"segmented":   {endlessList{"a"}, "a"},
+		"unsegmented": {oneItemList{}, ""},
+	}
+	for name, l := range lists {
+		for _, deferFor := range []time.Duration{0, -time.Second, 10 * time.Second, 5 * time.Minute} {
+			t.Run(name+"/"+deferFor.String(), func(t *testing.T) {
+				clk := &clock{t: time.Now()}
+				store := newFakeStore(clk)
+				until := clk.now().Add(deferFor)
+				if deferFor == 0 {
+					until = time.Time{}
+				}
+				def := Definition[string]{Name: "sync", TodoList: l.list, Store: store,
+					Logger: quietLogger(), Lease: time.Minute, BatchSize: 1, MaxSegments: 1,
+					PollInterval: time.Second, Concurrency: 1,
+					Work: func(context.Context, string) error { return Deferred(until) },
+				}
+				sched := newTestScheduler(def)
+				sched.now = clk.now
+				sum := runOneBatch(t, def, sched, nil)
+				pause, err := store.DeferredFor(t.Context(), "sync", l.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if pause <= 0 {
+					t.Fatalf("store pause = %s, want a pause", pause)
+				}
+				want := clk.now().Add(pause)
+				if !sum.NextEligible.Equal(want) {
+					t.Fatalf("NextEligible = %s, store pause ends at %s", sum.NextEligible, want)
+				}
+			})
+		}
+	}
+}
+
+// TestNextEligibleUsesLatestConcurrentDeferral covers that when several
+// items of one batch defer, the segment is paused until the latest of
+// their deferrals and Summary.NextEligible reports that same time.
+func TestNextEligibleUsesLatestConcurrentDeferral(t *testing.T) {
+	clk := &clock{t: time.Now()}
+	store := newFakeStore(clk)
+	start := clk.now() // Work runs concurrently and must not read clk
+	ready := make(chan struct{})
+	var started atomic.Int32
+	def := Definition[string]{Name: "sync", TodoList: endlessList{"a"}, Store: store,
+		Logger: quietLogger(), Lease: time.Minute, BatchSize: 2, MaxSegments: 1,
+		PollInterval: time.Second, Concurrency: 2,
+		Work: func(ctx context.Context, value string) error {
+			order := started.Add(1)
+			if order == 2 {
+				close(ready)
+			}
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return Deferred(start.Add(time.Duration(order) * time.Hour))
+		},
+	}
+	sched := newTestScheduler(def)
+	sched.now = clk.now
+	// endlessList hands out one item per segment; append it once more so
+	// the batch has two items that run concurrently under the same lease.
+	sum := runOneBatch(t, def, sched, func(b *Batch[string]) {
+		b.Items = append(b.Items, b.Items[0])
+	})
+	if sum.Deferred != 2 || !sum.NextEligible.Equal(clk.now().Add(2*time.Hour)) {
+		t.Fatalf("summary = %+v, want two deferrals until %s", sum, clk.now().Add(2*time.Hour))
+	}
+	pause, err := store.DeferredFor(t.Context(), "sync", "a")
+	if err != nil || pause != 2*time.Hour {
+		t.Fatalf("store pause = %s, %v", pause, err)
 	}
 }

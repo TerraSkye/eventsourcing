@@ -118,7 +118,7 @@ type Summary struct {
 }
 ```
 
-What one `RunOnce` did. `NextEligible` is the earliest time a segment paused by `Deferred` during the run becomes eligible again, or zero when none was paused.
+What one `RunOnce` did. `NextEligible` is the earliest time a segment paused by `Deferred` during the run becomes eligible again, or zero when none was paused. It is the pause the scheduler applied, as `Drained` returns it; for the default scheduler that is at least the end of the batch's item leases.
 
 ## TodoList
 
@@ -313,7 +313,7 @@ The SQLite tables have the same columns with `INTEGER` for the timestamps (Unix 
 type Scheduler[T any] interface {
     Next(ctx context.Context) ([]Batch[T], error)
     Done(ctx context.Context, item Item[T], out Outcome) error
-    Drained(ctx context.Context, key string) error
+    Drained(ctx context.Context, key string) (time.Time, error)
     Close(ctx context.Context) error
 }
 ```
@@ -322,7 +322,7 @@ The pluggable half of an automation: it decides which items this instance works 
 
 - `Next` returns the items this instance may work now, grouped by segment, or nothing. It must not block waiting for work, and must not return a batch for a segment whose previous batch has not drained.
 - `Done` reports an item's outcome. For `DeferredOutcome` the scheduler pauses the item's segment until `Outcome.Until` for every instance.
-- `Drained` reports that the batch for segment `key` (`""` for an unsegmented list) has finished.
+- `Drained` reports that the batch for segment `key` (`""` for an unsegmented list) has finished. When the batch deferred, it returns the time the segment becomes eligible again: the pause the scheduler applied, which may be later than the `Outcome.Until` a `Done` asked for. It returns the zero time otherwise, and `Summary.NextEligible` then reports the `Until` of the deferral.
 - `Close` releases whatever the scheduler holds. The runner calls it once `Run` or `RunOnce` returns, with a 5s timeout.
 
 `Next`, `Done` and `Drained` are called from several goroutines at once; an implementation must be safe for that. An implementation enforces the segment contract itself: at most one owner per segment at a time, and `Concurrency` items per segment. An automation with its own `Scheduler` has no `Store`, so it publishes no status and cannot be paused.
