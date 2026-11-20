@@ -1,7 +1,6 @@
 package slicetest
 
 import (
-	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -24,38 +23,41 @@ func newLog(t testing.TB, opts options) *log {
 	return &log{t: t, store: store, opts: opts}
 }
 
-// seed appends events as past history, one Save per stream in the order
-// given, and returns the global position after them.
+// seed appends events as past history, in the order given, and returns
+// the global position after them. A run of consecutive events on one
+// stream is one Save, so the global log reads exactly as given, also when
+// streams interleave.
 func (l *log) seed(events []eventsourcing.Event) uint64 {
 	l.t.Helper()
-	ctx := context.Background()
-	// Keep the given order within a stream, and save stream by stream in
-	// first-appearance order so the global log reads as written.
-	var order []string
-	byStream := map[string][]eventsourcing.Envelope{}
+	var run []eventsourcing.Envelope
+	flush := func() {
+		if len(run) == 0 {
+			return
+		}
+		if _, err := l.store.Save(l.t.Context(), run, eventsourcing.Any{}); err != nil {
+			l.t.Fatalf("slicetest: given events for stream %q: %v", run[0].StreamID, err)
+		}
+		run = nil
+	}
 	for _, ev := range events {
 		id := l.opts.streamID(ev)
-		if _, ok := byStream[id]; !ok {
-			order = append(order, id)
+		if len(run) > 0 && run[0].StreamID != id {
+			flush()
 		}
-		byStream[id] = append(byStream[id], eventsourcing.Envelope{
+		run = append(run, eventsourcing.Envelope{
 			EventID:  uuid.New(),
 			StreamID: id,
 			Event:    ev,
 			Metadata: map[string]any{},
 		})
 	}
-	for _, id := range order {
-		if _, err := l.store.Save(ctx, byStream[id], eventsourcing.Any{}); err != nil {
-			l.t.Fatalf("slicetest: given events for stream %q: %v", id, err)
-		}
-	}
+	flush()
 	return l.head()
 }
 
 func (l *log) head() uint64 {
 	l.t.Helper()
-	head, err := l.store.Head(context.Background())
+	head, err := l.store.Head(l.t.Context())
 	if err != nil {
 		l.t.Fatalf("slicetest: head: %v", err)
 	}
@@ -65,33 +67,22 @@ func (l *log) head() uint64 {
 // since returns every event recorded after position, in global order.
 func (l *log) since(position uint64) []eventsourcing.Event {
 	l.t.Helper()
-	ctx := context.Background()
-	var out []eventsourcing.Event
-	after := position
-	for {
-		res, err := l.store.ReadAll(ctx, after, eventsourcing.ReadOptions{})
-		if err != nil {
-			l.t.Fatalf("slicetest: read events: %v", err)
-		}
-		for _, env := range res.Events {
-			out = append(out, env.Event)
-		}
-		if res.AtEnd || res.Next == after {
-			return out
-		}
-		after = res.Next
+	envs := l.envelopesSince(position)
+	out := make([]eventsourcing.Event, len(envs))
+	for i, env := range envs {
+		out[i] = env.Event
 	}
+	return out
 }
 
 // envelopesSince is since with the envelopes kept, for assertions on
-// metadata.
+// version, correlation or metadata.
 func (l *log) envelopesSince(position uint64) []*eventsourcing.Envelope {
 	l.t.Helper()
-	ctx := context.Background()
 	var out []*eventsourcing.Envelope
 	after := position
 	for {
-		res, err := l.store.ReadAll(ctx, after, eventsourcing.ReadOptions{})
+		res, err := l.store.ReadAll(l.t.Context(), after, eventsourcing.ReadOptions{})
 		if err != nil {
 			l.t.Fatalf("slicetest: read events: %v", err)
 		}

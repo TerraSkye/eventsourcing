@@ -53,13 +53,16 @@ release may break the API; every break is listed under **Breaking**.
 - `slicetest`: a test kit for application code, one fixture per kind of
   slice. `Command` seeds a memory event store, handles one command and
   compares the recorded events (`Then`, `ThenRejected`, `ThenRejectedWith`,
-  `ThenError`); `View` runs a projection on memory stores, feeds it events
-  as real envelopes and waits until it is live; `New` builds a `Scenario`
-  with a memory event store, projection store, automation store and
-  command bus, so a test follows a slice across the model: `Given` events,
-  `Run` the automations to completion, `Then` the events that resulted.
-  `IgnoreFields` excludes runtime-set fields from comparisons;
-  `RecordingDispatcher` stands in for the command bus.
+  `ThenError`, and `Expect(wantErr, events...)` for table tests, with
+  `ErrRejected` for any business-rule rejection); `View` runs a projection
+  on memory stores, feeds it events as real envelopes and waits until it
+  is live; `NewScenario` builds a `Scenario` with a memory event store,
+  projection store, automation store and command bus, so a test follows a
+  slice across the model: `Given` events, `Run` the automations until
+  nothing changes, `Then` the events that resulted. Every fixture has
+  stores of its own, so table rows can run in parallel. `IgnoreFields`
+  excludes runtime-set fields from comparisons; `RecordingDispatcher`
+  stands in for the command bus.
 - `automation` segments: a list that implements `Segmented` (returning
   `Shards(n)` for fixed hash buckets written with `ShardKey`, or `Query`
   for segments discovered from the work) is leased one segment per

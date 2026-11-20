@@ -19,10 +19,12 @@ type ViewSlice struct {
 }
 
 // View starts def on memory stores and returns the slice. The projection
-// runs in the background until the test ends; Given waits for it to catch
-// up, so the read model is current when Then runs.
+// runs in the background until the test ends, polling every 10ms unless
+// def sets a PollInterval; Given waits for it to catch up, so the read
+// model is current when Then runs.
 //
-// Options: [IgnoreFields], [StreamID].
+// Options: [StreamID]. A view slice compares no events, so [IgnoreFields]
+// has no effect on it.
 func View(t testing.TB, def projection.Definition, opts ...Option) *ViewSlice {
 	t.Helper()
 	l := newLog(t, newOptions(opts))
@@ -31,11 +33,16 @@ func View(t testing.TB, def projection.Definition, opts ...Option) *ViewSlice {
 	return v
 }
 
-// startProjection runs def on reader until the test ends.
+// startProjection runs def on reader until the test ends. A def without
+// a PollInterval polls every 10ms: the memory store wakes no runner, so
+// the default of a second would be paid on every catch-up.
 func startProjection(t testing.TB, def projection.Definition, reader eventsourcing.GlobalReader) *projection.Runner {
 	t.Helper()
+	if def.PollInterval == 0 {
+		def.PollInterval = 10 * time.Millisecond
+	}
 	runner := projection.NewRunner(def, reader, memory.NewProjectionStore())
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.WithoutCancel(t.Context()))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -55,7 +62,7 @@ func startProjection(t testing.TB, def projection.Definition, reader eventsourci
 // waitLive blocks until runner has applied everything up to position.
 func waitLive(t testing.TB, runner *projection.Runner, position uint64) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	if err := runner.WaitUntil(ctx, position); err != nil {
 		t.Fatalf("slicetest: projection %q did not reach position %d: %v", runner.Name(), position, err)

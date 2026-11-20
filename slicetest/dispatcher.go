@@ -41,7 +41,8 @@ func (d *RecordingDispatcher) Reject(commandType string, err error) {
 }
 
 // Respond sets a function that answers every command without a scripted
-// rejection, for tests that need a result or a per-command decision.
+// rejection, for tests that need a result or a per-command decision. fn
+// may be called concurrently and may call the dispatcher's methods.
 func (d *RecordingDispatcher) Respond(fn func(eventsourcing.Command) (eventsourcing.AppendResult, error)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -51,15 +52,18 @@ func (d *RecordingDispatcher) Respond(fn func(eventsourcing.Command) (eventsourc
 // Dispatch implements eventsourcing.Dispatcher.
 func (d *RecordingDispatcher) Dispatch(_ context.Context, cmd eventsourcing.Command) (eventsourcing.AppendResult, error) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.commands = append(d.commands, cmd)
-	if err, ok := d.results[cmd.CommandType()]; ok {
+	err, rejected := d.results[cmd.CommandType()]
+	fallback := d.fallback
+	d.mu.Unlock()
+	if rejected {
 		return eventsourcing.AppendResult{}, err
 	}
-	if d.fallback != nil {
-		return d.fallback(cmd)
+	if fallback != nil {
+		// Called unlocked, so fn may inspect the dispatcher.
+		return fallback(cmd)
 	}
-	return eventsourcing.AppendResult{Successful: true}, nil
+	return eventsourcing.AppendResult{}, nil
 }
 
 // Dispatched returns the commands received so far, in order.

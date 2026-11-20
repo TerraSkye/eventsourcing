@@ -10,12 +10,43 @@
 // [Command] builds a handler on a memory event store, seeds it with past
 // events, sends one command, and compares the events it recorded:
 //
-//	slicetest.Command(t, createtask.Handler).
+//	slicetest.Command(t, createtask.NewHandler).
 //		Given(&events.TaskCreated{TaskID: id, Title: "Write docs"}).
 //		When(createtask.CreateTask{TaskID: id, Title: "Write docs"}).
 //		ThenRejected()
 //
 // The handler folds the state itself, so the test touches nothing private.
+//
+// # Table tests
+//
+// Most slice tests are tables: one row per case, each with its own
+// history, command and expected outcome. [Outcome.Expect] takes the
+// expected error and events of a row in one call, so the loop body is the
+// same for a success, a rejection and an infrastructure error:
+//
+//	tests := []struct {
+//		name    string
+//		given   []eventsourcing.Event
+//		when    createtask.CreateTask
+//		wantErr error
+//		want    []eventsourcing.Event
+//	}{
+//		{name: "creates", when: create, want: []eventsourcing.Event{&events.TaskCreated{TaskID: id, Title: "Write docs"}}},
+//		{name: "duplicate", given: []eventsourcing.Event{&events.TaskCreated{TaskID: id}}, when: create, wantErr: slicetest.ErrRejected},
+//	}
+//	for _, tt := range tests {
+//		t.Run(tt.name, func(t *testing.T) {
+//			t.Parallel()
+//			slicetest.Command(t, createtask.NewHandler).
+//				Given(tt.given...).
+//				When(tt.when).
+//				Expect(tt.wantErr, tt.want...)
+//		})
+//	}
+//
+// Every fixture is built on the t it is given, with stores of its own, so
+// rows share nothing and may run in parallel. Given, Then and Expect take
+// a nil slice as "nothing", so empty columns need no special case.
 //
 // # View slices
 //
@@ -38,9 +69,9 @@
 // automation runs once, its commands are handled, and the resulting
 // events are compared.
 //
-//	s := slicetest.New(t)
+//	s := slicetest.NewScenario(t, slicetest.IgnoreFields("ArchivedAt"))
 //	todo := s.Projection(taskstoarchive.NewProjection(list))
-//	slicetest.Handle(s, archivetask.Handler(s.Store()))
+//	slicetest.Handle(s, archivetask.NewHandler(s.Store()))
 //	slicetest.Automation(s, archivetasks.New(list, todo, s.Bus()).Definition())
 //
 //	s.Given(&events.TaskCompleted{TaskID: id, CompletedAt: eightDaysAgo})
@@ -52,7 +83,8 @@
 //
 // # Comparing events
 //
-// Then compares events by type and exported fields. Fields a handler
+// Then compares events by type and exported fields; *T and T compare as
+// the same type. Fields a handler
 // fills in at runtime, a timestamp or a generated id, are excluded with
 // [IgnoreFields]; anything else is a custom check on [Outcome.Events].
 //

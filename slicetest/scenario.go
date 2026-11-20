@@ -2,6 +2,7 @@ package slicetest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 // Scenario wires the pieces a slice crosses: a memory event store, a
 // projection store, an automation store and a command bus. Projections
 // run in the background; automations run to completion on [Scenario.Run];
-// command handlers answer the bus. Build one with [New].
+// command handlers answer the bus. Build one with [NewScenario].
 //
-//	s := slicetest.New(t)
+//	s := slicetest.NewScenario(t, slicetest.IgnoreFields("ArchivedAt"))
 //	todo := s.Projection(taskstoarchive.NewProjection(list))
-//	slicetest.Handle(s, archivetask.Handler(s.Store()))
+//	slicetest.Handle(s, archivetask.NewHandler(s.Store()))
 //	slicetest.Automation(s, archivetasks.New(list, todo, s.Bus()).Definition())
 //
 //	s.Given(&events.TaskCompleted{TaskID: id, CompletedAt: eightDaysAgo})
@@ -30,17 +31,27 @@ type Scenario struct {
 	bus         *eventsourcing.CommandBus
 	autoStore   *memory.AutomationStore
 	projections []*projection.Runner
-	automations []func(ctx context.Context) (automation.Summary, error)
+	automations []scenarioAutomation
 	since       uint64
 
-	// MaxRounds bounds Scenario.Run: each round waits for the projections,
-	// runs every automation once, and stops when a round changed nothing.
+	// MaxRounds bounds Scenario.Run: each round waits for the projections
+	// and runs every automation once, and Run stops when a round changed
+	// nothing. A scenario still changing after MaxRounds fails the test.
 	// Default 10.
 	MaxRounds int
 }
 
-// New builds an empty scenario. Options: [IgnoreFields], [StreamID].
-func New(t testing.TB, opts ...Option) *Scenario {
+type scenarioAutomation struct {
+	name    string
+	runOnce func(ctx context.Context) (automation.Summary, error)
+}
+
+// NewScenario builds an empty scenario. Options: [IgnoreFields],
+// [StreamID].
+//
+// Every fixture is built on the test it is given, so a table test builds
+// one scenario per row, inside t.Run, and its rows may run in parallel.
+func NewScenario(t testing.TB, opts ...Option) *Scenario {
 	t.Helper()
 	bus := eventsourcing.NewCommandBus(64, 4)
 	t.Cleanup(bus.Stop)
@@ -69,8 +80,9 @@ func Handle[C eventsourcing.Command](s *Scenario, handler eventsourcing.CommandH
 }
 
 // Projection starts def on the scenario's stores and returns its runner,
-// which is what an automation's Definition.Projection takes. Given and Run
-// wait for every projection to catch up.
+// which is what an automation's Definition.Projection takes. It polls
+// every 10ms unless def sets a PollInterval. Given and Run wait for every
+// projection to catch up.
 func (s *Scenario) Projection(def projection.Definition) *projection.Runner {
 	s.t.Helper()
 	r := startProjection(s.t, def, s.log.store)
@@ -79,9 +91,9 @@ func (s *Scenario) Projection(def projection.Definition) *projection.Runner {
 }
 
 // Automation adds def to the scenario. Its Store defaults to the
-// scenario's automation store; its Projection must be a runner from
-// [Scenario.Projection]. The automation does not run in the background:
-// [Scenario.Run] runs it to completion.
+// scenario's automation store and its PollInterval to 10ms; its
+// Projection must be a runner from [Scenario.Projection]. The automation
+// does not run in the background: [Scenario.Run] runs it to completion.
 func Automation[T any](s *Scenario, def automation.Definition[T]) {
 	s.t.Helper()
 	if def.Store == nil && def.Scheduler == nil {
@@ -91,7 +103,7 @@ func Automation[T any](s *Scenario, def automation.Definition[T]) {
 		def.PollInterval = 10 * time.Millisecond
 	}
 	runner := automation.NewRunner(def)
-	s.automations = append(s.automations, runner.RunOnce)
+	s.automations = append(s.automations, scenarioAutomation{name: def.Name, runOnce: runner.RunOnce})
 }
 
 // Given records events as history and waits for every projection to
@@ -113,23 +125,31 @@ func (s *Scenario) catchUp() {
 }
 
 // Run lets the model react: projections catch up, every automation runs
-// once, their commands are handled, and the round repeats until nothing
-// changed, or MaxRounds is reached. It returns the summaries of the last
-// round, one per automation in the order they were added.
+// once, their commands are handled, and the round repeats until a round
+// changes nothing. It returns the summaries of the last round, one per
+// automation in the order they were added.
+//
+// It fails the test when the scenario still changes after MaxRounds, or
+// when one automation's run does not finish within 10 seconds, which
+// happens when its todo list keeps handing out the same work.
 func (s *Scenario) Run() []automation.Summary {
 	s.t.Helper()
 	var last []automation.Summary
-	for round := 0; round < s.MaxRounds; round++ {
+	for range s.MaxRounds {
 		s.catchUp()
 		before := s.log.head()
 		last = last[:0]
 		moved := false
-		for i, run := range s.automations {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			sum, err := run(ctx)
+		for _, a := range s.automations {
+			ctx, cancel := context.WithTimeout(s.t.Context(), 10*time.Second)
+			sum, err := a.runOnce(ctx)
 			cancel()
+			if errors.Is(err, context.DeadlineExceeded) {
+				s.t.Fatalf("slicetest: automation %q did not finish its run within 10s; "+
+					"does its todo list drop items once they are worked?", a.name)
+			}
 			if err != nil {
-				s.t.Fatalf("slicetest: automation %d: %v", i, err)
+				s.t.Fatalf("slicetest: automation %q: %v", a.name, err)
 			}
 			last = append(last, sum)
 			if sum.Processed > 0 || sum.Failed > 0 || sum.Deferred > 0 {
@@ -141,6 +161,8 @@ func (s *Scenario) Run() []automation.Summary {
 			return last
 		}
 	}
+	s.t.Fatalf("slicetest: scenario still changing after %d rounds; raise MaxRounds "+
+		"if that is expected, or look for automations that keep triggering each other", s.MaxRounds)
 	return last
 }
 
@@ -178,7 +200,7 @@ func (s *Scenario) Envelopes() []*eventsourcing.Envelope {
 // error.
 func (s *Scenario) Dispatch(cmd eventsourcing.Command) error {
 	s.t.Helper()
-	_, err := s.bus.Dispatch(context.Background(), cmd)
+	_, err := s.bus.Dispatch(s.t.Context(), cmd)
 	s.catchUp()
 	return err
 }

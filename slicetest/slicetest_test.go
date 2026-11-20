@@ -242,7 +242,7 @@ func TestView_ReadModelAfterEvents(t *testing.T) {
 // --- scenario ---
 
 func TestScenario_AutomationResetsCounterAtLimit(t *testing.T) {
-	s := slicetest.New(t)
+	s := slicetest.NewScenario(t)
 	view := newTotals(10)
 	todo := s.Projection(view.projection())
 	slicetest.Handle(s, incrementHandler(s.Store()))
@@ -258,7 +258,7 @@ func TestScenario_AutomationResetsCounterAtLimit(t *testing.T) {
 }
 
 func TestScenario_NothingHappensBelowTheLimit(t *testing.T) {
-	s := slicetest.New(t)
+	s := slicetest.NewScenario(t)
 	view := newTotals(10)
 	todo := s.Projection(view.projection())
 	slicetest.Handle(s, resetHandler(s.Store()))
@@ -270,7 +270,7 @@ func TestScenario_NothingHappensBelowTheLimit(t *testing.T) {
 }
 
 func TestScenario_DispatchThroughTheBus(t *testing.T) {
-	s := slicetest.New(t, slicetest.IgnoreFields("At"))
+	s := slicetest.NewScenario(t, slicetest.IgnoreFields("At"))
 	slicetest.Handle(s, incrementHandler(s.Store()))
 
 	if err := s.Dispatch(Increment{CounterID: "c1", By: 2}); err != nil {
@@ -285,10 +285,10 @@ func TestRecordingDispatcher(t *testing.T) {
 	bus := slicetest.NewRecordingDispatcher()
 	bus.Reject("ResetCounter", eventsourcing.NewBusinessRuleViolation(errors.New("already reset")))
 
-	if _, err := bus.Dispatch(context.Background(), Increment{CounterID: "c1", By: 1}); err != nil {
+	if _, err := bus.Dispatch(t.Context(), Increment{CounterID: "c1", By: 1}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := bus.Dispatch(context.Background(), ResetCounter{CounterID: "c1"})
+	_, err := bus.Dispatch(t.Context(), ResetCounter{CounterID: "c1"})
 	var rejected *eventsourcing.BusinessRuleViolationError
 	if !errors.As(err, &rejected) {
 		t.Fatalf("err = %v, want a business rule violation", err)
@@ -312,6 +312,249 @@ func (f *fakeT) Fatalf(format string, args ...any) {
 	panic(stop{})
 }
 
+func (f *fakeT) Fatal(args ...any) {
+	f.failed = true
+	f.msg = fmt.Sprint(args...)
+	panic(stop{})
+}
+
 func (f *fakeT) Helper() {}
 
 type stop struct{}
+
+// failure runs fn on a fakeT and returns the message it failed with, or
+// "" when it passed.
+func failure(t *testing.T, fn func(tb testing.TB)) string {
+	t.Helper()
+	ft := &fakeT{TB: t}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if _, ok := r.(stop); !ok {
+					panic(r)
+				}
+			}
+		}()
+		fn(ft)
+	}()
+	return ft.msg
+}
+
+// --- table tests ---
+
+// TestCommand_Table covers the shape most slice tests take: one row per
+// case, each with its own history, command and expected outcome, in
+// parallel subtests on fixtures of their own.
+func TestCommand_Table(t *testing.T) {
+	tests := []struct {
+		name    string
+		given   []eventsourcing.Event
+		when    Increment
+		wantErr error
+		want    []eventsourcing.Event
+	}{
+		{
+			name: "first increment",
+			when: Increment{CounterID: "c1", By: 3},
+			want: []eventsourcing.Event{&Incremented{CounterID: "c1", By: 3}},
+		},
+		{
+			name:  "on top of history",
+			given: []eventsourcing.Event{&Incremented{CounterID: "c1", By: 2}, &Incremented{CounterID: "c2", By: 5}},
+			when:  Increment{CounterID: "c1", By: 1},
+			want:  []eventsourcing.Event{&Incremented{CounterID: "c1", By: 1}},
+		},
+		{
+			name:    "zero is rejected with its cause",
+			when:    Increment{CounterID: "c1", By: 0},
+			wantErr: errNonPositive,
+		},
+		{
+			name:    "negative is rejected",
+			given:   []eventsourcing.Event{&Incremented{CounterID: "c1", By: 2}},
+			when:    Increment{CounterID: "c1", By: -1},
+			wantErr: slicetest.ErrRejected,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			slicetest.Command(t, incrementHandler, slicetest.IgnoreFields("At")).
+				Given(tt.given...).
+				When(tt.when).
+				Expect(tt.wantErr, tt.want...)
+		})
+	}
+}
+
+// TestScenario_Table covers a table of scenarios: each row wires its own
+// scenario, so rows share nothing and run in parallel.
+func TestScenario_Table(t *testing.T) {
+	tests := []struct {
+		name  string
+		given []eventsourcing.Event
+		want  []eventsourcing.Event
+	}{
+		{name: "below the limit", given: []eventsourcing.Event{&Incremented{CounterID: "c1", By: 4}}},
+		{
+			name:  "at the limit",
+			given: []eventsourcing.Event{&Incremented{CounterID: "c1", By: 6}, &Incremented{CounterID: "c1", By: 4}},
+			want:  []eventsourcing.Event{&CounterReset{CounterID: "c1"}},
+		},
+		{
+			name: "two counters over the limit",
+			given: []eventsourcing.Event{
+				&Incremented{CounterID: "c1", By: 10},
+				&Incremented{CounterID: "c2", By: 3},
+				&Incremented{CounterID: "c3", By: 12},
+			},
+			want: []eventsourcing.Event{&CounterReset{CounterID: "c1"}, &CounterReset{CounterID: "c3"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := slicetest.NewScenario(t)
+			view := newTotals(10)
+			todo := s.Projection(view.projection())
+			slicetest.Handle(s, resetHandler(s.Store()))
+			slicetest.Automation(s, resetAutomation(view, todo, s.Bus()))
+
+			s.Given(tt.given...)
+			s.Run()
+			s.Then(tt.want...)
+		})
+	}
+}
+
+// TestCommand_ExpectChecksErrorAndEvents covers that Expect fails when
+// either half of the outcome differs from the row: the error or the
+// recorded events.
+func TestCommand_ExpectChecksErrorAndEvents(t *testing.T) {
+	tests := []struct {
+		name    string
+		when    Increment
+		wantErr error
+		want    []eventsourcing.Event
+		failure string
+	}{
+		{name: "want success, got rejection", when: Increment{CounterID: "c1"}, failure: "command failed"},
+		{name: "want rejection, got success", when: Increment{CounterID: "c1", By: 1}, wantErr: slicetest.ErrRejected, failure: "not rejected"},
+		{name: "want other cause", when: Increment{CounterID: "c1"}, wantErr: errors.New("other"), failure: "want it to wrap"},
+		{name: "want other events", when: Increment{CounterID: "c1", By: 1}, want: []eventsourcing.Event{&Incremented{CounterID: "c1", By: 2}}, failure: "recorded events differ"},
+		{name: "want nothing, got events", when: Increment{CounterID: "c1", By: 1}, failure: "unexpected"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := failure(t, func(tb testing.TB) {
+				slicetest.Command(tb, incrementHandler, slicetest.IgnoreFields("At")).
+					When(tt.when).
+					Expect(tt.wantErr, tt.want...)
+			})
+			if !strings.Contains(msg, tt.failure) {
+				t.Fatalf("failure = %q, want it to mention %q", msg, tt.failure)
+			}
+		})
+	}
+}
+
+// TestCommand_ThenErrorRequiresAnInfrastructureError covers that
+// ThenError passes for an infrastructure error and fails for a
+// business-rule rejection, even one that wraps the target.
+func TestCommand_ThenErrorRequiresAnInfrastructureError(t *testing.T) {
+	errDown := errors.New("store down")
+	handler := func(err error) func(eventsourcing.EventStore) eventsourcing.CommandHandler[Increment] {
+		return func(eventsourcing.EventStore) eventsourcing.CommandHandler[Increment] {
+			return func(context.Context, Increment) (eventsourcing.AppendResult, error) {
+				return eventsourcing.AppendResult{}, err
+			}
+		}
+	}
+	slicetest.Command(t, handler(fmt.Errorf("save: %w", errDown))).
+		When(Increment{CounterID: "c1", By: 1}).
+		ThenError(errDown)
+
+	msg := failure(t, func(tb testing.TB) {
+		slicetest.Command(tb, handler(eventsourcing.NewBusinessRuleViolation(errDown))).
+			When(Increment{CounterID: "c1", By: 1}).
+			ThenError(errDown)
+	})
+	if !strings.Contains(msg, "rejected by a business rule") {
+		t.Fatalf("failure = %q, want ThenError to fail on a rejection", msg)
+	}
+}
+
+// TestGiven_KeepsTheOrderAcrossStreams covers that given events land in
+// the global log exactly in the order given, also when streams
+// interleave, and each stream's versions count up from 1.
+func TestGiven_KeepsTheOrderAcrossStreams(t *testing.T) {
+	out := slicetest.Command(t, incrementHandler).
+		Given(
+			&Incremented{CounterID: "a", By: 1},
+			&Incremented{CounterID: "b", By: 2},
+			&Incremented{CounterID: "a", By: 3},
+		)
+	res, err := out.Store().(eventsourcing.GlobalReader).ReadAll(t.Context(), 0, eventsourcing.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, env := range res.Events {
+		got = append(got, fmt.Sprintf("%s/%d:%d", env.StreamID, env.Version, env.Event.(*Incremented).By))
+	}
+	if want := "a/1:1 b/1:2 a/2:3"; strings.Join(got, " ") != want {
+		t.Fatalf("global log = %v, want %s", got, want)
+	}
+}
+
+// TestScenario_RunFailsWhenItDoesNotSettle covers that Run fails the test
+// when automations still do work after MaxRounds, instead of returning as
+// if the scenario had settled.
+func TestScenario_RunFailsWhenItDoesNotSettle(t *testing.T) {
+	msg := failure(t, func(tb testing.TB) {
+		s := slicetest.NewScenario(tb)
+		s.MaxRounds = 3
+		view := newTotals(10)
+		slicetest.Automation(s, automation.Definition[string]{
+			Name:       "restless",
+			TodoList:   &oneEachRun{},
+			Projection: s.Projection(view.projection()),
+			Work:       func(context.Context, string) error { return nil },
+		})
+		s.Run()
+	})
+	if !strings.Contains(msg, "still changing after 3 rounds") {
+		t.Fatalf("failure = %q, want Run to fail after MaxRounds", msg)
+	}
+}
+
+// oneEachRun hands out one item on every other Claim: one per RunOnce, so
+// every round does work.
+type oneEachRun struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (l *oneEachRun) Claim(context.Context, automation.ClaimRequest) ([]string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n++
+	if l.n%2 == 1 {
+		return []string{"x"}, nil
+	}
+	return nil, nil
+}
+
+// TestRecordingDispatcher_RespondMayUseTheDispatcher covers that the
+// Respond function is called without the dispatcher's lock, so it can
+// inspect what was dispatched.
+func TestRecordingDispatcher_RespondMayUseTheDispatcher(t *testing.T) {
+	bus := slicetest.NewRecordingDispatcher()
+	bus.Respond(func(eventsourcing.Command) (eventsourcing.AppendResult, error) {
+		return eventsourcing.AppendResult{NextExpectedVersion: uint64(len(bus.Dispatched()))}, nil
+	})
+	res, err := bus.Dispatch(t.Context(), Increment{CounterID: "c1", By: 1})
+	if err != nil || res.NextExpectedVersion != 1 {
+		t.Fatalf("Dispatch = %+v, %v; want version 1", res, err)
+	}
+}

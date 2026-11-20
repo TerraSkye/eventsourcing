@@ -4,22 +4,59 @@ The `slicetest` package gives each kind of slice one test shape, over the
 public API and the memory stores: `slicetest.Command` for a command
 handler (given events, when a command, then events or a rejection),
 `slicetest.View` for a projection (given events, then the read model), and
-`slicetest.New` for a scenario that crosses slices (given events, run the
-automations, then the events they caused). The sections below show the
-same tests written by hand, which is still right when a test needs
-something the fixtures do not cover.
+`slicetest.NewScenario` for a scenario that crosses slices (given events,
+run the automations, then the events they caused). The sections below
+show the same tests written by hand, which is still right when a test
+needs something the fixtures do not cover.
+
+A command slice is usually a table: one row per case. `Expect` takes a
+row's expected error and events in one call. A nil error means success,
+`slicetest.ErrRejected` any business-rule rejection, and any other error
+must be in the handler's error chain. The events must match exactly,
+none when the column is empty. Each row builds its own fixture, so rows
+can run in parallel.
 
 ```go
-func TestCreateTask_RejectsDuplicate(t *testing.T) {
+func TestCreateTask(t *testing.T) {
     id := uuid.New()
-    slicetest.Command(t, createtask.NewHandler).
-        Given(&events.TaskCreated{TaskID: id, Title: "Write docs"}).
-        When(createtask.CreateTask{TaskID: id, Title: "Write docs"}).
-        ThenRejected()
+    create := createtask.CreateTask{TaskID: id, Title: "Write docs"}
+    tests := []struct {
+        name    string
+        given   []eventsourcing.Event
+        when    createtask.CreateTask
+        wantErr error
+        want    []eventsourcing.Event
+    }{
+        {
+            name: "creates the task",
+            when: create,
+            want: []eventsourcing.Event{&events.TaskCreated{TaskID: id, Title: "Write docs"}},
+        },
+        {
+            name:    "rejects a duplicate",
+            given:   []eventsourcing.Event{&events.TaskCreated{TaskID: id, Title: "Write docs"}},
+            when:    create,
+            wantErr: slicetest.ErrRejected,
+        },
+        {
+            name:    "rejects an empty title",
+            when:    createtask.CreateTask{TaskID: id},
+            wantErr: slicetest.ErrRejected,
+        },
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            t.Parallel()
+            slicetest.Command(t, createtask.NewHandler, slicetest.IgnoreFields("CreatedAt")).
+                Given(tt.given...).
+                When(tt.when).
+                Expect(tt.wantErr, tt.want...)
+        })
+    }
 }
 
 func TestArchiveTasks_ArchivesAfterSevenDays(t *testing.T) {
-    s := slicetest.New(t)
+    s := slicetest.NewScenario(t, slicetest.IgnoreFields("ArchivedAt"))
     list := taskstoarchive.NewTasksToArchive(7 * 24 * time.Hour)
     todo := s.Projection(taskstoarchive.NewProjection(list))
     slicetest.Handle(s, archivetask.NewHandler(s.Store()))
