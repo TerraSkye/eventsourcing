@@ -44,11 +44,11 @@ jobs:
           fi
 
       - name: Vet
-        run: go vet ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+        run: go vet ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/... ./examples/dashboard/...
 
       - name: Vet the integration tests and benchmarks
         # They build only under these tags, so the step above skips them.
-        run: go vet -tags=integration,bench ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/...
+        run: go vet -tags=integration,bench ./... ./postgres/... ./kurrentdb/... ./telemetry/... ./sqlite/... ./examples/todolist/... ./examples/dashboard/...
 
   root-minimum-go:
     # The root module promises to build on the Go version in its go.mod, so a
