@@ -138,8 +138,10 @@ Each item runs in a `process item` span, tagged with
 `eventsourcing.automation.name`. When the work dispatches a command through a bus with
 `telemetry.CommandTelemetry`, the command's span is its child. Work that
 returns `automation.Deferred` adds a `segment_deferred` event to the span,
-with the time the segment is paused until as
-`eventsourcing.automation.deferred_until` when the deferral names one.
+with the time the deferral asked for as
+`eventsourcing.automation.deferred_until` when it names one. The scheduler
+may pause the segment longer; `Summary.NextEligible` reports the pause it
+applied.
 Work that returns its context's cancellation while the run is stopping is
 recorded as `canceled`, which the runner does not count. Pausing and
 resuming from the dashboard are `pause automation` and `resume automation`
